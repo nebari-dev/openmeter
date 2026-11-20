@@ -51,6 +51,7 @@ type Configuration struct {
 	Billing            BillingConfiguration
 	Apps               AppsConfiguration
 	Svix               SvixConfig
+	Secret             SecretConfiguration
 	TaxCode            TaxCodeConfiguration
 	FeatureGate        FeatureGateConfiguration
 	UnitConfig         UnitConfigConfiguration
@@ -140,6 +141,10 @@ func (c Configuration) Validate() error {
 
 	if err := c.Svix.Validate(); err != nil {
 		errs = append(errs, errorsx.WithPrefix(err, "svix"))
+	}
+
+	if err := c.Secret.Validate(); err != nil {
+		errs = append(errs, errorsx.WithPrefix(err, "secret"))
 	}
 
 	if err := c.ProductCatalog.Validate(); err != nil {
@@ -232,6 +237,7 @@ func SetViperDefaults(v *viper.Viper, flags *pflag.FlagSet) {
 	ConfigureBilling(v, flags)
 	ConfigureProductCatalog(v)
 	ConfigureApps(v, flags)
+	ConfigureSecret(v)
 	ConfigureEntitlements(v, flags)
 	ConfigureTermination(v, "termination")
 	ConfigureServer(v, "server")

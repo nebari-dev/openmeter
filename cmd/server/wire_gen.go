@@ -445,7 +445,8 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	secretserviceService, err := common.NewUnsafeSecretService(logger, client)
+	secretConfiguration := conf.Secret
+	secretserviceService, err := common.NewSecretService(secretConfiguration)
 	if err != nil {
 		cleanup8()
 		cleanup7()
