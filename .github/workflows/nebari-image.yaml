@@ -1,0 +1,40 @@
+name: Nebari image
+
+# Builds OpenMeter with app secrets (such as Stripe API keys) encrypted at
+# rest, published as ghcr.io/nebari-dev/openmeter/openmeter:sha-<short sha>.
+on:
+  push:
+    branches: [encrypted-secrets]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - run: go test ./openmeter/secret/... ./app/config/... ./app/common/...
+
+  image:
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: nebari-dev/.github/.github/workflows/pack-build-image.yaml@ddc8bd9f17cf1d6844bc2b5fb52825ed70f1a688 # v1
+    with:
+      image: openmeter
+      context: "."
+    secrets:
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
