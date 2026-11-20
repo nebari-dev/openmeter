@@ -642,7 +642,7 @@ func TestListRules_MixedTypeSpellingsAcrossPages(t *testing.T) {
 			if stage.direction != "" {
 				migration, err := fs.ReadFile(migrate.OMMigrationsConfig.FS, path.Join(
 					migrate.OMMigrationsConfig.FSPath,
-					"20261119133042_notification_event_type_normalization."+stage.direction+".sql",
+					"20261119140200_notification_event_type_normalization."+stage.direction+".sql",
 				))
 				require.NoError(t, err)
 
