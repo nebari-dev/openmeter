@@ -10,7 +10,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/models/externalid"
@@ -49,7 +49,7 @@ func (a *adapter) GetStandardInvoiceById(ctx context.Context, in billing.GetStan
 			WithBillingInvoiceValidationIssues(func(q *db.BillingInvoiceValidationIssueQuery) {
 				q.Where(billinginvoicevalidationissue.DeletedAtIsNil())
 			}).
-			WithBillingWorkflowConfig(workflowConfigWithTaxCode(in.Invoice.Namespace))
+			WithBillingWorkflowConfig(workflowConfigInNamespace(in.Invoice.Namespace))
 
 		if in.Expand.Has(billing.StandardInvoiceExpandLines) {
 			query = tx.expandInvoiceLineItems(query, in.Expand, in.Invoice.Namespace)
@@ -129,12 +129,11 @@ func (a *adapter) ListInvoices(ctx context.Context, input billing.ListInvoicesAd
 	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, tx *adapter) (billing.ListInvoicesResponse, error) {
 		// Note: we are not filtering for deleted invoices here (as in deleted_at is not nil), as we have the deleted
 		// status that we can use to filter for.
-
 		query := tx.db.BillingInvoice.Query().
 			WithBillingInvoiceValidationIssues(func(q *db.BillingInvoiceValidationIssueQuery) {
 				q.Where(billinginvoicevalidationissue.DeletedAtIsNil())
 			}).
-			WithBillingWorkflowConfig(workflowConfigWithTaxCode(input.Namespace)).
+			WithBillingWorkflowConfig(workflowConfigInNamespace(input.Namespace)).
 			Where(billinginvoice.Namespace(input.Namespace))
 
 		query = filter.ApplyToQuery(query, input.CustomerID, billinginvoice.FieldCustomerID)
@@ -219,21 +218,23 @@ func (a *adapter) ListInvoices(ctx context.Context, input billing.ListInvoicesAd
 		}
 
 		switch input.OrderBy {
-		case api.InvoiceOrderByCustomerName:
+		case apiv1models.InvoiceOrderByCustomerName:
 			query = query.Order(billinginvoice.ByCustomerName(order...))
-		case api.InvoiceOrderByIssuedAt:
+		case apiv1models.InvoiceOrderByIssuedAt:
 			query = query.Order(billinginvoice.ByIssuedAt(order...))
-		case api.InvoiceOrderByPeriodStart:
+		case apiv1models.InvoiceOrderByPeriodStart:
 			query = query.Order(billinginvoice.ByPeriodStart(order...))
-		case api.InvoiceOrderByStatus:
+		case apiv1models.InvoiceOrderByStatus:
 			query = query.Order(billinginvoice.ByStatus(order...))
-		case api.InvoiceOrderByUpdatedAt:
+		case apiv1models.InvoiceOrderByUpdatedAt:
 			query = query.Order(billinginvoice.ByUpdatedAt(order...))
-		case api.InvoiceOrderByCreatedAt:
+		case apiv1models.InvoiceOrderByCreatedAt:
 			fallthrough
 		default:
 			query = query.Order(billinginvoice.ByCreatedAt(order...))
 		}
+
+		query = query.Order(billinginvoice.ByID(order...))
 
 		response := pagination.Result[billing.Invoice]{
 			Page: input.Page,
@@ -248,13 +249,14 @@ func (a *adapter) ListInvoices(ctx context.Context, input billing.ListInvoicesAd
 		for _, invoice := range paged.Items {
 			switch invoice.Status {
 			case billing.StandardInvoiceStatusGathering:
-				mapped, err := tx.mapGatheringInvoiceFromDB(ctx, invoice, billing.GatheringInvoiceExpands{}.
+				mapped, err := tx.mapGatheringInvoiceFromDB(invoice, billing.GatheringInvoiceExpands{}.
 					SetOrUnsetIf(input.Expand.Has(billing.InvoiceExpandLines), billing.GatheringInvoiceExpandLines).
 					SetOrUnsetIf(input.Expand.Has(billing.InvoiceExpandDeletedLines), billing.GatheringInvoiceExpandDeletedLines),
 				)
 				if err != nil {
 					return response, err
 				}
+
 				result = append(result, billing.NewInvoice(mapped))
 			default:
 				mapped, err := tx.mapStandardInvoiceFromDB(ctx, invoice, billing.StandardInvoiceExpands{}.
@@ -291,11 +293,6 @@ func (a *adapter) CreateInvoice(ctx context.Context, input billing.CreateInvoice
 			return billing.CreateInvoiceAdapterRespone{}, fmt.Errorf("clone workflow config: %w", err)
 		}
 
-		currentSchemaLevel, err := tx.GetInvoiceDefaultSchemaLevel(ctx)
-		if err != nil {
-			return billing.CreateInvoiceAdapterRespone{}, fmt.Errorf("get invoice write schema level: %w", err)
-		}
-
 		createMut := tx.db.BillingInvoice.Create().
 			SetNamespace(input.Namespace).
 			SetMetadata(input.Metadata).
@@ -327,7 +324,7 @@ func (a *adapter) CreateInvoice(ctx context.Context, input billing.CreateInvoice
 			SetSupplierName(supplier.Name).
 			SetNillableSupplierTaxCode(supplier.TaxCode).
 			SetNillableCollectionAt(normalizeOptionalTime(input.CollectionAt)).
-			SetSchemaLevel(currentSchemaLevel)
+			SetSchemaLevel(billing.CurrentInvoiceSchemaLevel)
 
 		createMut = totals.Set(createMut, input.Totals)
 
@@ -342,9 +339,11 @@ func (a *adapter) CreateInvoice(ctx context.Context, input billing.CreateInvoice
 				SetNillableCustomerAddressLine2(customer.BillingAddress.Line2).
 				SetNillableCustomerAddressPhoneNumber(customer.BillingAddress.PhoneNumber)
 		}
+
 		if usageAttr := mapCustomerUsageAttributionToDB(input.Customer); usageAttr != nil {
 			createMut = createMut.SetCustomerUsageAttribution(usageAttr)
 		}
+
 		createMut = createMut.
 			SetCustomerName(customer.Name)
 
@@ -430,14 +429,22 @@ func (a *adapter) validateUpdateRequest(req billing.UpdateStandardInvoiceAdapter
 
 // UpdateInvoice updates the specified invoice.
 func (a *adapter) UpdateStandardInvoice(ctx context.Context, in billing.UpdateStandardInvoiceAdapterInput) (billing.StandardInvoice, error) {
+	if in.SchemaLevel != billing.CurrentInvoiceSchemaLevel {
+		return in, fmt.Errorf("unsupported invoice schema level: %d", in.SchemaLevel)
+	}
+
 	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, tx *adapter) (billing.StandardInvoice, error) {
 		existingInvoice, err := tx.db.BillingInvoice.Query().
 			Where(billinginvoice.ID(in.ID)).
 			Where(billinginvoice.Namespace(in.Namespace)).
-			WithBillingWorkflowConfig(workflowConfigWithTaxCode(in.Namespace)).
+			WithBillingWorkflowConfig(workflowConfigInNamespace(in.Namespace)).
 			Only(ctx)
 		if err != nil {
 			return in, err
+		}
+
+		if existingInvoice.SchemaLevel != billing.CurrentInvoiceSchemaLevel {
+			return in, fmt.Errorf("unsupported invoice schema level: %d", existingInvoice.SchemaLevel)
 		}
 
 		if err := tx.validateUpdateRequest(in, existingInvoice); err != nil {
@@ -460,6 +467,8 @@ func (a *adapter) UpdateStandardInvoice(ctx context.Context, in billing.UpdateSt
 			SetOrClearIssuedAt(convert.SafeToUTC(in.IssuedAt)).
 			SetOrClearDeletedAt(convert.SafeToUTC(in.DeletedAt)).
 			SetOrClearDeletionSource(lo.EmptyableToPtr(in.DeletionSource)).
+			SetOrClearInvoicingAppOutcome(lo.EmptyableToPtr(in.InvoicingAppStatus.Outcome)).
+			SetOrClearInvoicingAppOutcomeReason(lo.EmptyableToPtr(in.InvoicingAppStatus.Reason)).
 			SetOrClearSentToCustomerAt(convert.SafeToUTC(in.SentToCustomerAt)).
 			SetOrClearQuantitySnapshotedAt(convert.SafeToUTC(in.QuantitySnapshotedAt))
 
@@ -545,12 +554,10 @@ func (a *adapter) UpdateStandardInvoice(ctx context.Context, in billing.UpdateSt
 			// we don't support moving lines between invoices here, as the cross invoice
 			// coordination is not something the adapter should deal with. The service
 			// is needed to lock and recalculate both invoices or do the necessary splits.
-
 			lines, err := tx.UpsertInvoiceLines(ctx, billing.UpsertInvoiceLinesAdapterInput{
-				Namespace:   in.Namespace,
-				Lines:       in.Lines.OrEmpty(),
-				SchemaLevel: in.SchemaLevel,
-				InvoiceID:   in.ID,
+				Namespace: in.Namespace,
+				Lines:     in.Lines.OrEmpty(),
+				InvoiceID: in.ID,
 			})
 			if err != nil {
 				return in, err
@@ -678,6 +685,11 @@ func (a *adapter) mapStandardInvoiceBaseFromDB(invoice *db.BillingInvoice) billi
 
 		ExternalIDs: externalid.MapInvoiceExternalIDFromDB(invoice),
 
+		InvoicingAppStatus: billing.InvoicingAppStatus{
+			Outcome: lo.FromPtr(invoice.InvoicingAppOutcome),
+			Reason:  lo.FromPtr(invoice.InvoicingAppOutcomeReason),
+		},
+
 		SchemaLevel: invoice.SchemaLevel,
 	}
 }
@@ -696,6 +708,10 @@ func normalizeOptionalTime(t *time.Time) *time.Time {
 }
 
 func (a *adapter) mapStandardInvoiceFromDB(ctx context.Context, invoice *db.BillingInvoice, expand billing.StandardInvoiceExpands) (billing.StandardInvoice, error) {
+	if invoice.SchemaLevel != billing.CurrentInvoiceSchemaLevel {
+		return billing.StandardInvoice{}, fmt.Errorf("unsupported invoice schema level: %d", invoice.SchemaLevel)
+	}
+
 	base := a.mapStandardInvoiceBaseFromDB(invoice)
 
 	res := billing.StandardInvoice{
@@ -732,17 +748,7 @@ func (a *adapter) mapStandardInvoiceFromDB(ctx context.Context, invoice *db.Bill
 	}
 
 	if expand.Has(billing.StandardInvoiceExpandLines) {
-		mappedLines, err := a.mapStandardInvoiceLinesFromDB(map[string]int{invoice.ID: invoice.SchemaLevel}, invoice.Edges.BillingInvoiceLines)
-		if err != nil {
-			return billing.StandardInvoice{}, err
-		}
-
-		hierarchyByLineID, err := a.expandSplitLineHierarchy(ctx, invoice.Namespace, mappedLines.AsGenericLines())
-		if err != nil {
-			return billing.StandardInvoice{}, err
-		}
-
-		mappedLines, err = withSplitLineHierarchyForLines[*billing.StandardLine](mappedLines, hierarchyByLineID)
+		mappedLines, err := a.mapStandardInvoiceLinesFromDB(invoice.Edges.BillingInvoiceLines)
 		if err != nil {
 			return billing.StandardInvoice{}, err
 		}
@@ -775,6 +781,7 @@ func mapPeriodFromDB(start, end *time.Time) *timeutil.ClosedPeriod {
 	if start == nil || end == nil {
 		return nil
 	}
+
 	return &timeutil.ClosedPeriod{
 		From: start.In(time.UTC),
 		To:   end.In(time.UTC),

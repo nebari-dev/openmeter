@@ -1,0 +1,113 @@
+package splitlinegroup
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/alpacahq/alpacadecimal"
+	"github.com/samber/lo"
+	"github.com/stretchr/testify/require"
+
+	"github.com/openmeterio/openmeter/openmeter/billing"
+	"github.com/openmeterio/openmeter/pkg/models"
+)
+
+func TestSplitLineHierarchyPreviouslyBilledAmountExcludesGatheringLines(t *testing.T) {
+	// Given an issued line and a gathering line that both have stored amounts.
+	hierarchy := SplitLineHierarchy{
+		Lines: []SplitLineHierarchyLine{
+			{
+				Invoice: SplitLineHierarchyInvoice{
+					Type:   billing.InvoiceTypeStandard,
+					Status: billing.StandardInvoiceStatusPaid,
+				},
+				Amount: alpacadecimal.NewFromInt(40),
+			},
+			{
+				Invoice: SplitLineHierarchyInvoice{
+					Type:   billing.InvoiceTypeGathering,
+					Status: billing.StandardInvoiceStatusGathering,
+				},
+				Amount: alpacadecimal.NewFromInt(60),
+			},
+		},
+	}
+
+	// When previously billed amounts are summed, only the issued line contributes.
+	amount, err := hierarchy.SumNetAmount(SumNetAmountInput{})
+	require.NoError(t, err)
+	require.Equal(t, float64(40), amount.InexactFloat64())
+}
+
+func TestSplitLineHierarchyPreviouslyBilledAmountNetsDiscounts(t *testing.T) {
+	// Given a paid line with gross amount 100, discount 40, and an additional charge of 10.
+	hierarchy := SplitLineHierarchy{
+		Lines: []SplitLineHierarchyLine{{
+			Invoice: SplitLineHierarchyInvoice{
+				Type:   billing.InvoiceTypeStandard,
+				Status: billing.StandardInvoiceStatusPaid,
+			},
+			Amount:         alpacadecimal.NewFromInt(100),
+			DiscountsTotal: alpacadecimal.NewFromInt(40),
+			ChargesTotal:   alpacadecimal.NewFromInt(10),
+		}},
+	}
+
+	// When history is summed for spend commitments, discounts reduce the contribution.
+	amount, err := hierarchy.SumNetAmount(SumNetAmountInput{})
+	require.NoError(t, err)
+	require.Equal(t, float64(60), amount.InexactFloat64())
+
+	// Then charges only contribute when explicitly requested.
+	amountWithCharges, err := hierarchy.SumNetAmount(SumNetAmountInput{IncludeCharges: true})
+	require.NoError(t, err)
+	require.Equal(t, float64(70), amountWithCharges.InexactFloat64())
+}
+
+func TestSplitLineHierarchyCloneDoesNotShareMutableFields(t *testing.T) {
+	// Given a hierarchy with subscriptions, deletion timestamps, and nested annotations.
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	source := SplitLineHierarchy{
+		Group: SplitLineGroup{
+			NamespacedID: models.NamespacedID{Namespace: "ns", ID: "group"},
+			SplitLineGroupMutableFields: SplitLineGroupMutableFields{
+				Description: lo.ToPtr("group description"),
+				Metadata:    models.Metadata{"key": "value"},
+			},
+			Subscription: &billing.SubscriptionReference{ItemID: "group item"},
+		},
+		Lines: []SplitLineHierarchyLine{
+			{
+				LineID: billing.LineID{Namespace: "ns", ID: "line"},
+				Invoice: SplitLineHierarchyInvoice{
+					InvoiceID: billing.InvoiceID{Namespace: "ns", ID: "invoice"},
+					Type:      billing.InvoiceTypeStandard,
+					Status:    billing.StandardInvoiceStatusDeleted,
+					DeletedAt: &now,
+				},
+				DeletedAt:    &now,
+				Subscription: &billing.SubscriptionReference{ItemID: "child item"},
+				Annotations:  models.Annotations{"nested": map[string]interface{}{"value": "original"}},
+			},
+		},
+	}
+	before, err := json.Marshal(source)
+	require.NoError(t, err)
+
+	// When subscriptions, timestamps, metadata, and annotations on the clone are changed.
+	clone, err := source.Clone()
+	require.NoError(t, err)
+	clone.Group.Subscription.ItemID = "changed"
+	clone.Group.Metadata["key"] = "changed"
+	*clone.Group.Description = "changed"
+	clone.Lines[0].Subscription.ItemID = "changed"
+	*clone.Lines[0].DeletedAt = now.Add(time.Hour)
+	*clone.Lines[0].Invoice.DeletedAt = now.Add(2 * time.Hour)
+	clone.Lines[0].Annotations["nested"].(map[string]interface{})["value"] = "changed"
+
+	// Then the original hierarchy remains unchanged.
+	after, err := json.Marshal(source)
+	require.NoError(t, err)
+	require.JSONEq(t, string(before), string(after))
+}

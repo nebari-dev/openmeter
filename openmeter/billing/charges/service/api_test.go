@@ -73,7 +73,7 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteCreatesOverrideForSupported
 
 	s.Run("given subscription-managed flat-fee and usage-based charges", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-delete")
 		customerID = customer.ID
 		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
@@ -132,7 +132,7 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteCreatesOverrideForSupported
 
 	s.Run("then the effective intents are deleted overrides", func() {
 		for _, chargeID := range chargeIDs {
-			deletedCharge, err := s.Charges.GetByID(ctx, charges.GetByIDInput{ChargeID: chargeID})
+			deletedCharge, err := s.Charges.GetCustomerCharge(ctx, charges.GetByIDInput{ChargeID: chargeID})
 			require.NoError(s.T(), err)
 
 			switch deletedCharge.Type() {
@@ -154,6 +154,14 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteCreatesOverrideForSupported
 				s.T().Fatalf("unexpected deleted charge type: %s", deletedCharge.Type())
 			}
 		}
+	})
+
+	s.Run("a charge ID from another namespace is missing", func() {
+		require.NotEmpty(s.T(), chargeIDs)
+		_, err := s.Charges.GetCustomerCharge(ctx, charges.GetByIDInput{
+			ChargeID: meta.ChargeID{Namespace: s.GetUniqueNamespace("other-namespace"), ID: chargeIDs[0].ID},
+		})
+		require.True(s.T(), models.IsGenericNotFoundError(err), "%v", err)
 	})
 }
 
@@ -179,7 +187,9 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteEnforcesCustomerOwnership()
 
 	s.Run("given a charge owned by another customer", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete-owner")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
+		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
+		s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
 		owner := s.CreateTestCustomer(namespace, "owner")
 		ownerID = owner.ID
 		otherCustomerID = s.CreateTestCustomer(namespace, "other").ID
@@ -244,7 +254,7 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteRejectsCreditPurchase() {
 
 	s.Run("given a realized credit-purchase charge", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete-credit-purchase")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "credit-purchase")
 		customerID = customer.ID
 		s.CreditPurchaseTestHandler.onPromotionalCreditPurchase = func(_ context.Context, _ creditpurchase.Charge) (ledgertransaction.GroupReference, error) {
@@ -276,6 +286,11 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteRejectsCreditPurchase() {
 		require.Equal(s.T(), status, creditPurchase.Status)
 		require.NotNil(s.T(), creditPurchase.Realizations.CreditGrantRealization)
 	})
+
+	s.Run("the customer charge facade treats a credit purchase ID as missing", func() {
+		_, err := s.Charges.GetCustomerCharge(ctx, charges.GetByIDInput{ChargeID: chargeID})
+		require.ErrorIs(s.T(), err, charges.ErrChargeNotFound)
+	})
 }
 
 func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentPreservesFlatFeeCreditRealization() {
@@ -300,7 +315,9 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentPres
 
 	s.Run("given a realized credit-only flat-fee charge", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete-flat-fee-credit")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
+		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
+		s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
 		customer := s.CreateTestCustomer(namespace, "flat-fee-credit")
 		customerID = customer.ID
 
@@ -385,7 +402,7 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentPres
 
 	s.Run("given a realized credit-only usage-based charge", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete-usage-credit")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "usage-credit")
 		customerID = customer.ID
 		feature := s.SetupApiRequestsTotalFeature(ctx, namespace)
@@ -492,7 +509,7 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentRemo
 
 	s.Run("given active invoice-backed flat-fee and usage-based charges", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete-gathering")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "gathering")
 		customerID = customer.ID
 		feature := s.SetupApiRequestsTotalFeature(ctx, namespace)
@@ -584,7 +601,7 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentPres
 
 	s.Run("given a paid invoice for a subscription-managed flat-fee charge", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-delete-paid")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "paid")
 		customerID = customer.ID
 		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
@@ -647,7 +664,8 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentPres
 	})
 
 	s.Run("then paid billing history is retained", func() {
-		charge := s.mustGetChargeByID(chargeID)
+		charge, err := s.Charges.GetCustomerCharge(ctx, charges.GetByIDInput{ChargeID: chargeID})
+		require.NoError(s.T(), err)
 		flatFee, err := charge.AsFlatFeeCharge()
 		require.NoError(s.T(), err)
 		require.Equal(s.T(), flatfee.StatusDeleted, flatFee.Status)
@@ -656,6 +674,9 @@ func (s *CustomerChargeAPIDeleteTestSuite) TestDeleteWithNoPaymentAdjustmentPres
 		require.NotNil(s.T(), flatFee.Intent.GetOverrideLayerMutableFields().IntentDeletedAt)
 		require.Nil(s.T(), flatFee.Realizations.CurrentRun)
 		require.Len(s.T(), flatFee.Realizations.PriorRuns, 1)
+		require.Len(s.T(), charge.FlatFeeRealizations, 1)
+		require.NotNil(s.T(), charge.FlatFeeRealizations[0].Run)
+		require.Equal(s.T(), flatFee.Realizations.PriorRuns[0].ID, charge.FlatFeeRealizations[0].Run.ID)
 
 		payment := flatFee.Realizations.PriorRuns[0].Payment
 		require.NotNil(s.T(), payment)
@@ -714,7 +735,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetCreatesReplacesAndClearsO
 
 	s.Run("given subscription-managed supported charges", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-set")
 		customerID = customer.ID
 		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
@@ -919,7 +940,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetDeleteOrdering() {
 
 	s.Run("given representative supported charges", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set-delete-ordering")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-set-delete-ordering")
 		customerID = customer.ID
 		feature := s.SetupApiRequestsTotalFeature(ctx, namespace)
@@ -1171,7 +1192,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestClearOverrideAppliesHiddenBa
 
 	s.Run("given overridden charges whose hidden bases are deleted", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-clear-hidden-base-delete")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customerEntity := s.CreateTestCustomer(namespace, "api-clear-hidden-base-delete")
 		customerID = customerEntity.ID
 		customerNamespacedID = customerEntity.GetID()
@@ -1331,7 +1352,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearValidateOwnership
 
 	s.Run("given supported and unsupported customer charges", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set-validation")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-set-validation")
 		customerID = customer.ID
 		otherCustomerID = s.CreateTestCustomer(namespace, "api-set-validation-other").ID
@@ -1497,12 +1518,15 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearReconcileRealized
 
 	s.Run("given a realized credit-only flat-fee charge", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set-flat-fee-credit")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
+		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
+		s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
 		customer := s.CreateTestCustomer(namespace, "api-set-flat-fee-credit")
 		customerID = customer.ID
 
 		s.FlatFeeTestHandler.onAllocateCredits = func(_ context.Context, input flatfee.OnAllocateCreditsInput) (creditrealization.CreateAllocationInputs, error) {
 			allocationAmounts = append(allocationAmounts, input.PreTaxAmountToAllocate.InexactFloat64())
+
 			return creditrealization.CreateAllocationInputs{{
 				ServicePeriod: input.ServicePeriod,
 				Amount:        input.PreTaxAmountToAllocate,
@@ -1514,6 +1538,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearReconcileRealized
 		s.FlatFeeTestHandler.onCorrectCreditAllocations = func(_ context.Context, input flatfee.CorrectCreditAllocationsInput) (creditrealization.CreateCorrectionInputs, error) {
 			return lo.Map(input.Corrections, func(item creditrealization.CorrectionRequestItem, _ int) creditrealization.CreateCorrectionInput {
 				correctionAmounts = append(correctionAmounts, item.Amount.InexactFloat64())
+
 				return creditrealization.CreateCorrectionInput{
 					Amount:                item.Amount,
 					CorrectsRealizationID: item.Allocation.ID,
@@ -1622,7 +1647,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearUpdateInvoiceBack
 
 	s.Run("given active invoice-backed supported charges", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set-gathering")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-set-gathering")
 		customerID = customer.ID
 		feature := s.SetupApiRequestsTotalFeature(ctx, namespace)
@@ -1786,7 +1811,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestClearFlatFeeInvoiceOverrideP
 
 	s.Run("given a paid realization of the override", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-clear-paid-flat-fee")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-clear-paid-flat-fee")
 		customerID = customer.ID
 		sandboxApp := s.InstallSandboxApp(s.T(), namespace)
@@ -1915,7 +1940,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearRebuildUsageBased
 
 	s.Run("given a realized credit-only usage-based charge", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set-usage-credit")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-set-usage-credit")
 		customerID = customer.ID
 		feature := s.SetupApiRequestsTotalFeature(ctx, namespace)
@@ -1963,6 +1988,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearRebuildUsageBased
 		}
 		s.UsageBasedTestHandler.onCreditsOnlyUsageAccruedCorrection = func(_ context.Context, input usagebased.CreditsOnlyUsageAccruedCorrectionInput) (creditrealization.CreateCorrectionInputs, error) {
 			correctionCalls++
+
 			return lo.Map(input.Corrections, func(item creditrealization.CorrectionRequestItem, _ int) creditrealization.CreateCorrectionInput {
 				return creditrealization.CreateCorrectionInput{
 					Amount:                item.Amount,
@@ -2083,7 +2109,7 @@ func (s *CustomerChargeAPISetOverrideTestSuite) TestSetAndClearRejectUsageBasedI
 
 	s.Run("given an invoice realization has started", func() {
 		namespace = s.GetUniqueNamespace("charges-service-api-set-usage-invoice-realized")
-		s.ProvisionDefaultTaxCodes(ctx, namespace)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace)
 		customer := s.CreateTestCustomer(namespace, "api-set-usage-invoice-realized")
 		customerID = customer.ID
 		feature := s.SetupApiRequestsTotalFeature(ctx, namespace)

@@ -19,6 +19,30 @@ balance(asOf=T) =
 The receivable term represents credit-only advance: usage already consumed
 before purchased credit was available.
 
+| Field | Meaning |
+| --- | --- |
+| `booked` | Booked balance at the requested time, including advance debt |
+| `spendable` | Spendable FBO credit at that time, less advance debt |
+| `live` | Spendable balance adjusted for current unbooked usage |
+| `pending` | Granted credit that is not yet booked or effective |
+
+Spendable credit preserves allocations to later recorded usage. It takes the
+positive minimum of each FBO source from the requested time onward, ignoring
+future breakage because consumption releases it. Future grants cannot be spent
+early. Advance debt can make `booked`, `spendable`, and `live` negative.
+
+`settled` is a deprecated API alias for `booked` and returns the same value.
+
+Live usage still follows source restrictions and settlement policy. Historical
+requests return zero for `live`; we cannot reconstruct past unbooked usage.
+All reads use what is recorded now, including later-recorded corrections.
+There is no separate cutoff for when the system learned about a movement.
+
+History before/after values remain booked balances. A grant of 10 followed by
+consumption of 4 shows `0 → 10`, then `10 → 6`, even though spendable credit
+before that consumption is already 6.
+
+
 Fiat currencies are identified by code. Custom-currency balance rows also
 carry `custom_currency.id`; balances remain separate when historical managed
 currencies reuse a display code. A code filter selects every matching identity.
@@ -78,12 +102,15 @@ Visible types:
 
 - `funded`: credit became available.
 - `consumed`: credit was used.
+- `correction`: a balance adjustment reversing previously recorded usage.
 - `expired`: unused credit expired.
 - `voided`: unused credit was forfeited by voiding its grant.
 
 The temporary issuance and consumption used to construct a custom-currency
 `credit_then_invoice` overage are internal accounting movements, not customer
 credit activity, and are excluded from this view.
+
+Voiding a promotional grant returns its unused credit to wash. The customer receivable stays settled and the booked balance falls by the voided amount.
 
 Funded rows include the response label `voided: "true"` when the backing grant
 has since been voided. The label is absent from active funded rows and from
@@ -94,6 +121,7 @@ The visible amount is the customer balance impact:
 ```text
 funded   => positive FBO issuance + positive nil-cost-basis receivable attribution
 consumed => negative FBO impact
+correction => net FBO + nil-cost-basis receivable impact of a correction batch
 expired  => negative FBO impact
 ```
 
@@ -101,8 +129,16 @@ In a mixed-currency listing, `available_balance` is reconstructed independently
 for each currency identity even though the rows share one chronological stream.
 Custom-currency rows carry both their display code and `custom_currency.id`.
 
-Balances are resolved independently at each row's persisted boundary. Funded
-and consumed rows use their last contributing ledger transaction. Expired and
+Corrections are grouped by ledger transaction group, booked time, and currency
+identity. This combines advance and backfill reversals into their net customer
+balance effect. Zero-impact groups, breakage, and internal accounting movements
+are excluded. Legacy and origin-tracked corrections are both included; no link
+to the original activity is exposed. Rows retain the last contributing ledger
+transaction's ID, creation time, and annotations. Booking time may precede
+creation time when a fee is corrected against an earlier service period.
+
+Balances are resolved independently at each row's persisted boundary. Funded,
+consumed, and correction rows use their last contributing ledger transaction. Expired and
 voided rows are net projections at their booked timestamp: they include all
 postings at that timestamp, with later siblings of the same type and currency
 removed to retain stable balances within each terminal group. Across different

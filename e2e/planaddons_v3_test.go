@@ -54,6 +54,7 @@ func TestV3PlanAddonAttachLifecycle(t *testing.T) {
 		require.NotEmpty(t, addonID)
 
 		body := validPlanAddonRequest(standardPhase.Key, addonID)
+		body.Labels = &map[string]string{"placement": "upsell"}
 
 		planAddon, err := c.PlanAddons.Create(t.Context(), planID, body)
 		c.requireStatus(http.StatusCreated, err)
@@ -61,6 +62,7 @@ func TestV3PlanAddonAttachLifecycle(t *testing.T) {
 
 		assert.Equal(t, standardPhase.Key, planAddon.FromPlanPhase)
 		assert.Equal(t, addonID, planAddon.Addon.ID)
+		assert.Equal(t, map[string]string{"placement": "upsell"}, planAddon.Labels)
 
 		planAddonID = planAddon.ID
 	})
@@ -75,6 +77,7 @@ func TestV3PlanAddonAttachLifecycle(t *testing.T) {
 		assert.Equal(t, planAddonID, planAddon.ID)
 		assert.Equal(t, standardPhase.Key, planAddon.FromPlanPhase)
 		assert.Equal(t, addonID, planAddon.Addon.ID)
+		assert.Equal(t, map[string]string{"placement": "upsell"}, planAddon.Labels)
 	})
 
 	t.Run("Should list plan-addons and find the attached addon", func(t *testing.T) {
@@ -91,6 +94,7 @@ func TestV3PlanAddonAttachLifecycle(t *testing.T) {
 				break
 			}
 		}
+
 		assert.True(t, found, "attached plan-addon not found in list")
 	})
 
@@ -208,7 +212,7 @@ func TestV3PlanAddonAttachStatusMatrix(t *testing.T) {
 
 // Attach instance_type × max_quantity matrix.
 //
-// Exercises the TypeSpec schema binder (invalid_parameters[].rule="minimum")
+// Exercises the TypeSpec schema binder (invalid_parameters[].rule="min")
 // for max_quantity<1, which the API schema enforces before the handler runs.
 func TestV3PlanAddonInstanceTypeMaxQuantityMatrix(t *testing.T) {
 	cases := []struct {
@@ -243,7 +247,7 @@ func TestV3PlanAddonInstanceTypeMaxQuantityMatrix(t *testing.T) {
 			instanceType:   v3sdk.AddonInstanceTypeMultiple,
 			maxQuantity:    lo.ToPtr(int64(0)),
 			expectedStatus: http.StatusBadRequest,
-			expectedRule:   "minimum",
+			expectedRule:   "min",
 		},
 	}
 
@@ -428,9 +432,11 @@ func TestV3PlanAddonPublishWithAttachedAddon(t *testing.T) {
 		if pa.ID == planAddonID {
 			found = true
 			assert.Equal(t, addon.ID, pa.Addon.ID)
+
 			break
 		}
 	}
+
 	assert.True(t, found, "attached plan-addon missing after plan publish")
 }
 
@@ -449,12 +455,14 @@ func makePlanWithStatus(t *testing.T, c *v3Client, keyPrefix string, target v3sd
 	case v3sdk.PlanStatusActive:
 		plan, err = c.Plans.Publish(t.Context(), plan.ID)
 		c.requireStatus(http.StatusOK, err)
+
 		return plan
 	case v3sdk.PlanStatusArchived:
 		plan, err = c.Plans.Publish(t.Context(), plan.ID)
 		c.requireStatus(http.StatusOK, err)
 		plan, err = c.Plans.Archive(t.Context(), plan.ID)
 		c.requireStatus(http.StatusOK, err)
+
 		return plan
 	default:
 		t.Fatalf("unsupported plan target status %q", target)
@@ -477,12 +485,14 @@ func makeAddonWithStatus(t *testing.T, c *v3Client, keyPrefix string, target v3s
 	case v3sdk.AddonStatusActive:
 		addon, err = c.Addons.Publish(t.Context(), addon.ID)
 		c.requireStatus(http.StatusOK, err)
+
 		return addon
 	case v3sdk.AddonStatusArchived:
 		addon, err = c.Addons.Publish(t.Context(), addon.ID)
 		c.requireStatus(http.StatusOK, err)
 		addon, err = c.Addons.Archive(t.Context(), addon.ID)
 		c.requireStatus(http.StatusOK, err)
+
 		return addon
 	default:
 		t.Fatalf("unsupported addon target status %q", target)

@@ -11,6 +11,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/flatfee"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/invoicedusage"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/ledgertransaction"
+	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/framework/transaction"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -102,9 +103,11 @@ func (s *Service) AccrueInvoiceUsage(ctx context.Context, in AccrueInvoiceUsageI
 				if err != nil {
 					return AccrueInvoiceUsageResult{}, fmt.Errorf("on flat fee custom currency overage accrued: %w", err)
 				}
+
 				if err := handlerResult.Validate(); err != nil {
 					return AccrueInvoiceUsageResult{}, fmt.Errorf("validating custom currency overage accrued result: %w", err)
 				}
+
 				if !handlerResult.TotalFiatAmount.Equal(line.Totals.Total) {
 					return AccrueInvoiceUsageResult{}, fmt.Errorf(
 						"custom currency overage booked fiat amount does not match line total: %s != %s",
@@ -133,7 +136,7 @@ func (s *Service) AccrueInvoiceUsage(ctx context.Context, in AccrueInvoiceUsageI
 
 			accruedUsage := invoicedusage.AccruedUsage{
 				ServicePeriod:     line.Period,
-				Totals:            line.Totals,
+				Totals:            totals.DeltaTotals{Totals: line.Totals},
 				LedgerTransaction: &ledgerTransactionRef,
 			}
 
@@ -214,6 +217,7 @@ func (s *Service) CorrectAccruedUsage(ctx context.Context, input CorrectAccruedU
 	if err := correctionInput.Validate(); err != nil {
 		return flatfee.RealizationRun{}, fmt.Errorf("validate custom-currency overage accrual correction: %w", err)
 	}
+
 	if err := s.handler.OnCustomCurrencyOverageAccruedCorrection(ctx, correctionInput); err != nil {
 		return flatfee.RealizationRun{}, fmt.Errorf("correct custom-currency overage accrual: %w", err)
 	}

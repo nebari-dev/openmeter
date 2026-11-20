@@ -7,6 +7,7 @@ import (
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	billingfeaturemeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/streaming"
@@ -16,13 +17,10 @@ import (
 	"github.com/openmeterio/openmeter/pkg/slicesx"
 )
 
-var (
-	_ billing.LineEngine     = (*Engine)(nil)
-	_ billing.LineCalculator = (*Engine)(nil)
-)
+var _ billing.LineEngine = (*Engine)(nil)
 
 type Config struct {
-	SplitLineGroupAdapter        SplitLineGroupAdapter
+	SplitLineGroupService        splitlinegroup.Service
 	RatingService                rating.Service
 	FeatureMeterResolver         *billingfeaturemeterservice.Resolver
 	StreamingConnector           streaming.Connector
@@ -32,8 +30,8 @@ type Config struct {
 func (c Config) Validate() error {
 	var errs []error
 
-	if c.SplitLineGroupAdapter == nil {
-		errs = append(errs, errors.New("split line group adapter is required"))
+	if c.SplitLineGroupService == nil {
+		errs = append(errs, errors.New("split line group service is required"))
 	}
 
 	if c.RatingService == nil {
@@ -56,7 +54,7 @@ func (c Config) Validate() error {
 }
 
 type Engine struct {
-	adapter                      SplitLineGroupAdapter
+	splitLineGroupService        splitlinegroup.Service
 	ratingService                rating.Service
 	featureMeterResolver         *billingfeaturemeterservice.Resolver
 	streamingConnector           streaming.Connector
@@ -69,7 +67,7 @@ func New(config Config) (*Engine, error) {
 	}
 
 	return &Engine{
-		adapter:                      config.SplitLineGroupAdapter,
+		splitLineGroupService:        config.SplitLineGroupService,
 		ratingService:                config.RatingService,
 		featureMeterResolver:         config.FeatureMeterResolver,
 		streamingConnector:           config.StreamingConnector,
@@ -86,22 +84,34 @@ func (e *Engine) OnCollectionCompleted(ctx context.Context, input billing.OnColl
 		return nil, fmt.Errorf("invoice is required")
 	}
 
+	resolvedLines, err := e.resolveSplitLineHierarchies(ctx, input.Invoice.Namespace, input.Lines)
+	if err != nil {
+		return nil, fmt.Errorf("resolving collection line hierarchies: %w", err)
+	}
+
 	if input.Invoice.QuantitySnapshotedAt != nil &&
 		!input.Invoice.QuantitySnapshotedAt.Before(input.Invoice.DefaultCollectionAtForStandardInvoice()) {
-		return input.Lines, nil
+		return e.rateStandardLines(resolvedLines)
 	}
 
 	if input.Invoice.QuantitySnapshotedAt == nil &&
 		input.Invoice.CollectionAt != nil &&
 		clock.Now().Before(*input.Invoice.CollectionAt) {
-		return input.Lines, nil
+		return e.rateStandardLines(resolvedLines)
 	}
 
-	if err := e.SnapshotLineQuantities(ctx, input.Invoice, input.Lines); err != nil {
+	// Snapshotting mutates quantities in place. Keep the invoice's prior lines
+	// intact if snapshotting or subsequent rating fails before replacement.
+	clonedLines, err := resolvedLines.Clone()
+	if err != nil {
+		return nil, fmt.Errorf("cloning collection lines: %w", err)
+	}
+
+	if err := e.snapshotLineQuantities(ctx, input.Invoice, clonedLines); err != nil {
 		return nil, fmt.Errorf("snapshotting lines: %w", err)
 	}
 
-	return input.Lines, nil
+	return e.rateStandardLines(clonedLines)
 }
 
 func (e *Engine) ValidateMutableInvoiceLineEditViaAPI(_ context.Context, input billing.OnMutableInvoiceUpdateInput) error {
@@ -123,12 +133,17 @@ func (e *Engine) OnMutableInvoiceLinesEditedViaAPI(ctx context.Context, input bi
 		return billing.OnMutableInvoiceUpdateResult{}, fmt.Errorf("validating input: %w", err)
 	}
 
+	recorder := billing.ValidationIssueRecorder{}
 	createdLines, err := slicesx.MapWithErr(input.Created, func(line billing.GenericInvoiceLine) (billing.GenericInvoiceLine, error) {
 		lineID := line.GetID()
 
-		line, err := e.snapshotManualStandardLineOverrideIfNeeded(ctx, input.Invoice, line)
-		if err != nil {
-			return nil, fmt.Errorf("snapshotting line[%s]: %w", lineID, err)
+		line, err := e.recalculateManualStandardLineOverrideIfNeeded(ctx, input.Invoice, line)
+		if line == nil {
+			return nil, fmt.Errorf("recalculating line[%s]: %w", lineID, err)
+		}
+
+		if err := recorder.RecordWarnings(err); err != nil {
+			return nil, fmt.Errorf("recalculating line[%s]: %w", lineID, err)
 		}
 
 		return line, nil
@@ -147,9 +162,13 @@ func (e *Engine) OnMutableInvoiceLinesEditedViaAPI(ctx context.Context, input bi
 			return nil, fmt.Errorf("applying changes to line[%s]: %w", override.ExistingLine.GetID(), err)
 		}
 
-		line, err = e.snapshotManualStandardLineOverrideIfNeeded(ctx, input.Invoice, line)
-		if err != nil {
-			return nil, fmt.Errorf("snapshotting line[%s]: %w", override.ExistingLine.GetID(), err)
+		line, err = e.recalculateManualStandardLineOverrideIfNeeded(ctx, input.Invoice, line)
+		if line == nil {
+			return nil, fmt.Errorf("recalculating line[%s]: %w", override.ExistingLine.GetID(), err)
+		}
+
+		if err := recorder.RecordWarnings(err); err != nil {
+			return nil, fmt.Errorf("recalculating line[%s]: %w", override.ExistingLine.GetID(), err)
 		}
 
 		return line, nil
@@ -161,10 +180,10 @@ func (e *Engine) OnMutableInvoiceLinesEditedViaAPI(ctx context.Context, input bi
 	return billing.OnMutableInvoiceUpdateResult{
 		CreatedLines: createdLines,
 		UpdatedLines: updatedLines,
-	}, nil
+	}, recorder.ErrorsOrNil()
 }
 
-func (e *Engine) snapshotManualStandardLineOverrideIfNeeded(ctx context.Context, invoice billing.GenericInvoiceReader, line billing.GenericInvoiceLine) (billing.GenericInvoiceLine, error) {
+func (e *Engine) recalculateManualStandardLineOverrideIfNeeded(ctx context.Context, invoice billing.GenericInvoiceReader, line billing.GenericInvoiceLine) (billing.GenericInvoiceLine, error) {
 	if invoice.GetType() != billing.InvoiceTypeStandard {
 		return line, nil
 	}
@@ -183,11 +202,15 @@ func (e *Engine) snapshotManualStandardLineOverrideIfNeeded(ctx context.Context,
 		return nil, fmt.Errorf("getting standard line: %w", err)
 	}
 
-	if err := e.SnapshotLineQuantities(ctx, standardInvoice, billing.StandardLines{&standardLine}); err != nil {
-		return nil, fmt.Errorf("snapshotting line quantity: %w", err)
+	ratedLine, err := e.RecalculateStandardLine(ctx, RecalculateStandardLineInput{
+		Invoice: &standardInvoice,
+		Line:    &standardLine,
+	})
+	if ratedLine == nil {
+		return nil, err
 	}
 
-	return standardLine.AsGenericLine(), nil
+	return ratedLine.AsGenericLine(), err
 }
 
 func validateLegacyLineOverride(override billing.InvoiceLineOverride) error {

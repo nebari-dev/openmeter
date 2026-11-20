@@ -1,6 +1,6 @@
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.10.0@sha256:40fe21f44bb8cddf1eb1226db190d0a984118f62ee02a91b77d99448d28264a6 AS xx
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.23@sha256:d9e2f2f07b10cc922da3e80e035c3058810b328d5aef82d2c63680967c5e2ec9 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.23@sha256:146e3b9c7c1e2ec3d3f5348c8a686151a75e1976e50efac9fc022ebe446a9a82 AS builder
 
 COPY --link --from=xx / /
 
@@ -26,58 +26,61 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     xx-go mod download -x
 
 ARG VERSION
+ARG COMMIT_SHA
 
 COPY --link . .
-
-RUN chmod +x entrypoint.sh
 
 # See https://github.com/confluentinc/confluent-kafka-go#librdkafka
 # See https://github.com/confluentinc/confluent-kafka-go#static-builds-on-linux
 # Build server binary (default)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
-    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION}" -tags musl -o /usr/local/bin/openmeter ./cmd/server
+    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION} -X main.revision=${COMMIT_SHA}" -tags musl -o /usr/local/bin/openmeter ./cmd/server
 
 RUN xx-verify /usr/local/bin/openmeter
 
 # Build sink-worker binary
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
-    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION}" -tags musl -o /usr/local/bin/openmeter-sink-worker ./cmd/sink-worker
+    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION} -X main.revision=${COMMIT_SHA}" -tags musl -o /usr/local/bin/openmeter-sink-worker ./cmd/sink-worker
 
 RUN xx-verify /usr/local/bin/openmeter-sink-worker
 
 # Build balance-worker binary
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
-    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION}" -tags musl -o /usr/local/bin/openmeter-balance-worker ./cmd/balance-worker
+    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION} -X main.revision=${COMMIT_SHA}" -tags musl -o /usr/local/bin/openmeter-balance-worker ./cmd/balance-worker
 
 RUN xx-verify /usr/local/bin/openmeter-balance-worker
 
 # Build notification-service binary
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
-    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION}" -tags musl -o /usr/local/bin/openmeter-notification-service ./cmd/notification-service
+    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION} -X main.revision=${COMMIT_SHA}" -tags musl -o /usr/local/bin/openmeter-notification-service ./cmd/notification-service
 
 RUN xx-verify /usr/local/bin/openmeter-notification-service
 
 # Build billing-worker binary
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
-    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION}" -tags musl -o /usr/local/bin/openmeter-billing-worker ./cmd/billing-worker
+    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION} -X main.revision=${COMMIT_SHA}" -tags musl -o /usr/local/bin/openmeter-billing-worker ./cmd/billing-worker
 
 RUN xx-verify /usr/local/bin/openmeter-billing-worker
 
 # Build periodic jobs binary
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
-    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X main.version=${VERSION}" -tags musl -o /usr/local/bin/openmeter-jobs ./cmd/jobs
+    xx-go build -ldflags "-linkmode external -extldflags \"-static\" -X github.com/openmeterio/openmeter/cmd/jobs/internal.version=${VERSION} -X github.com/openmeterio/openmeter/cmd/jobs/internal.revision=${COMMIT_SHA}" -tags musl -o /usr/local/bin/openmeter-jobs ./cmd/jobs
 
 RUN xx-verify /usr/local/bin/openmeter-jobs
 
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
-RUN apk add --update --no-cache ca-certificates tzdata bash
+RUN apk add --update --no-cache ca-certificates tzdata bash \
+    && addgroup -S -g 10001 openmeter \
+    && adduser -S -D -H -u 10001 -G openmeter openmeter \
+    && mkdir -p /var/run/openmeter-ca \
+    && chown openmeter:openmeter /var/run/openmeter-ca
 
 SHELL ["/bin/bash", "-c"]
 
@@ -88,8 +91,8 @@ COPY --link --from=builder /usr/local/bin/openmeter-notification-service /usr/lo
 COPY --link --from=builder /usr/local/bin/openmeter-billing-worker /usr/local/bin/
 COPY --link --from=builder /usr/local/bin/openmeter-jobs /usr/local/bin/
 COPY --link --from=builder /src/go.* /usr/local/src/openmeter/
-COPY --link --from=builder /src/entrypoint.sh /entrypoint.sh
+COPY --link --chmod=755 prepare-ca-bundle.sh /usr/local/bin/prepare-ca-bundle
 
-ENTRYPOINT ["/entrypoint.sh"]
+USER 10001:10001
 
-CMD openmeter
+CMD ["openmeter"]

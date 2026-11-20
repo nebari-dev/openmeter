@@ -81,7 +81,11 @@ type InvoicingConfig struct {
 	DueAfter                     datetime.ISODuration         `json:"dueAfter,omitempty"`
 	ProgressiveBilling           bool                         `json:"progressiveBilling,omitempty"`
 	SubscriptionEndProrationMode SubscriptionEndProrationMode `json:"subscriptionEndProrationMode,omitempty"`
-	DefaultTaxConfig             *productcatalog.TaxConfig    `json:"defaultTaxConfig,omitempty"`
+	EmptyInvoiceMode             EmptyInvoiceMode             `json:"emptyInvoiceMode,omitempty"`
+	// DefaultTaxConfig references the default Tax Code by ID. On an invoice's workflow it's the
+	// profile's default frozen at invoice creation; the Stripe code shown for it in v1 responses
+	// comes from the Tax Code's current mapping.
+	DefaultTaxConfig *productcatalog.TaxCodeConfig `json:"defaultTaxConfig,omitempty"`
 }
 
 func (c InvoicingConfig) Clone() InvoicingConfig {
@@ -90,6 +94,7 @@ func (c InvoicingConfig) Clone() InvoicingConfig {
 		cloned := c.DefaultTaxConfig.Clone()
 		out.DefaultTaxConfig = &cloned
 	}
+
 	return out
 }
 
@@ -116,7 +121,65 @@ func (c *InvoicingConfig) Validate() error {
 		return fmt.Errorf("invalid subscription end proration mode: %w", err)
 	}
 
+	if c.EmptyInvoiceMode == "" {
+		return models.NewGenericValidationError(errors.New("empty invoice mode is required"))
+	}
+
+	if err := c.EmptyInvoiceMode.Validate(); err != nil {
+		return fmt.Errorf("empty invoice mode: %w", err)
+	}
+
 	return nil
+}
+
+// EmptyInvoiceMode says whether an invoice with no lines or a zero total is
+// still created in the invoicing app.
+type EmptyInvoiceMode string
+
+const (
+	EmptyInvoiceModeCreate EmptyInvoiceMode = "create"
+	EmptyInvoiceModeOmit   EmptyInvoiceMode = "omit"
+)
+
+func (m EmptyInvoiceMode) Values() []string {
+	return []string{
+		string(EmptyInvoiceModeCreate),
+		string(EmptyInvoiceModeOmit),
+	}
+}
+
+func (m EmptyInvoiceMode) Validate() error {
+	if !slices.Contains(m.Values(), string(m)) {
+		return models.NewGenericValidationError(fmt.Errorf("invalid empty invoice mode: %s", m))
+	}
+
+	return nil
+}
+
+// DefaultTaxCodeID returns the ID of the default Tax Code, or "" when there is none.
+func (c InvoicingConfig) DefaultTaxCodeID() string {
+	return lo.FromPtr(c.DefaultTaxConfig).TaxCodeID
+}
+
+func newDeprecatedDefaultTaxCodeError() error {
+	return ValidationError{
+		Err: models.NewGenericValidationError(errors.New("setting a tax code (stripe.code / taxCodeId) on a billing profile's defaultTaxConfig is deprecated and can no longer be added or changed; the organization default tax code is used instead. You may still remove it. (behavior is unaffected.)")),
+	}
+}
+
+// ValidateDefaultTaxCodeUnchanged rejects a default Tax Code ID unless it's the one stored (stored
+// is the zero InvoicingConfig on create, so any ID is rejected there). Removing the default and
+// changing the behavior are always allowed.
+//
+// The Tax Code isn't looked up: only the stored ID can pass, and it was valid when it was set.
+// Not re-checking it keeps profiles whose default Tax Code was deleted since then editable.
+func (c InvoicingConfig) ValidateDefaultTaxCodeUnchanged(stored InvoicingConfig) error {
+	id := c.DefaultTaxCodeID()
+	if id == "" || id == stored.DefaultTaxCodeID() {
+		return nil
+	}
+
+	return newDeprecatedDefaultTaxCodeError()
 }
 
 type SubscriptionEndProrationMode string
@@ -141,42 +204,41 @@ func (m SubscriptionEndProrationMode) Validate() error {
 	return nil
 }
 
-// WithDeprecatedTaxCodeEnforced returns a ValidationError when the receiver adds or changes a
-// deprecated tax-code field (stripe.code or taxCodeId) relative to stored. stored is the
-// zero InvoicingConfig on create. Removal is permitted; behavior is never restricted.
-// Call it on the raw API->domain mapped incoming config, BEFORE tax-code resolution.
+// WithDeprecatedDefaultTaxCodeEnforced returns a ValidationError when the incoming v1/v3 default
+// tax config adds or changes a deprecated tax-code field (stripe.code or taxCodeId) relative to
+// stored. stored is nil on create. Removal is permitted; behavior is never restricted.
+// Call it on the raw API->domain mapped incoming config, BEFORE resolving Stripe codes, with the
+// stored default rendered in the same legacy shape.
 //
 // On a permitted removal it also returns a normalized copy of the incoming config: dropping
 // stripe.code while echoing taxCodeId unchanged removes the whole pair (taxCodeId is cleared
-// too), otherwise tax-code resolution would backfill stripe.code from the referenced tax code
-// entity. The reverse (taxCodeId omitted, stripe.code echoed unchanged) is left untouched,
-// because legacy clients that predate taxCodeId send exactly that shape on no-op updates.
-func (c InvoicingConfig) WithDeprecatedTaxCodeEnforced(stored InvoicingConfig) (InvoicingConfig, error) {
-	if c.DefaultTaxConfig == nil {
-		return c, nil
+// too), otherwise the echoed taxCodeId would keep the Tax Code. The reverse (taxCodeId omitted,
+// stripe.code echoed unchanged) is left untouched, because legacy clients that predate taxCodeId
+// send exactly that shape on no-op updates.
+func WithDeprecatedDefaultTaxCodeEnforced(incoming, stored *productcatalog.TaxConfig) (*productcatalog.TaxConfig, error) {
+	if incoming == nil {
+		return nil, nil
 	}
 
-	i := c.Clone()
+	i := incoming.Clone()
 
-	taxCodeChanged := i.DefaultTaxConfig.TaxCodeID != nil &&
-		(stored.DefaultTaxConfig == nil || stored.DefaultTaxConfig.TaxCodeID == nil || *stored.DefaultTaxConfig.TaxCodeID != *i.DefaultTaxConfig.TaxCodeID)
+	taxCodeChanged := i.TaxCodeID != nil &&
+		(stored == nil || stored.TaxCodeID == nil || *stored.TaxCodeID != *i.TaxCodeID)
 
-	stripeCodeChanged := i.DefaultTaxConfig.Stripe != nil && i.DefaultTaxConfig.Stripe.Code != "" &&
-		(stored.DefaultTaxConfig == nil || stored.DefaultTaxConfig.Stripe == nil || stored.DefaultTaxConfig.Stripe.Code != i.DefaultTaxConfig.Stripe.Code)
+	stripeCodeChanged := i.Stripe != nil && i.Stripe.Code != "" &&
+		(stored == nil || stored.Stripe == nil || stored.Stripe.Code != i.Stripe.Code)
 
 	if taxCodeChanged || stripeCodeChanged {
-		return InvoicingConfig{}, ValidationError{
-			Err: models.NewGenericValidationError(errors.New("setting a tax code (stripe.code / taxCodeId) on a billing profile's defaultTaxConfig is deprecated and can no longer be added or changed; the organization default tax code is used instead. You may still remove it. (behavior is unaffected.)")),
-		}
+		return nil, newDeprecatedDefaultTaxCodeError()
 	}
 
-	stripeCodeRemoved := stored.DefaultTaxConfig != nil && stored.DefaultTaxConfig.Stripe != nil && stored.DefaultTaxConfig.Stripe.Code != "" &&
-		(i.DefaultTaxConfig.Stripe == nil || i.DefaultTaxConfig.Stripe.Code == "")
+	stripeCodeRemoved := stored != nil && stored.Stripe != nil && stored.Stripe.Code != "" &&
+		(i.Stripe == nil || i.Stripe.Code == "")
 	if stripeCodeRemoved {
-		i.DefaultTaxConfig.TaxCodeID = nil
+		i.TaxCodeID = nil
 	}
 
-	return i, nil
+	return &i, nil
 }
 
 type GranularityResolution string
@@ -332,44 +394,6 @@ func (p Profile) Validate() error {
 	}
 
 	return nil
-}
-
-func (p Profile) Merge(o *CustomerOverride) Profile {
-	p.WorkflowConfig.Collection = CollectionConfig{
-		Alignment: lo.FromPtrOr(o.Collection.Alignment, p.WorkflowConfig.Collection.Alignment),
-		AnchoredAlignmentDetail: func() *AnchoredAlignmentDetail {
-			if o.Collection.Alignment == nil {
-				return p.WorkflowConfig.Collection.AnchoredAlignmentDetail
-			}
-
-			// This merge logic assumes that Alignment and AnchoredAlignmentDetail are always set together properly.
-			// We utilize this so CustomerOverride.AnchoredAlignmentDetail doesn't have to be Option[*AnchoredAlignmentDetail]
-			switch *o.Collection.Alignment {
-			case AlignmentKindAnchored:
-				return o.Collection.AnchoredAlignmentDetail
-			case AlignmentKindSubscription:
-				return o.Collection.AnchoredAlignmentDetail
-			default:
-				return nil
-			}
-		}(),
-		Interval: lo.FromPtrOr(o.Collection.Interval, p.WorkflowConfig.Collection.Interval),
-	}
-
-	p.WorkflowConfig.Invoicing = InvoicingConfig{
-		AutoAdvance:                  lo.FromPtrOr(o.Invoicing.AutoAdvance, p.WorkflowConfig.Invoicing.AutoAdvance),
-		DraftPeriod:                  lo.FromPtrOr(o.Invoicing.DraftPeriod, p.WorkflowConfig.Invoicing.DraftPeriod),
-		DueAfter:                     lo.FromPtrOr(o.Invoicing.DueAfter, p.WorkflowConfig.Invoicing.DueAfter),
-		ProgressiveBilling:           lo.FromPtrOr(o.Invoicing.ProgressiveBilling, p.WorkflowConfig.Invoicing.ProgressiveBilling),
-		SubscriptionEndProrationMode: p.WorkflowConfig.Invoicing.SubscriptionEndProrationMode,
-		DefaultTaxConfig:             productcatalog.MergeTaxConfigs(o.Invoicing.DefaultTaxConfig, p.WorkflowConfig.Invoicing.DefaultTaxConfig),
-	}
-
-	p.WorkflowConfig.Payment = PaymentConfig{
-		CollectionMethod: lo.FromPtrOr(o.Payment.CollectionMethod, p.WorkflowConfig.Payment.CollectionMethod),
-	}
-
-	return p
 }
 
 type ProfileAppReferences struct {

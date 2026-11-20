@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,9 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
-	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
+	"github.com/openmeterio/openmeter/openmeter/billing/models/stddetailedline"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating/service"
+	stdinvoicesanity "github.com/openmeterio/openmeter/openmeter/billing/stdinvoice/sanity"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
@@ -44,7 +46,6 @@ type CalculationTestCase struct {
 	Expect               rating.DetailedLines
 	ExpectErrorIs        error
 	PreviousBilledAmount alpacadecimal.Decimal
-	CreditsApplied       billing.CreditsApplied
 	Options              []rating.GenerateDetailedLinesOption
 
 	// UnitConfig, when set, is exposed on the rated line via GetUnitConfig. Standard
@@ -56,20 +57,21 @@ type CalculationTestCase struct {
 	UnitConfigEnabled bool
 }
 
-// unitConfigLineAccessor wraps a StandardLine to expose a unit_config, which the
-// StandardLine type itself never carries.
-type unitConfigLineAccessor struct {
+// testLineAccessor supplies rating context without constructing an invoice hierarchy.
+type testLineAccessor struct {
 	*billing.StandardLine
 
-	unitConfig *productcatalog.UnitConfig
+	unitConfig             *productcatalog.UnitConfig
+	progressivelyBilled    bool
+	previouslyBilledAmount alpacadecimal.Decimal
 }
 
-func (l unitConfigLineAccessor) GetUnitConfig() *productcatalog.UnitConfig {
+func (l testLineAccessor) GetUnitConfig() *productcatalog.UnitConfig {
 	return l.unitConfig
 }
 
 type Service interface {
-	GenerateDetailedLines(in rating.StandardLineAccessor, opts ...rating.GenerateDetailedLinesOption) (rating.GenerateDetailedLinesResult, error)
+	GenerateLegacyProgressiveBilledLines(in rating.LegacyProgressivelyBillableLineAccessor, opts ...rating.GenerateDetailedLinesOption) (rating.GenerateDetailedLinesResult, error)
 }
 
 func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
@@ -83,36 +85,9 @@ func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
 			}),
 			Currency:          "USD",
 			RateCardDiscounts: tc.Discounts,
-			CreditsApplied:    tc.CreditsApplied,
 		},
 		UsageBased: &billing.UsageBasedLine{
 			Price: lo.ToPtr(tc.Price),
-		},
-	}
-
-	fakeParentGroup := billing.SplitLineGroup{
-		NamespacedID: models.NamespacedID{
-			Namespace: "fake-namespace",
-			ID:        "fake-parent-group",
-		},
-		SplitLineGroupMutableFields: billing.SplitLineGroupMutableFields{
-			ServicePeriod: TestFullPeriod,
-		},
-	}
-
-	fakeHierarchy := billing.SplitLineHierarchy{
-		Group: fakeParentGroup,
-		Lines: []billing.LineWithInvoiceHeader{
-			billing.NewLineWithInvoiceHeader(billing.StandardLineWithInvoiceHeader{
-				Line: &billing.StandardLine{
-					StandardLineBase: billing.StandardLineBase{
-						// Period is unset, so this fake line is always in scope for NetAmount calculations
-						Totals: totals.Totals{
-							Amount: tc.PreviousBilledAmount,
-						},
-					},
-				},
-			}),
 		},
 	}
 
@@ -124,8 +99,6 @@ func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
 			From: TestFullPeriod.From.Add(time.Hour * 12),
 			To:   TestFullPeriod.To.Add(-time.Hour),
 		}
-		line.SplitLineGroupID = &fakeParentGroup.ID
-		line.SplitLineHierarchy = &fakeHierarchy
 
 	case LastInPeriodSplitLineMode:
 		line.Period = timeutil.ClosedPeriod{
@@ -133,8 +106,6 @@ func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
 			To:   TestFullPeriod.To,
 		}
 
-		line.SplitLineGroupID = &fakeParentGroup.ID
-		line.SplitLineHierarchy = &fakeHierarchy
 	}
 
 	// Let's set the usage on the line
@@ -143,14 +114,18 @@ func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
 	line.UsageBased.PreLinePeriodQuantity = &tc.Usage.PreLinePeriodQty
 	line.UsageBased.MeteredPreLinePeriodQuantity = &tc.Usage.PreLinePeriodQty
 
-	var accessor rating.StandardLineAccessor = line
-	if tc.UnitConfig != nil {
-		accessor = unitConfigLineAccessor{StandardLine: line, unitConfig: tc.UnitConfig}
+	accessor := testLineAccessor{
+		StandardLine:        line,
+		unitConfig:          tc.UnitConfig,
+		progressivelyBilled: tc.LineMode != SinglePerPeriodLineMode,
+	}
+	if accessor.progressivelyBilled {
+		accessor.previouslyBilledAmount = tc.PreviousBilledAmount
 	}
 
 	svc := service.New(service.Config{UnitConfigEnabled: tc.UnitConfigEnabled})
 
-	res, err := svc.GenerateDetailedLines(accessor, tc.Options...)
+	res, err := svc.GenerateLegacyProgressiveBilledLines(accessor, tc.Options...)
 	if err != nil {
 		if tc.ExpectErrorIs != nil {
 			require.ErrorIs(t, err, tc.ExpectErrorIs)
@@ -164,6 +139,48 @@ func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
 		t.Fatalf("expected error: %v", tc.ExpectErrorIs)
 	}
 
+	// Add the IDs and invoice fields that rating does not create, so we can
+	// check its output as an app would receive it. Keep the calculated amounts
+	// unchanged so these checks can catch mistakes in rating.
+	snapshot := &billing.StandardLine{
+		ID:         "line-1",
+		Namespace:  "sanity-rating",
+		InvoiceID:  "invoice-1",
+		Currency:   line.Currency,
+		Period:     line.Period,
+		UsageBased: &billing.UsageBasedLine{Price: line.UsageBased.Price},
+		Totals:     res.Totals,
+	}
+
+	snapshot.DetailedLines = lo.Map(res.DetailedLines, func(detail rating.DetailedLine, idx int) billing.DetailedLine {
+		mapped := billing.DetailedLine{
+			ID:                     fmt.Sprintf("detail-%d", idx),
+			Namespace:              snapshot.Namespace,
+			InvoiceID:              snapshot.InvoiceID,
+			ChildUniqueReferenceID: detail.ChildUniqueReferenceID,
+			ServicePeriod:          lo.FromPtrOr(detail.Period, snapshot.Period),
+			PerUnitAmount:          detail.PerUnitAmount,
+			Quantity:               detail.Quantity,
+			Category:               lo.CoalesceOrEmpty(detail.Category, stddetailedline.CategoryRegular),
+			AmountDiscounts:        detail.AmountDiscounts.Clone(),
+			Totals:                 detail.Totals,
+		}
+		for j := range mapped.AmountDiscounts {
+			mapped.AmountDiscounts[j].ID = fmt.Sprintf("discount-%d-%d", idx, j)
+		}
+
+		return mapped
+	})
+	sanityErr := stdinvoicesanity.Validate(billing.StandardInvoice{
+		ID:        snapshot.InvoiceID,
+		Namespace: snapshot.Namespace,
+		Period:    lo.ToPtr(snapshot.Period),
+		Currency:  snapshot.Currency,
+		Totals:    res.Totals,
+		Lines:     billing.NewStandardInvoiceLines(billing.StandardLines{snapshot}),
+	})
+	require.NoError(t, sanityErr)
+
 	// let's get around nil slices
 	if len(tc.Expect) == 0 && len(res.DetailedLines) == 0 {
 		return
@@ -176,4 +193,16 @@ func RunCalculationTestCase(t *testing.T, tc CalculationTestCase) {
 	require.NoError(t, err)
 
 	require.JSONEq(t, string(expectJSON), string(resJSON))
+}
+
+func (l testLineAccessor) IsProgressivelyBilled() bool {
+	return l.progressivelyBilled
+}
+
+func (l testLineAccessor) GetProgressivelyBilledServicePeriod() (timeutil.ClosedPeriod, error) {
+	return TestFullPeriod, nil
+}
+
+func (l testLineAccessor) GetPreviouslyBilledAmount() (alpacadecimal.Decimal, error) {
+	return l.previouslyBilledAmount, nil
 }

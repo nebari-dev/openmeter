@@ -6,9 +6,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
@@ -20,8 +20,8 @@ import (
 
 type (
 	ListPlansRequest  = plan.ListPlansInput
-	ListPlansResponse = response.PagePaginationResponse[api.BillingPlan]
-	ListPlansParams   = api.ListPlansParams
+	ListPlansResponse = response.PagePaginationResponse[apiv3models.BillingPlan]
+	ListPlansParams   = apiv3models.ListPlansParams
 	ListPlansHandler  httptransport.HandlerWithArgs[ListPlansRequest, ListPlansResponse, ListPlansParams]
 )
 
@@ -63,6 +63,7 @@ func (h *handler) ListPlans() ListPlansHandler {
 						{Field: "filter[key]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Key = key
 
 				name, err := filters.FromAPIFilterString(params.Filter.Name)
@@ -71,6 +72,7 @@ func (h *handler) ListPlans() ListPlansHandler {
 						{Field: "filter[name]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Name = name
 
 				currency, err := filters.FromAPIFilterStringExact(params.Filter.Currency)
@@ -79,6 +81,7 @@ func (h *handler) ListPlans() ListPlansHandler {
 						{Field: "filter[currency]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Currency = currency
 
 				status, err := filters.FromAPIStatusFilter[productcatalog.PlanStatus](ctx, params.Filter.Status)
@@ -87,6 +90,7 @@ func (h *handler) ListPlans() ListPlansHandler {
 						{Field: "filter[status]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Status = status
 			}
 
@@ -97,10 +101,12 @@ func (h *handler) ListPlans() ListPlansHandler {
 						{Field: "sort", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				orderBy, err := FromAPIPlanSortField(ctx, sort.Field)
 				if err != nil {
 					return ListPlansRequest{}, err
 				}
+
 				req.OrderBy = orderBy
 				req.Order = sort.Order.ToSortxOrder()
 			}
@@ -113,7 +119,7 @@ func (h *handler) ListPlans() ListPlansHandler {
 				return ListPlansResponse{}, err
 			}
 
-			items := make([]api.BillingPlan, 0, len(result.Items))
+			items := make([]apiv3models.BillingPlan, 0, len(result.Items))
 			for _, p := range result.Items {
 				billingPlan, err := ToAPIBillingPlan(p)
 				if err != nil {

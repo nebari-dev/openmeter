@@ -3,6 +3,7 @@
 package db
 
 import (
+	"encoding/json/jsontext"
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
@@ -17,14 +18,13 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/appcustominvoicingcustomer"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/appstripe"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/appstripecustomer"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/appstripeinvoicegeneration"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/balancesnapshot"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billingcustomerlock"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billingcustomeroverride"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinggatheringinvoiceline"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoice"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceflatfeelineconfig"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceline"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicelinediscount"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicelineusagediscount"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicesplitlinegroup"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceusagebasedlineconfig"
@@ -94,10 +94,10 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscription"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionaddon"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionaddonquantity"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionbillingsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptioncostbasispin"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionitem"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionphase"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionsyncstate"
 	dbtaxcode "github.com/openmeterio/openmeter/openmeter/ent/db/taxcode"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/usagereset"
 	"github.com/openmeterio/openmeter/openmeter/ent/schema"
@@ -448,6 +448,43 @@ func init() {
 	appstripecustomerDescStripeCustomerID := appstripecustomerFields[2].Descriptor()
 	// appstripecustomer.StripeCustomerIDValidator is a validator for the "stripe_customer_id" field. It is called by the builders before save.
 	appstripecustomer.StripeCustomerIDValidator = appstripecustomerDescStripeCustomerID.Validators[0].(func(string) error)
+	appstripeinvoicegenerationMixin := schema.AppStripeInvoiceGeneration{}.Mixin()
+	appstripeinvoicegenerationMixinFields0 := appstripeinvoicegenerationMixin[0].Fields()
+	_ = appstripeinvoicegenerationMixinFields0
+	appstripeinvoicegenerationMixinFields1 := appstripeinvoicegenerationMixin[1].Fields()
+	_ = appstripeinvoicegenerationMixinFields1
+	appstripeinvoicegenerationMixinFields2 := appstripeinvoicegenerationMixin[2].Fields()
+	_ = appstripeinvoicegenerationMixinFields2
+	appstripeinvoicegenerationFields := schema.AppStripeInvoiceGeneration{}.Fields()
+	_ = appstripeinvoicegenerationFields
+	// appstripeinvoicegenerationDescNamespace is the schema descriptor for namespace field.
+	appstripeinvoicegenerationDescNamespace := appstripeinvoicegenerationMixinFields1[0].Descriptor()
+	// appstripeinvoicegeneration.NamespaceValidator is a validator for the "namespace" field. It is called by the builders before save.
+	appstripeinvoicegeneration.NamespaceValidator = appstripeinvoicegenerationDescNamespace.Validators[0].(func(string) error)
+	// appstripeinvoicegenerationDescCreatedAt is the schema descriptor for created_at field.
+	appstripeinvoicegenerationDescCreatedAt := appstripeinvoicegenerationMixinFields2[0].Descriptor()
+	// appstripeinvoicegeneration.DefaultCreatedAt holds the default value on creation for the created_at field.
+	appstripeinvoicegeneration.DefaultCreatedAt = appstripeinvoicegenerationDescCreatedAt.Default.(func() time.Time)
+	// appstripeinvoicegenerationDescUpdatedAt is the schema descriptor for updated_at field.
+	appstripeinvoicegenerationDescUpdatedAt := appstripeinvoicegenerationMixinFields2[1].Descriptor()
+	// appstripeinvoicegeneration.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	appstripeinvoicegeneration.DefaultUpdatedAt = appstripeinvoicegenerationDescUpdatedAt.Default.(func() time.Time)
+	// appstripeinvoicegeneration.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	appstripeinvoicegeneration.UpdateDefaultUpdatedAt = appstripeinvoicegenerationDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// appstripeinvoicegenerationDescInvoiceID is the schema descriptor for invoice_id field.
+	appstripeinvoicegenerationDescInvoiceID := appstripeinvoicegenerationFields[0].Descriptor()
+	// appstripeinvoicegeneration.InvoiceIDValidator is a validator for the "invoice_id" field. It is called by the builders before save.
+	appstripeinvoicegeneration.InvoiceIDValidator = appstripeinvoicegenerationDescInvoiceID.Validators[0].(func(string) error)
+	// appstripeinvoicegenerationDescGeneration is the schema descriptor for generation field.
+	appstripeinvoicegenerationDescGeneration := appstripeinvoicegenerationFields[1].Descriptor()
+	// appstripeinvoicegeneration.DefaultGeneration holds the default value on creation for the generation field.
+	appstripeinvoicegeneration.DefaultGeneration = appstripeinvoicegenerationDescGeneration.Default.(int)
+	// appstripeinvoicegeneration.GenerationValidator is a validator for the "generation" field. It is called by the builders before save.
+	appstripeinvoicegeneration.GenerationValidator = appstripeinvoicegenerationDescGeneration.Validators[0].(func(int) error)
+	// appstripeinvoicegenerationDescID is the schema descriptor for id field.
+	appstripeinvoicegenerationDescID := appstripeinvoicegenerationMixinFields0[0].Descriptor()
+	// appstripeinvoicegeneration.DefaultID holds the default value on creation for the id field.
+	appstripeinvoicegeneration.DefaultID = appstripeinvoicegenerationDescID.Default.(func() string)
 	balancesnapshotMixin := schema.BalanceSnapshot{}.Mixin()
 	balancesnapshotMixinFields0 := balancesnapshotMixin[0].Fields()
 	_ = balancesnapshotMixinFields0
@@ -632,32 +669,17 @@ func init() {
 	// billinginvoice.SourceBillingProfileIDValidator is a validator for the "source_billing_profile_id" field. It is called by the builders before save.
 	billinginvoice.SourceBillingProfileIDValidator = billinginvoiceDescSourceBillingProfileID.Validators[0].(func(string) error)
 	// billinginvoiceDescCurrency is the schema descriptor for currency field.
-	billinginvoiceDescCurrency := billinginvoiceFields[16].Descriptor()
+	billinginvoiceDescCurrency := billinginvoiceFields[18].Descriptor()
 	// billinginvoice.CurrencyValidator is a validator for the "currency" field. It is called by the builders before save.
 	billinginvoice.CurrencyValidator = billinginvoiceDescCurrency.Validators[0].(func(string) error)
 	// billinginvoiceDescSchemaLevel is the schema descriptor for schema_level field.
-	billinginvoiceDescSchemaLevel := billinginvoiceFields[28].Descriptor()
+	billinginvoiceDescSchemaLevel := billinginvoiceFields[30].Descriptor()
 	// billinginvoice.DefaultSchemaLevel holds the default value on creation for the schema_level field.
 	billinginvoice.DefaultSchemaLevel = billinginvoiceDescSchemaLevel.Default.(int)
 	// billinginvoiceDescID is the schema descriptor for id field.
 	billinginvoiceDescID := billinginvoiceMixinFields0[0].Descriptor()
 	// billinginvoice.DefaultID holds the default value on creation for the id field.
 	billinginvoice.DefaultID = billinginvoiceDescID.Default.(func() string)
-	billinginvoiceflatfeelineconfigMixin := schema.BillingInvoiceFlatFeeLineConfig{}.Mixin()
-	billinginvoiceflatfeelineconfigMixinFields0 := billinginvoiceflatfeelineconfigMixin[0].Fields()
-	_ = billinginvoiceflatfeelineconfigMixinFields0
-	billinginvoiceflatfeelineconfigMixinFields1 := billinginvoiceflatfeelineconfigMixin[1].Fields()
-	_ = billinginvoiceflatfeelineconfigMixinFields1
-	billinginvoiceflatfeelineconfigFields := schema.BillingInvoiceFlatFeeLineConfig{}.Fields()
-	_ = billinginvoiceflatfeelineconfigFields
-	// billinginvoiceflatfeelineconfigDescNamespace is the schema descriptor for namespace field.
-	billinginvoiceflatfeelineconfigDescNamespace := billinginvoiceflatfeelineconfigMixinFields0[0].Descriptor()
-	// billinginvoiceflatfeelineconfig.NamespaceValidator is a validator for the "namespace" field. It is called by the builders before save.
-	billinginvoiceflatfeelineconfig.NamespaceValidator = billinginvoiceflatfeelineconfigDescNamespace.Validators[0].(func(string) error)
-	// billinginvoiceflatfeelineconfigDescID is the schema descriptor for id field.
-	billinginvoiceflatfeelineconfigDescID := billinginvoiceflatfeelineconfigMixinFields1[0].Descriptor()
-	// billinginvoiceflatfeelineconfig.DefaultID holds the default value on creation for the id field.
-	billinginvoiceflatfeelineconfig.DefaultID = billinginvoiceflatfeelineconfigDescID.Default.(func() string)
 	billinginvoicelineMixin := schema.BillingInvoiceLine{}.Mixin()
 	billinginvoicelineMixinFields1 := billinginvoicelineMixin[1].Fields()
 	_ = billinginvoicelineMixinFields1
@@ -693,36 +715,6 @@ func init() {
 	billinginvoicelineDescID := billinginvoicelineMixinFields1[0].Descriptor()
 	// billinginvoiceline.DefaultID holds the default value on creation for the id field.
 	billinginvoiceline.DefaultID = billinginvoicelineDescID.Default.(func() string)
-	billinginvoicelinediscountMixin := schema.BillingInvoiceLineDiscount{}.Mixin()
-	billinginvoicelinediscountMixinFields0 := billinginvoicelinediscountMixin[0].Fields()
-	_ = billinginvoicelinediscountMixinFields0
-	billinginvoicelinediscountMixinFields1 := billinginvoicelinediscountMixin[1].Fields()
-	_ = billinginvoicelinediscountMixinFields1
-	billinginvoicelinediscountMixinFields2 := billinginvoicelinediscountMixin[2].Fields()
-	_ = billinginvoicelinediscountMixinFields2
-	billinginvoicelinediscountFields := schema.BillingInvoiceLineDiscount{}.Fields()
-	_ = billinginvoicelinediscountFields
-	// billinginvoicelinediscountDescNamespace is the schema descriptor for namespace field.
-	billinginvoicelinediscountDescNamespace := billinginvoicelinediscountMixinFields1[0].Descriptor()
-	// billinginvoicelinediscount.NamespaceValidator is a validator for the "namespace" field. It is called by the builders before save.
-	billinginvoicelinediscount.NamespaceValidator = billinginvoicelinediscountDescNamespace.Validators[0].(func(string) error)
-	// billinginvoicelinediscountDescCreatedAt is the schema descriptor for created_at field.
-	billinginvoicelinediscountDescCreatedAt := billinginvoicelinediscountMixinFields2[0].Descriptor()
-	// billinginvoicelinediscount.DefaultCreatedAt holds the default value on creation for the created_at field.
-	billinginvoicelinediscount.DefaultCreatedAt = billinginvoicelinediscountDescCreatedAt.Default.(func() time.Time)
-	// billinginvoicelinediscountDescUpdatedAt is the schema descriptor for updated_at field.
-	billinginvoicelinediscountDescUpdatedAt := billinginvoicelinediscountMixinFields2[1].Descriptor()
-	// billinginvoicelinediscount.DefaultUpdatedAt holds the default value on creation for the updated_at field.
-	billinginvoicelinediscount.DefaultUpdatedAt = billinginvoicelinediscountDescUpdatedAt.Default.(func() time.Time)
-	// billinginvoicelinediscount.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
-	billinginvoicelinediscount.UpdateDefaultUpdatedAt = billinginvoicelinediscountDescUpdatedAt.UpdateDefault.(func() time.Time)
-	// billinginvoicelinediscountDescSourceDiscount is the schema descriptor for source_discount field.
-	billinginvoicelinediscountDescSourceDiscount := billinginvoicelinediscountFields[2].Descriptor()
-	billinginvoicelinediscount.ValueScanner.SourceDiscount = billinginvoicelinediscountDescSourceDiscount.ValueScanner.(field.TypeValueScanner[*billing.DiscountReason])
-	// billinginvoicelinediscountDescID is the schema descriptor for id field.
-	billinginvoicelinediscountDescID := billinginvoicelinediscountMixinFields0[0].Descriptor()
-	// billinginvoicelinediscount.DefaultID holds the default value on creation for the id field.
-	billinginvoicelinediscount.DefaultID = billinginvoicelinediscountDescID.Default.(func() string)
 	billinginvoicelineusagediscountMixin := schema.BillingInvoiceLineUsageDiscount{}.Mixin()
 	billinginvoicelineusagediscountMixinFields0 := billinginvoicelineusagediscountMixin[0].Fields()
 	_ = billinginvoicelineusagediscountMixinFields0
@@ -1011,11 +1003,11 @@ func init() {
 	// billingworkflowconfig.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	billingworkflowconfig.UpdateDefaultUpdatedAt = billingworkflowconfigDescUpdatedAt.UpdateDefault.(func() time.Time)
 	// billingworkflowconfigDescTaxEnabled is the schema descriptor for tax_enabled field.
-	billingworkflowconfigDescTaxEnabled := billingworkflowconfigFields[10].Descriptor()
+	billingworkflowconfigDescTaxEnabled := billingworkflowconfigFields[11].Descriptor()
 	// billingworkflowconfig.DefaultTaxEnabled holds the default value on creation for the tax_enabled field.
 	billingworkflowconfig.DefaultTaxEnabled = billingworkflowconfigDescTaxEnabled.Default.(bool)
 	// billingworkflowconfigDescTaxEnforced is the schema descriptor for tax_enforced field.
-	billingworkflowconfigDescTaxEnforced := billingworkflowconfigFields[11].Descriptor()
+	billingworkflowconfigDescTaxEnforced := billingworkflowconfigFields[12].Descriptor()
 	// billingworkflowconfig.DefaultTaxEnforced holds the default value on creation for the tax_enforced field.
 	billingworkflowconfig.DefaultTaxEnforced = billingworkflowconfigDescTaxEnforced.Default.(bool)
 	// billingworkflowconfigDescID is the schema descriptor for id field.
@@ -2744,6 +2736,11 @@ func init() {
 	notificationchannel.DefaultUpdatedAt = notificationchannelDescUpdatedAt.Default.(func() time.Time)
 	// notificationchannel.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	notificationchannel.UpdateDefaultUpdatedAt = notificationchannelDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// notificationchannelDescType is the schema descriptor for type field.
+	notificationchannelDescType := notificationchannelFields[0].Descriptor()
+	notificationchannel.ValueScanner.Type = notificationchannelDescType.ValueScanner.(field.TypeValueScanner[notification.ChannelType])
+	// notificationchannel.TypeValidator is a validator for the "type" field. It is called by the builders before save.
+	notificationchannel.TypeValidator = notificationchannelDescType.Validators[0].(func(string) error)
 	// notificationchannelDescName is the schema descriptor for name field.
 	notificationchannelDescName := notificationchannelFields[1].Descriptor()
 	// notificationchannel.NameValidator is a validator for the "name" field. It is called by the builders before save.
@@ -2754,7 +2751,39 @@ func init() {
 	notificationchannel.DefaultDisabled = notificationchannelDescDisabled.Default.(bool)
 	// notificationchannelDescConfig is the schema descriptor for config field.
 	notificationchannelDescConfig := notificationchannelFields[3].Descriptor()
-	notificationchannel.ValueScanner.Config = notificationchannelDescConfig.ValueScanner.(field.TypeValueScanner[notification.ChannelConfig])
+	notificationchannel.ValueScanner.Config = notificationchannelDescConfig.ValueScanner.(field.TypeValueScanner[jsontext.Value])
+	// notificationchannelDescEventTypeFilter is the schema descriptor for event_type_filter field.
+	notificationchannelDescEventTypeFilter := notificationchannelFields[4].Descriptor()
+	notificationchannel.ValueScanner.EventTypeFilter = notificationchannelDescEventTypeFilter.ValueScanner.(field.TypeValueScanner[[]string])
+	// notificationchannelDescProviderData is the schema descriptor for provider_data field.
+	notificationchannelDescProviderData := notificationchannelFields[5].Descriptor()
+	notificationchannel.ValueScanner.ProviderData = notificationchannelDescProviderData.ValueScanner.(field.TypeValueScanner[map[string]string])
+	// notificationchannelDescGeneration is the schema descriptor for generation field.
+	notificationchannelDescGeneration := notificationchannelFields[6].Descriptor()
+	// notificationchannel.DefaultGeneration holds the default value on creation for the generation field.
+	notificationchannel.DefaultGeneration = notificationchannelDescGeneration.Default.(int)
+	// notificationchannel.GenerationValidator is a validator for the "generation" field. It is called by the builders before save.
+	notificationchannel.GenerationValidator = func() func(int) error {
+		validators := notificationchannelDescGeneration.Validators
+		fns := [...]func(int) error{
+			validators[0].(func(int) error),
+			validators[1].(func(int) error),
+		}
+		return func(generation int) error {
+			for _, fn := range fns {
+				if err := fn(generation); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// notificationchannelDescReconcileStatus is the schema descriptor for reconcile_status field.
+	notificationchannelDescReconcileStatus := notificationchannelFields[7].Descriptor()
+	// notificationchannel.DefaultReconcileStatus holds the default value on creation for the reconcile_status field.
+	notificationchannel.DefaultReconcileStatus = notification.ChannelReconcileStatus(notificationchannelDescReconcileStatus.Default.(string))
+	// notificationchannel.ReconcileStatusValidator is a validator for the "reconcile_status" field. It is called by the builders before save.
+	notificationchannel.ReconcileStatusValidator = notificationchannelDescReconcileStatus.Validators[0].(func(string) error)
 	// notificationchannelDescID is the schema descriptor for id field.
 	notificationchannelDescID := notificationchannelMixinFields0[0].Descriptor()
 	// notificationchannel.DefaultID holds the default value on creation for the id field.
@@ -2774,6 +2803,15 @@ func init() {
 	notificationeventDescCreatedAt := notificationeventFields[0].Descriptor()
 	// notificationevent.DefaultCreatedAt holds the default value on creation for the created_at field.
 	notificationevent.DefaultCreatedAt = notificationeventDescCreatedAt.Default.(func() time.Time)
+	// notificationeventDescPayload is the schema descriptor for payload field.
+	notificationeventDescPayload := notificationeventFields[3].Descriptor()
+	notificationevent.ValueScanner.Payload = notificationeventDescPayload.ValueScanner.(field.TypeValueScanner[jsontext.Value])
+	// notificationeventDescRuleSnapshot is the schema descriptor for rule_snapshot field.
+	notificationeventDescRuleSnapshot := notificationeventFields[4].Descriptor()
+	notificationevent.ValueScanner.RuleSnapshot = notificationeventDescRuleSnapshot.ValueScanner.(field.TypeValueScanner[jsontext.Value])
+	// notificationeventDescProviderData is the schema descriptor for provider_data field.
+	notificationeventDescProviderData := notificationeventFields[5].Descriptor()
+	notificationevent.ValueScanner.ProviderData = notificationeventDescProviderData.ValueScanner.(field.TypeValueScanner[map[string]string])
 	// notificationeventDescID is the schema descriptor for id field.
 	notificationeventDescID := notificationeventMixinFields0[0].Descriptor()
 	// notificationevent.DefaultID holds the default value on creation for the id field.
@@ -2807,6 +2845,36 @@ func init() {
 	notificationeventdeliverystatusDescChannelID := notificationeventdeliverystatusFields[3].Descriptor()
 	// notificationeventdeliverystatus.ChannelIDValidator is a validator for the "channel_id" field. It is called by the builders before save.
 	notificationeventdeliverystatus.ChannelIDValidator = notificationeventdeliverystatusDescChannelID.Validators[0].(func(string) error)
+	// notificationeventdeliverystatusDescState is the schema descriptor for state field.
+	notificationeventdeliverystatusDescState := notificationeventdeliverystatusFields[4].Descriptor()
+	// notificationeventdeliverystatus.DefaultState holds the default value on creation for the state field.
+	notificationeventdeliverystatus.DefaultState = notificationeventdeliverystatusDescState.Default.(string)
+	// notificationeventdeliverystatusDescDispatchGeneration is the schema descriptor for dispatch_generation field.
+	notificationeventdeliverystatusDescDispatchGeneration := notificationeventdeliverystatusFields[5].Descriptor()
+	// notificationeventdeliverystatus.DefaultDispatchGeneration holds the default value on creation for the dispatch_generation field.
+	notificationeventdeliverystatus.DefaultDispatchGeneration = notificationeventdeliverystatusDescDispatchGeneration.Default.(int)
+	// notificationeventdeliverystatus.DispatchGenerationValidator is a validator for the "dispatch_generation" field. It is called by the builders before save.
+	notificationeventdeliverystatus.DispatchGenerationValidator = func() func(int) error {
+		validators := notificationeventdeliverystatusDescDispatchGeneration.Validators
+		fns := [...]func(int) error{
+			validators[0].(func(int) error),
+			validators[1].(func(int) error),
+		}
+		return func(dispatch_generation int) error {
+			for _, fn := range fns {
+				if err := fn(dispatch_generation); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// notificationeventdeliverystatusDescAttempts is the schema descriptor for attempts field.
+	notificationeventdeliverystatusDescAttempts := notificationeventdeliverystatusFields[9].Descriptor()
+	notificationeventdeliverystatus.ValueScanner.Attempts = notificationeventdeliverystatusDescAttempts.ValueScanner.(field.TypeValueScanner[jsontext.Value])
+	// notificationeventdeliverystatusDescProviderData is the schema descriptor for provider_data field.
+	notificationeventdeliverystatusDescProviderData := notificationeventdeliverystatusFields[10].Descriptor()
+	notificationeventdeliverystatus.ValueScanner.ProviderData = notificationeventdeliverystatusDescProviderData.ValueScanner.(field.TypeValueScanner[map[string]string])
 	// notificationeventdeliverystatusDescID is the schema descriptor for id field.
 	notificationeventdeliverystatusDescID := notificationeventdeliverystatusMixinFields0[0].Descriptor()
 	// notificationeventdeliverystatus.DefaultID holds the default value on creation for the id field.
@@ -2844,7 +2912,7 @@ func init() {
 	notificationrule.DefaultDisabled = notificationruleDescDisabled.Default.(bool)
 	// notificationruleDescConfig is the schema descriptor for config field.
 	notificationruleDescConfig := notificationruleFields[3].Descriptor()
-	notificationrule.ValueScanner.Config = notificationruleDescConfig.ValueScanner.(field.TypeValueScanner[notification.RuleConfig])
+	notificationrule.ValueScanner.Config = notificationruleDescConfig.ValueScanner.(field.TypeValueScanner[jsontext.Value])
 	// notificationruleDescID is the schema descriptor for id field.
 	notificationruleDescID := notificationruleMixinFields0[0].Descriptor()
 	// notificationrule.DefaultID holds the default value on creation for the id field.
@@ -3160,7 +3228,7 @@ func init() {
 		}
 	}()
 	// subscriptionDescProRatingConfig is the schema descriptor for pro_rating_config field.
-	subscriptionDescProRatingConfig := subscriptionFields[8].Descriptor()
+	subscriptionDescProRatingConfig := subscriptionFields[9].Descriptor()
 	// subscription.DefaultProRatingConfig holds the default value on creation for the pro_rating_config field.
 	subscription.DefaultProRatingConfig = subscriptionDescProRatingConfig.Default.(func() productcatalog.ProRatingConfig)
 	subscription.ValueScanner.ProRatingConfig = subscriptionDescProRatingConfig.ValueScanner.(field.TypeValueScanner[productcatalog.ProRatingConfig])
@@ -3244,25 +3312,6 @@ func init() {
 	subscriptionaddonquantityDescID := subscriptionaddonquantityMixinFields0[0].Descriptor()
 	// subscriptionaddonquantity.DefaultID holds the default value on creation for the id field.
 	subscriptionaddonquantity.DefaultID = subscriptionaddonquantityDescID.Default.(func() string)
-	subscriptionbillingsyncstateMixin := schema.SubscriptionBillingSyncState{}.Mixin()
-	subscriptionbillingsyncstateMixinFields0 := subscriptionbillingsyncstateMixin[0].Fields()
-	_ = subscriptionbillingsyncstateMixinFields0
-	subscriptionbillingsyncstateMixinFields1 := subscriptionbillingsyncstateMixin[1].Fields()
-	_ = subscriptionbillingsyncstateMixinFields1
-	subscriptionbillingsyncstateFields := schema.SubscriptionBillingSyncState{}.Fields()
-	_ = subscriptionbillingsyncstateFields
-	// subscriptionbillingsyncstateDescNamespace is the schema descriptor for namespace field.
-	subscriptionbillingsyncstateDescNamespace := subscriptionbillingsyncstateMixinFields1[0].Descriptor()
-	// subscriptionbillingsyncstate.NamespaceValidator is a validator for the "namespace" field. It is called by the builders before save.
-	subscriptionbillingsyncstate.NamespaceValidator = subscriptionbillingsyncstateDescNamespace.Validators[0].(func(string) error)
-	// subscriptionbillingsyncstateDescSubscriptionID is the schema descriptor for subscription_id field.
-	subscriptionbillingsyncstateDescSubscriptionID := subscriptionbillingsyncstateFields[0].Descriptor()
-	// subscriptionbillingsyncstate.SubscriptionIDValidator is a validator for the "subscription_id" field. It is called by the builders before save.
-	subscriptionbillingsyncstate.SubscriptionIDValidator = subscriptionbillingsyncstateDescSubscriptionID.Validators[0].(func(string) error)
-	// subscriptionbillingsyncstateDescID is the schema descriptor for id field.
-	subscriptionbillingsyncstateDescID := subscriptionbillingsyncstateMixinFields0[0].Descriptor()
-	// subscriptionbillingsyncstate.DefaultID holds the default value on creation for the id field.
-	subscriptionbillingsyncstate.DefaultID = subscriptionbillingsyncstateDescID.Default.(func() string)
 	subscriptioncostbasispinMixin := schema.SubscriptionCostBasisPin{}.Mixin()
 	subscriptioncostbasispinMixinFields0 := subscriptioncostbasispinMixin[0].Fields()
 	_ = subscriptioncostbasispinMixinFields0
@@ -3440,6 +3489,43 @@ func init() {
 	subscriptionphaseDescID := subscriptionphaseMixinFields0[0].Descriptor()
 	// subscriptionphase.DefaultID holds the default value on creation for the id field.
 	subscriptionphase.DefaultID = subscriptionphaseDescID.Default.(func() string)
+	subscriptionsyncstateMixin := schema.SubscriptionSyncState{}.Mixin()
+	subscriptionsyncstateMixinFields0 := subscriptionsyncstateMixin[0].Fields()
+	_ = subscriptionsyncstateMixinFields0
+	subscriptionsyncstateMixinFields1 := subscriptionsyncstateMixin[1].Fields()
+	_ = subscriptionsyncstateMixinFields1
+	subscriptionsyncstateFields := schema.SubscriptionSyncState{}.Fields()
+	_ = subscriptionsyncstateFields
+	// subscriptionsyncstateDescNamespace is the schema descriptor for namespace field.
+	subscriptionsyncstateDescNamespace := subscriptionsyncstateMixinFields0[1].Descriptor()
+	// subscriptionsyncstate.NamespaceValidator is a validator for the "namespace" field. It is called by the builders before save.
+	subscriptionsyncstate.NamespaceValidator = subscriptionsyncstateDescNamespace.Validators[0].(func(string) error)
+	// subscriptionsyncstateDescCreatedAt is the schema descriptor for created_at field.
+	subscriptionsyncstateDescCreatedAt := subscriptionsyncstateMixinFields1[0].Descriptor()
+	// subscriptionsyncstate.DefaultCreatedAt holds the default value on creation for the created_at field.
+	subscriptionsyncstate.DefaultCreatedAt = subscriptionsyncstateDescCreatedAt.Default.(func() time.Time)
+	// subscriptionsyncstateDescUpdatedAt is the schema descriptor for updated_at field.
+	subscriptionsyncstateDescUpdatedAt := subscriptionsyncstateMixinFields1[1].Descriptor()
+	// subscriptionsyncstate.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	subscriptionsyncstate.DefaultUpdatedAt = subscriptionsyncstateDescUpdatedAt.Default.(func() time.Time)
+	// subscriptionsyncstate.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	subscriptionsyncstate.UpdateDefaultUpdatedAt = subscriptionsyncstateDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// subscriptionsyncstateDescSubscriptionID is the schema descriptor for subscription_id field.
+	subscriptionsyncstateDescSubscriptionID := subscriptionsyncstateFields[0].Descriptor()
+	// subscriptionsyncstate.SubscriptionIDValidator is a validator for the "subscription_id" field. It is called by the builders before save.
+	subscriptionsyncstate.SubscriptionIDValidator = subscriptionsyncstateDescSubscriptionID.Validators[0].(func(string) error)
+	// subscriptionsyncstateDescLastSyncedSubsRevision is the schema descriptor for last_synced_subs_revision field.
+	subscriptionsyncstateDescLastSyncedSubsRevision := subscriptionsyncstateFields[4].Descriptor()
+	// subscriptionsyncstate.LastSyncedSubsRevisionValidator is a validator for the "last_synced_subs_revision" field. It is called by the builders before save.
+	subscriptionsyncstate.LastSyncedSubsRevisionValidator = subscriptionsyncstateDescLastSyncedSubsRevision.Validators[0].(func(string) error)
+	// subscriptionsyncstateDescCurrentSubsRevision is the schema descriptor for current_subs_revision field.
+	subscriptionsyncstateDescCurrentSubsRevision := subscriptionsyncstateFields[5].Descriptor()
+	// subscriptionsyncstate.CurrentSubsRevisionValidator is a validator for the "current_subs_revision" field. It is called by the builders before save.
+	subscriptionsyncstate.CurrentSubsRevisionValidator = subscriptionsyncstateDescCurrentSubsRevision.Validators[0].(func(string) error)
+	// subscriptionsyncstateDescID is the schema descriptor for id field.
+	subscriptionsyncstateDescID := subscriptionsyncstateMixinFields0[0].Descriptor()
+	// subscriptionsyncstate.DefaultID holds the default value on creation for the id field.
+	subscriptionsyncstate.DefaultID = subscriptionsyncstateDescID.Default.(func() string)
 	dbtaxcodeMixin := schema.TaxCode{}.Mixin()
 	dbtaxcodeMixinFields0 := dbtaxcodeMixin[0].Fields()
 	_ = dbtaxcodeMixinFields0

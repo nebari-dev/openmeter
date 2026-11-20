@@ -122,6 +122,7 @@ func (s subjectCustomerHook) PostDelete(ctx context.Context, sub *subject.Subjec
 		if cus.UsageAttribution != nil {
 			subjectKeysStr = strings.Join(cus.UsageAttribution.SubjectKeys, ", ")
 		}
+
 		span.AddEvent("updated customer usage attribution", trace.WithAttributes(
 			attribute.String("customer.usage_attribution.subject_keys", subjectKeysStr),
 		))
@@ -174,10 +175,10 @@ func NewSubjectCustomerHook(config SubjectCustomerHookConfig) (SubjectCustomerHo
 	}
 
 	provisioner, err := NewCustomerProvisioner(CustomerProvisionerConfig{
-		Customer:         config.Customer,
-		CustomerOverride: config.CustomerOverride,
-		Logger:           config.Logger,
-		Tracer:           config.Tracer,
+		Customer:               config.Customer,
+		CustomerBillingProfile: config.CustomerBillingProfile,
+		Logger:                 config.Logger,
+		Tracer:                 config.Tracer,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize customer provisioner: %w", err)
@@ -192,10 +193,10 @@ func NewSubjectCustomerHook(config SubjectCustomerHookConfig) (SubjectCustomerHo
 }
 
 type SubjectCustomerHookConfig struct {
-	Customer         customer.Service
-	CustomerOverride billing.CustomerOverrideService
-	Logger           *slog.Logger
-	Tracer           trace.Tracer
+	Customer               customer.Service
+	CustomerBillingProfile billing.CustomerBillingProfileService
+	Logger                 *slog.Logger
+	Tracer                 trace.Tracer
 
 	// IgnoreErrors if set to true makes the hooks ignore (not returning error)
 	IgnoreErrors bool
@@ -208,7 +209,7 @@ func (c SubjectCustomerHookConfig) Validate() error {
 		errs = append(errs, fmt.Errorf("customer service is required"))
 	}
 
-	if c.CustomerOverride == nil {
+	if c.CustomerBillingProfile == nil {
 		errs = append(errs, fmt.Errorf("customer override service is required"))
 	}
 
@@ -263,10 +264,10 @@ func CmpSubjectCustomer(s *subject.Subject, c *customer.Customer) bool {
 var _ models.Validator = (*CustomerProvisionerConfig)(nil)
 
 type CustomerProvisionerConfig struct {
-	Customer         customer.Service
-	CustomerOverride billing.CustomerOverrideService
-	Logger           *slog.Logger
-	Tracer           trace.Tracer
+	Customer               customer.Service
+	CustomerBillingProfile billing.CustomerBillingProfileService
+	Logger                 *slog.Logger
+	Tracer                 trace.Tracer
 }
 
 func (c CustomerProvisionerConfig) Validate() error {
@@ -276,7 +277,7 @@ func (c CustomerProvisionerConfig) Validate() error {
 		errs = append(errs, fmt.Errorf("customer service is required"))
 	}
 
-	if c.CustomerOverride == nil {
+	if c.CustomerBillingProfile == nil {
 		errs = append(errs, fmt.Errorf("customer override service is required"))
 	}
 
@@ -298,7 +299,7 @@ func NewCustomerProvisioner(config CustomerProvisionerConfig) (*CustomerProvisio
 
 	return &CustomerProvisioner{
 		customer:         config.Customer,
-		customerOverride: config.CustomerOverride,
+		customerOverride: config.CustomerBillingProfile,
 		logger:           config.Logger.With("subsystem", "customer.provisioner"),
 		tracer:           config.Tracer,
 	}, nil
@@ -306,7 +307,7 @@ func NewCustomerProvisioner(config CustomerProvisionerConfig) (*CustomerProvisio
 
 type CustomerProvisioner struct {
 	customer         customer.Service
-	customerOverride billing.CustomerOverrideService
+	customerOverride billing.CustomerBillingProfileService
 	logger           *slog.Logger
 	tracer           trace.Tracer
 }
@@ -545,9 +546,9 @@ func (p CustomerProvisioner) EnsureStripeCustomer(ctx context.Context, customerI
 		attribute.String("customer.namespace", customerID.Namespace),
 	)
 
-	customerOverride, err := p.customerOverride.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+	customerOverride, err := p.customerOverride.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 		Customer: customerID,
-		Expand: billing.CustomerOverrideExpand{
+		Expand: billing.CustomerBillingProfileExpand{
 			Apps: true,
 		},
 	})
@@ -556,7 +557,7 @@ func (p CustomerProvisioner) EnsureStripeCustomer(ctx context.Context, customerI
 			customerID.Namespace, customerID.ID, err)
 	}
 
-	profile := customerOverride.MergedProfile
+	profile := customerOverride.EffectiveProfile
 
 	span.AddEvent("fetched customer billing profile", trace.WithAttributes(
 		attribute.String("profile.id", profile.ID),

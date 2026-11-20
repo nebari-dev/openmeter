@@ -75,6 +75,7 @@ func (i StandardLineBase) GetParentID() (string, bool) {
 	if i.ParentLineID == nil {
 		return "", false
 	}
+
 	return *i.ParentLineID, true
 }
 
@@ -184,10 +185,6 @@ func (i StandardLineBase) Clone() StandardLineBase {
 	return out
 }
 
-func (i StandardLineBase) GetCreditsApplied() CreditsApplied {
-	return i.CreditsApplied
-}
-
 func (i StandardLineBase) GetCurrency() currencyx.FiatCode {
 	return i.Currency
 }
@@ -281,10 +278,6 @@ func (i standardInvoiceLineGenericWrapper) CloneWithoutChildren() (GenericInvoic
 // and applies the target's business state. Detailed lines reuse receiver child
 // row IDs by ChildUniqueReferenceID so invoice updates become DB updates instead
 // of conflicting inserts.
-//
-// SplitLineHierarchy is intentionally not merged here: legacy progressive
-// billing is being deprecated, and charge-backed manual edits do not support
-// preserving or mutating split-line hierarchy state.
 func (i standardInvoiceLineGenericWrapper) WithTargetState(target GenericInvoiceLine) (GenericInvoiceLine, error) {
 	if target == nil {
 		return nil, errors.New("target line is required")
@@ -306,6 +299,7 @@ func (i standardInvoiceLineGenericWrapper) WithTargetState(target GenericInvoice
 	merged.UpdatedAt = i.UpdatedAt
 	merged.DeletedAt = i.DeletedAt
 	merged.InvoiceID = i.InvoiceID
+	merged.ExternalIDs = i.ExternalIDs
 	merged.DBState = i.DBState
 	merged.DetailedLines = i.DetailedLinesWithIDReuse(merged.DetailedLines)
 
@@ -316,13 +310,35 @@ func (i standardInvoiceLineGenericWrapper) AsGenericInvoiceLine() GenericInvoice
 	return &i
 }
 
+type StandardLineWithInvoiceHeader struct {
+	Line    *StandardLine
+	Invoice StandardInvoice
+}
+
+func (l StandardLineWithInvoiceHeader) Validate() error {
+	if l.Line == nil {
+		return errors.New("line is required")
+	}
+
+	if err := l.Line.Validate(); err != nil {
+		return fmt.Errorf("line: %w", err)
+	}
+
+	// This transport only carries the parent invoice entity as a header object,
+	// so we validate invoice identity here instead of requiring a fully fetched invoice aggregate.
+	if l.Invoice.ID == "" {
+		return errors.New("invoice id is required")
+	}
+
+	return nil
+}
+
 type StandardLine struct {
 	StandardLineBase `json:",inline"`
 
 	UsageBased *UsageBasedLine `json:"usageBased,omitempty"`
 
-	DetailedLines      DetailedLines       `json:"detailedLines,omitempty"`
-	SplitLineHierarchy *SplitLineHierarchy `json:"progressiveLineHierarchy,omitempty"`
+	DetailedLines DetailedLines `json:"detailedLines,omitempty"`
 
 	Discounts StandardLineDiscounts `json:"discounts,omitempty"`
 
@@ -421,41 +437,8 @@ func (i StandardLine) GetMeteredPreLinePeriodQuantity() (*alpacadecimal.Decimal,
 	return i.UsageBased.MeteredPreLinePeriodQuantity, nil
 }
 
-func (i StandardLine) GetProgressivelyBilledServicePeriod() (timeutil.ClosedPeriod, error) {
-	if i.SplitLineGroupID == nil {
-		return timeutil.ClosedPeriod{
-			From: i.Period.From,
-			To:   i.Period.To,
-		}, nil
-	}
-
-	if i.SplitLineHierarchy == nil {
-		return timeutil.ClosedPeriod{}, errors.New("split line hierarchy is required")
-	}
-
-	return i.SplitLineHierarchy.Group.ServicePeriod, nil
-}
-
-func (i StandardLine) GetPreviouslyBilledAmount() (alpacadecimal.Decimal, error) {
-	if i.SplitLineGroupID == nil {
-		return alpacadecimal.Zero, nil
-	}
-
-	if i.SplitLineHierarchy == nil {
-		return alpacadecimal.Zero, fmt.Errorf("line[%s] does not have a progressive line hierarchy, but is a progressive billed line", i.ID)
-	}
-
-	return i.SplitLineHierarchy.SumNetAmount(SumNetAmountInput{
-		PeriodEndLTE: i.Period.From,
-	})
-}
-
 func (i StandardLine) GetStandardLineDiscounts() StandardLineDiscounts {
 	return i.Discounts
-}
-
-func (i *StandardLine) SetSplitLineHierarchy(hierarchy *SplitLineHierarchy) {
-	i.SplitLineHierarchy = hierarchy
 }
 
 // ToGatheringLineBase converts the standard line to a gathering line base.
@@ -520,7 +503,6 @@ func (i StandardLine) CloneWithoutDependencies(edits ...StandardLineEditFunction
 	clone.DeletedAt = nil
 
 	clone.ParentLineID = nil
-	clone.SplitLineHierarchy = nil
 	clone.SplitLineGroupID = nil
 
 	if clone.UsageBased != nil {
@@ -538,11 +520,6 @@ func (i StandardLine) CloneWithoutDependencies(edits ...StandardLineEditFunction
 
 func (i StandardLine) WithoutDBState() *StandardLine {
 	i.DBState = nil
-	return &i
-}
-
-func (i StandardLine) WithoutSplitLineHierarchy() *StandardLine {
-	i.SplitLineHierarchy = nil
 	return &i
 }
 
@@ -570,6 +547,7 @@ func (i StandardLine) RemoveMetaForCompare() (*StandardLine, error) {
 
 	out.DetailedLines = nil
 	out.DBState = nil
+
 	return out, nil
 }
 
@@ -679,15 +657,6 @@ func (i StandardLine) clone(opts cloneOptions) (*StandardLine, error) {
 		res.Discounts = i.Discounts.Clone()
 	}
 
-	if i.SplitLineHierarchy != nil {
-		cloned, err := i.SplitLineHierarchy.Clone()
-		if err != nil {
-			return nil, fmt.Errorf("cloning split line hierarchy: %w", err)
-		}
-
-		res.SplitLineHierarchy = lo.ToPtr(cloned)
-	}
-
 	return res, nil
 }
 
@@ -704,6 +673,7 @@ func (i *StandardLine) SaveDBSnapshot() error {
 	}
 
 	i.DBState = cloned
+
 	return nil
 }
 
@@ -963,12 +933,14 @@ func (c StandardLine) DetailedLinesWithIDReuse(l DetailedLines) DetailedLines {
 		if existing, ok := childrenRefToLine[newChild.ChildUniqueReferenceID]; ok {
 			// Let's retain the database ID to achieve an update instead of a delete/create
 			newChild.ID = existing.ID
-			newChild.FeeLineConfigID = existing.FeeLineConfigID
 
 			// Let's make sure we retain the created and updated at timestamps so that we
 			// don't trigger an update in vain
 			newChild.CreatedAt = existing.CreatedAt
 			newChild.UpdatedAt = existing.UpdatedAt
+
+			// The reused row is still the same object in the invoicing app
+			newChild.ExternalIDs = existing.ExternalIDs
 
 			discountsWithIDReuse := newChild.AmountDiscounts.ReuseIDsFrom(existing.AmountDiscounts)
 			newChild.AmountDiscounts = discountsWithIDReuse
@@ -998,6 +970,12 @@ func (c StandardLines) Validate() error {
 func (c StandardLines) GetByChildUniqueReferenceID(id string) *StandardLine {
 	return lo.FindOrElse(c, nil, func(line *StandardLine) bool {
 		return lo.FromPtr(line.ChildUniqueReferenceID) == id
+	})
+}
+
+func (c StandardLines) WithoutDeletedLines() StandardLines {
+	return lo.Filter(c, func(line *StandardLine, _ int) bool {
+		return line.DeletedAt == nil
 	})
 }
 
@@ -1117,10 +1095,9 @@ func (i UsageBasedLine) Validate() error {
 }
 
 type UpsertInvoiceLinesAdapterInput struct {
-	Namespace   string
-	Lines       StandardLines
-	SchemaLevel int
-	InvoiceID   string
+	Namespace string
+	Lines     StandardLines
+	InvoiceID string
 }
 
 func (c UpsertInvoiceLinesAdapterInput) Validate() error {
@@ -1140,10 +1117,6 @@ func (c UpsertInvoiceLinesAdapterInput) Validate() error {
 		if line.InvoiceID == "" {
 			return fmt.Errorf("line[%d]: invoice id is required", i)
 		}
-	}
-
-	if c.SchemaLevel < 1 {
-		return fmt.Errorf("schema level must be at least 1")
 	}
 
 	if c.InvoiceID == "" {

@@ -2,12 +2,14 @@ package credits
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/samber/lo"
 	"github.com/samber/mo"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	appcustominvoicing "github.com/openmeterio/openmeter/openmeter/app/custominvoicing"
@@ -16,6 +18,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/creditpurchase"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/flatfee"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
+	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/costbasis"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/payment"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
@@ -23,10 +26,18 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ledger"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	pcfeature "github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon"
+	productcatalogsubscription "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription"
+	"github.com/openmeterio/openmeter/openmeter/subscription"
+	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
+	"github.com/openmeterio/openmeter/pkg/filter"
+	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 	billingtest "github.com/openmeterio/openmeter/test/billing"
@@ -44,7 +55,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceDeletePatchD
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-delete-gathering")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -150,7 +161,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-missing-meter-collection")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -232,7 +243,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 			Customer: cust.GetID(),
 			AsOf:     lo.ToPtr(servicePeriod.To),
 		})
-		s.Require().NoError(err)
+		s.Require().ErrorIs(err, billing.ErrInvoiceCreateAllLinesGated)
 		s.Empty(invoices)
 
 		charge := s.RequireUsageBasedChargeStatus(usageBasedChargeID, usagebased.StatusCreated)
@@ -296,7 +307,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceWaitingForCo
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-waiting-for-collection-missing-meter")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -471,7 +482,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-multiple-missing-meter-collection")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -551,7 +562,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 
 	// then:
 	// - collection excludes both lines and records a distinct critical issue on each charge
-	s.Require().NoError(err)
+	s.Require().ErrorIs(err, billing.ErrInvoiceCreateAllLinesGated)
 	s.Empty(invoices)
 
 	issueFeatureKeys := make([]string, 0, len(created))
@@ -572,6 +583,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 		issueFeatureKeys = append(issueFeatureKeys, featureKey)
 		s.Len(s.mustGatheringLinesForCharge(ns, cust.ID, usageBasedCharge.ID, false), 1)
 	}
+
 	s.ElementsMatch([]string{
 		apiRequestsTotal.Feature.Key,
 		aiTokens.Key,
@@ -588,7 +600,7 @@ func (s *CreditThenInvoiceTestSuite) TestAdvanceChargesIgnoresMissingMetersForUs
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-advance-ignores-not-due-missing-meters")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -723,7 +735,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-active-run-collection")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	sandboxApp := s.InstallSandboxApp(t, ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -848,7 +860,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceCollectionPe
 			Customer: cust.GetID(),
 			AsOf:     lo.ToPtr(servicePeriod.To),
 		})
-		s.Require().NoError(err)
+		s.Require().ErrorIs(err, billing.ErrInvoiceCreateAllLinesGated)
 		s.Empty(invoices)
 
 		charge := s.RequireUsageBasedChargeStatus(usageBasedChargeID, usagebased.StatusActiveRealizationProcessing)
@@ -878,7 +890,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceDeletePatchD
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-delete-standard")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -1069,7 +1081,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceDeletePatchK
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-delete-immutable")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -1261,7 +1273,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceCreatePatchCrea
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-create")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -1380,7 +1392,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDeletePatchDele
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-delete-gathering")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -1484,7 +1496,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDeletePatchDele
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-delete-standard")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -1664,7 +1676,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDeletePatchDele
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-delete-standard-partial")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -1833,7 +1845,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDeletePatchKeep
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-delete-immutable")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -2012,7 +2024,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoicePartialCreditPa
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-partial-payment")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -2183,7 +2195,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoicePartialCreditPa
 			Amount:       5,
 			CreditsTotal: 2,
 			Total:        3,
-		}, accruedUsage.Totals)
+		}, accruedUsage.Totals.Totals)
 		s.Nil(charge.Realizations.CurrentRun.Payment)
 		s.True(charge.Realizations.CurrentRun.DetailedLines.IsPresent())
 		s.Len(charge.Realizations.CurrentRun.DetailedLines.OrEmpty(), 1)
@@ -2303,7 +2315,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDirectPaidTrigg
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-direct-paid")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -2419,7 +2431,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceFullyCreditedPa
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-no-fiat-payment-callback")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -2548,7 +2560,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceZeroAmountFinal
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-zero")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -2669,7 +2681,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceShrinkToZeroThe
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-shrink-zero-extend")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -2928,7 +2940,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDeleteImmutable
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-delete-immutable-payment")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3078,7 +3090,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceAsyncPaymentBoo
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-async-prior-payment")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3275,7 +3287,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceInArrearsActiva
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-in-arrears")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3423,11 +3435,153 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceInArrearsActiva
 	})
 }
 
+func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDueAtCreateBooksCreditsOnlyWhenInvoiced() {
+	t := s.T()
+	ctx := t.Context()
+	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-due-at-create")
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+
+	customInvoicing := s.SetupCustomInvoicing(ns)
+	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
+
+	_ = s.ProvisionBillingProfile(ctx, ns, customInvoicing.App.GetID(),
+		billingtest.WithCollectionInterval(datetime.MustParseDuration(t, "P2D")),
+		billingtest.WithManualApproval(),
+	)
+
+	servicePeriod := timeutil.ClosedPeriod{
+		From: datetime.MustParseTimeInLocation(t, "2026-01-01T00:00:00Z", time.UTC).AsTime(),
+		To:   datetime.MustParseTimeInLocation(t, "2026-02-01T00:00:00Z", time.UTC).AsTime(),
+	}
+	grantedAt := servicePeriod.From.Add(-24 * time.Hour)
+	createdAt := servicePeriod.From.Add(time.Hour)
+
+	clock.FreezeTime(grantedAt)
+	defer clock.UnFreeze()
+
+	s.CreatePromotionalCreditFunding(ctx, CreatePromotionalCreditFundingInput{
+		Namespace: ns,
+		Customer:  cust.GetID(),
+		Amount:    alpacadecimal.NewFromInt(30),
+		At:        grantedAt,
+		CostBasis: alpacadecimal.Zero,
+	})
+
+	ledgerSnapshotInput := LedgerSnapshotInput{
+		Namespace: ns,
+		Customer:  cust.GetID(),
+		Currency:  USD,
+		CostBasis: mo.None[*alpacadecimal.Decimal](),
+	}
+	startLedger := s.CreateLedgerSnapshot(ledgerSnapshotInput)
+	s.AssertDecimalEqual(alpacadecimal.NewFromInt(30), startLedger.FBO, "granted credits")
+
+	clock.FreezeTime(createdAt)
+
+	var flatFeeChargeID meta.ChargeID
+	s.Run("given a flat fee charge created with invoice_at already due", func() {
+		// given:
+		// - the customer holds 30 promotional credits and the service period has started
+		// when:
+		// - an in-advance credit-then-invoice flat fee is created
+		// then:
+		// - the charge is scheduled for the advance job, its gathering line is not invoiced yet and the ledger is untouched
+		res, err := s.Charges.Create(ctx, charges.CreateInput{
+			Namespace: ns,
+			Intents: charges.NewCreateChargeIntents(
+				s.CreateMockChargeIntent(CreateMockChargeIntentInput{
+					Customer:       cust.GetID(),
+					Currency:       USD,
+					ServicePeriod:  servicePeriod,
+					SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+					Price: productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+						Amount:      alpacadecimal.NewFromInt(100),
+						PaymentTerm: productcatalog.InAdvancePaymentTerm,
+					}),
+					Name:              "flatfee-credit-then-invoice-due-at-create",
+					ManagedBy:         billing.SubscriptionManagedLine,
+					UniqueReferenceID: "flatfee-credit-then-invoice-due-at-create",
+				}),
+			),
+		})
+		s.NoError(err)
+		s.Len(res, 1)
+
+		flatFeeCharge, err := res[0].AsFlatFeeCharge()
+		s.NoError(err)
+		flatFeeChargeID = flatFeeCharge.GetChargeID()
+		s.Equal(flatfee.StatusCreated, flatFeeCharge.Status)
+		s.Require().NotNil(flatFeeCharge.State.AdvanceAfter)
+		s.Equal(servicePeriod.From, *flatFeeCharge.State.AdvanceAfter)
+
+		gatheringLine := s.mustSingleActiveGatheringLineForCharge(ns, cust.ID, flatFeeChargeID.ID)
+		s.Equal(servicePeriod.From, gatheringLine.InvoiceAt)
+
+		invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
+			Namespace:  ns,
+			CustomerID: &filter.FilterULID{FilterString: filter.FilterString{Eq: &cust.ID}},
+			Statuses:   []string{"draft"},
+		})
+		s.NoError(err)
+		s.Empty(invoices.Items)
+
+		s.AssertLedgerSnapshotUnchanged(ledgerSnapshotInput, startLedger)
+	})
+
+	s.Run("when the advance job activates the charge", func() {
+		// given:
+		// - the created charge is due for advancement
+		// when:
+		// - the advance job runs for the customer
+		// then:
+		// - the charge is active, still has no standard invoice and the ledger is untouched
+		advancedCharges, err := s.Charges.AdvanceCharges(ctx, charges.AdvanceChargesInput{
+			Customer: cust.GetID(),
+		})
+		s.NoError(err)
+		s.Require().Len(advancedCharges, 1)
+		s.RequireChargeStatus(flatFeeChargeID, flatfee.StatusActive)
+
+		s.mustSingleActiveGatheringLineForCharge(ns, cust.ID, flatFeeChargeID.ID)
+		s.AssertLedgerSnapshotUnchanged(ledgerSnapshotInput, startLedger)
+	})
+
+	s.Run("when billing invoices the pending line", func() {
+		// given:
+		// - the active charge has a due gathering line and no standard invoice
+		// when:
+		// - billing collects the pending lines
+		// then:
+		// - the invoice line is credited with the 30 promotional credits and the ledger books that allocation
+		invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+			Customer: cust.GetID(),
+			AsOf:     lo.ToPtr(createdAt),
+		})
+		s.NoError(err)
+		s.Require().Len(invoices, 1)
+		s.Equal(billing.StandardInvoiceStatusDraftManualApprovalNeeded, invoices[0].Status)
+		s.Require().Len(invoices[0].Lines.OrEmpty(), 1)
+		line := invoices[0].Lines.OrEmpty()[0]
+		s.Equal(flatFeeChargeID.ID, lo.FromPtr(line.ChargeID))
+		s.RequireTotals(billingtest.ExpectedTotals{
+			Amount:       100,
+			CreditsTotal: 30,
+			Total:        70,
+		}, line.Totals)
+		s.RequireFlatFeeChargeStatus(flatFeeChargeID, flatfee.StatusActiveRealizationProcessing)
+
+		expected := startLedger
+		expected.FBO = startLedger.FBO.Sub(alpacadecimal.NewFromInt(30))
+		expected.Accrued = startLedger.Accrued.Add(alpacadecimal.NewFromInt(30))
+		s.AssertLedgerSnapshotEqual(expected, s.CreateLedgerSnapshot(ledgerSnapshotInput))
+	})
+}
+
 func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceDeleteActiveChargeBeforeStandardInvoiceDeletesGatheringLine() {
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-delete-active")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3522,7 +3676,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceShrinkExtendPat
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-shrink-extend-gathering")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3674,7 +3828,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceShrinkPatchUpda
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-shrink-mutable-standard")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3824,7 +3978,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceShrinkPatchCorr
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-cti-shrink-mutable-with-credits")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -3994,7 +4148,7 @@ func (s *CreditThenInvoiceTestSuite) TestFlatFeeCreditThenInvoiceImmutableShrink
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-flatfee-credit-then-invoice-immutable-shrink-extend-shrink")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -4210,7 +4364,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceExtendPatchU
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-extend-gathering")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -4326,7 +4480,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceShrinkPatchU
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-shrink-gathering")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -4440,7 +4594,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceExtendPatchD
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-extend-mutable-standard")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -4626,7 +4780,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceShrinkPatchD
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-shrink-mutable-standard")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -4813,7 +4967,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceShrinkPatchA
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-shrink-immutable")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -5073,7 +5227,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceExtendPatchD
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-extend-final-collection")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -5295,7 +5449,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceExtendPatchA
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-extend-immutable")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -5490,7 +5644,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceShrinkExtend
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-shrink-extend-shrink")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -5878,7 +6032,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedCreditThenInvoiceExtendPatchF
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-credit-then-invoice-extend-tail")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -6159,4 +6313,601 @@ func (s *CreditThenInvoiceTestSuite) mustGetFlatFeeChargeByIDWithExpands(chargeI
 	s.NoError(err)
 
 	return flatFeeCharge
+}
+
+const (
+	deletedLineIssuanceDeletedLineName  = "deleted charge"
+	deletedLineIssuanceRetainedLineName = "retained charge"
+)
+
+func (s *CreditThenInvoiceTestSuite) TestFlatFeeIssuingSkipsDeletedChargeLine() {
+	t := s.T()
+	ctx := t.Context()
+	clock.FreezeTime(time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC))
+	defer clock.UnFreeze()
+
+	// given a two-charge draft whose automatic approval deadline has passed
+	fixture := s.setupDeletedLineIssuanceInvoice(meta.ChargeTypeFlatFee)
+	clock.FreezeTime(fixture.Invoice.DraftUntil.Add(time.Second))
+	defer clock.UnFreeze()
+
+	// when deleting one charge causes the remaining invoice to issue
+	deletedChargeID, ok := fixture.ChargesByLineName[deletedLineIssuanceDeletedLineName]
+	require.True(t, ok)
+	deletedLine := fixture.LinesByName[deletedLineIssuanceDeletedLineName]
+	require.NotNil(t, deletedLine)
+	retainedChargeID, ok := fixture.ChargesByLineName[deletedLineIssuanceRetainedLineName]
+	require.True(t, ok)
+	retainedLine := fixture.LinesByName[deletedLineIssuanceRetainedLineName]
+	require.NotNil(t, retainedLine)
+	s.MustRefundCharge(ctx, fixture.Customer, deletedChargeID)
+	invoice, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+		Invoice: fixture.Invoice.GetInvoiceID(),
+		Expand: billing.StandardInvoiceExpands{
+			billing.StandardInvoiceExpandLines,
+			billing.StandardInvoiceExpandDeletedLines,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, invoice.Lines.OrEmpty(), 2)
+	deletedLine = invoice.Lines.GetByID(deletedLine.ID)
+	require.NotNil(t, deletedLine)
+	require.NotNil(t, deletedLine.DeletedAt)
+	s.RequireChargeStatus(deletedChargeID, meta.ChargeStatusDeleted)
+
+	// then the deleted charge does not block booking the retained line
+	s.Equal(billing.StandardInvoiceStatusPaymentProcessingPending, invoice.Status)
+	s.False(invoice.StatusDetails.Failed)
+	s.False(invoice.HasCriticalValidationIssues())
+	s.RequireTotals(billingtest.ExpectedTotals{Amount: 10, Total: 10}, invoice.Totals)
+	retainedCharge := s.RequireFlatFeeChargeStatus(retainedChargeID, flatfee.StatusActiveAwaitingPaymentSettlement)
+	retainedRun, err := retainedCharge.Realizations.GetByLineID(retainedLine.ID)
+	require.NoError(t, err)
+	require.True(t, retainedRun.Immutable)
+	require.Nil(t, retainedRun.DeletedAt)
+	require.Equal(t, invoice.ID, lo.FromPtr(retainedRun.InvoiceID))
+	require.Equal(t, retainedLine.ID, lo.FromPtr(retainedRun.LineID))
+	require.NotNil(t, retainedRun.AccruedUsage)
+	require.NotNil(t, retainedRun.AccruedUsage.LedgerTransaction)
+	require.Equal(t, float64(10), retainedRun.AccruedUsage.Totals.Total.InexactFloat64())
+}
+
+func (s *CreditThenInvoiceTestSuite) TestUsageBasedIssuingSkipsDeletedChargeLine() {
+	t := s.T()
+	ctx := t.Context()
+	clock.FreezeTime(time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC))
+	defer clock.UnFreeze()
+	defer s.MockStreamingConnector.Reset()
+
+	// given a two-charge draft whose automatic approval deadline has passed
+	fixture := s.setupDeletedLineIssuanceInvoice(meta.ChargeTypeUsageBased)
+	clock.FreezeTime(fixture.Invoice.DraftUntil.Add(time.Second))
+	defer clock.UnFreeze()
+
+	// when deleting one charge causes the remaining invoice to issue
+	deletedChargeID, ok := fixture.ChargesByLineName[deletedLineIssuanceDeletedLineName]
+	require.True(t, ok)
+	deletedLine := fixture.LinesByName[deletedLineIssuanceDeletedLineName]
+	require.NotNil(t, deletedLine)
+	retainedChargeID, ok := fixture.ChargesByLineName[deletedLineIssuanceRetainedLineName]
+	require.True(t, ok)
+	retainedLine := fixture.LinesByName[deletedLineIssuanceRetainedLineName]
+	require.NotNil(t, retainedLine)
+	s.MustRefundCharge(ctx, fixture.Customer, deletedChargeID)
+	invoice, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+		Invoice: fixture.Invoice.GetInvoiceID(),
+		Expand: billing.StandardInvoiceExpands{
+			billing.StandardInvoiceExpandLines,
+			billing.StandardInvoiceExpandDeletedLines,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, invoice.Lines.OrEmpty(), 2)
+	deletedLine = invoice.Lines.GetByID(deletedLine.ID)
+	require.NotNil(t, deletedLine)
+	require.NotNil(t, deletedLine.DeletedAt)
+	s.RequireChargeStatus(deletedChargeID, meta.ChargeStatusDeleted)
+
+	// then the deleted charge does not block booking the retained line
+	s.Equal(billing.StandardInvoiceStatusPaymentProcessingPending, invoice.Status)
+	s.False(invoice.StatusDetails.Failed)
+	s.False(invoice.HasCriticalValidationIssues())
+	s.RequireTotals(billingtest.ExpectedTotals{Amount: 10, Total: 10}, invoice.Totals)
+	retainedCharge := s.RequireUsageBasedChargeStatus(retainedChargeID, usagebased.StatusActiveAwaitingPaymentSettlement)
+	retainedRun, err := retainedCharge.Realizations.GetByLineID(retainedLine.ID)
+	require.NoError(t, err)
+	require.True(t, retainedRun.Immutable)
+	require.Nil(t, retainedRun.DeletedAt)
+	require.Equal(t, invoice.ID, lo.FromPtr(retainedRun.InvoiceID))
+	require.Equal(t, retainedLine.ID, lo.FromPtr(retainedRun.LineID))
+	require.NotNil(t, retainedRun.InvoiceUsage)
+	require.NotNil(t, retainedRun.InvoiceUsage.LedgerTransaction)
+	require.Equal(t, float64(10), retainedRun.InvoiceUsage.Totals.Total.InexactFloat64())
+}
+
+type deletedLineIssuanceInvoice struct {
+	Customer          customer.CustomerID
+	Invoice           billing.StandardInvoice
+	LinesByName       map[string]*billing.StandardLine
+	ChargesByLineName map[string]meta.ChargeID
+}
+
+func (s *CreditThenInvoiceTestSuite) setupDeletedLineIssuanceInvoice(chargeType meta.ChargeType) deletedLineIssuanceInvoice {
+	t := s.T()
+	t.Helper()
+	ctx := t.Context()
+
+	ns := s.GetUniqueNamespace("deleted-line-issuance-" + string(chargeType))
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	invoicing := s.SetupCustomInvoicing(ns)
+	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
+	s.ProvisionBillingProfile(ctx, ns, invoicing.App.GetID())
+	period := timeutil.ClosedPeriod{From: clock.Now(), To: clock.Now().AddDate(0, 1, 0)}
+	var featureKey string
+	var processingStatus any = flatfee.StatusActiveRealizationProcessing
+	if chargeType == meta.ChargeTypeUsageBased {
+		processingStatus = usagebased.StatusActiveRealizationProcessing
+		feature := s.SetupApiRequestsTotalFeature(ctx, ns)
+		featureKey = feature.Feature.Key
+		period = timeutil.ClosedPeriod{From: clock.Now().AddDate(0, -1, 0), To: clock.Now()}
+		s.MockStreamingConnector.AddSimpleEvent(featureKey, 5, period.From.Add(15*24*time.Hour))
+	}
+
+	chargeInputs := []struct {
+		Name   string
+		Amount int64
+	}{
+		{Name: deletedLineIssuanceDeletedLineName, Amount: 5},
+		{Name: deletedLineIssuanceRetainedLineName, Amount: 10},
+	}
+	intents := make([]charges.ChargeIntent, 0, len(chargeInputs))
+	for _, chargeInput := range chargeInputs {
+		price := productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+			Amount:      alpacadecimal.NewFromInt(chargeInput.Amount),
+			PaymentTerm: productcatalog.InAdvancePaymentTerm,
+		})
+		if chargeType == meta.ChargeTypeUsageBased {
+			price = productcatalog.NewPriceFrom(productcatalog.UnitPrice{Amount: alpacadecimal.NewFromInt(chargeInput.Amount / 5)})
+		}
+
+		intents = append(intents, s.CreateMockChargeIntent(CreateMockChargeIntentInput{
+			Customer:       cust.GetID(),
+			Currency:       USD,
+			ServicePeriod:  period,
+			SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+			Price:          price,
+			ProRating: productcatalog.ProRatingConfig{
+				Enabled: true,
+				Mode:    productcatalog.ProRatingModeProratePrices,
+			},
+			FeatureKey:        featureKey,
+			Name:              chargeInput.Name,
+			ManagedBy:         billing.SubscriptionManagedLine,
+			UniqueReferenceID: chargeInput.Name,
+		}))
+	}
+
+	created, err := s.Charges.Create(ctx, charges.CreateInput{Namespace: ns, Intents: charges.NewCreateChargeIntents(intents...)})
+	require.NoError(t, err)
+	require.Len(t, created, 2)
+	invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+		Customer: cust.GetID(),
+		AsOf:     lo.ToPtr(clock.Now()),
+	})
+	require.NoError(t, err)
+	require.Len(t, invoices, 1)
+	invoice := invoices[0]
+	if chargeType == meta.ChargeTypeUsageBased {
+		require.Equal(t, billing.StandardInvoiceStatusDraftWaitingForCollection, invoice.Status)
+		clock.FreezeTime(invoice.DefaultCollectionAtForStandardInvoice())
+		defer clock.UnFreeze()
+		invoice, err = s.BillingService.AdvanceInvoice(ctx, invoice.GetInvoiceID())
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, billing.StandardInvoiceStatusDraftWaitingAutoApproval, invoice.Status)
+	require.NotNil(t, invoice.DraftUntil)
+	require.Len(t, invoice.Lines.OrEmpty(), 2)
+	fixture := deletedLineIssuanceInvoice{
+		Customer: cust.GetID(),
+		Invoice:  invoice,
+		LinesByName: lo.KeyBy(invoice.Lines.OrEmpty(), func(line *billing.StandardLine) string {
+			return line.Name
+		}),
+		ChargesByLineName: make(map[string]meta.ChargeID, 2),
+	}
+	require.Len(t, fixture.LinesByName, 2)
+	for lineName, expectedAmount := range map[string]float64{
+		deletedLineIssuanceDeletedLineName:  5,
+		deletedLineIssuanceRetainedLineName: 10,
+	} {
+		line := fixture.LinesByName[lineName]
+		require.NotNil(t, line)
+		require.NotNil(t, line.ChargeID)
+		chargeID := meta.ChargeID{Namespace: ns, ID: *line.ChargeID}
+		fixture.ChargesByLineName[lineName] = chargeID
+		s.RequireChargeStatus(chargeID, processingStatus)
+		s.RequireTotals(billingtest.ExpectedTotals{Amount: expectedAmount, Total: expectedAmount}, line.Totals)
+	}
+
+	return fixture
+}
+
+// Reproduces: a custom-currency credit_then_invoice usage charge whose service
+// period has already started stays in `created` with no advance_after and no
+// resolved cost basis, because nothing schedules the customer for the advance
+// job. credit_only charges are auto-advanced on create; credit_then_invoice
+// ones are not, and the advance job only lists customers with a non-null
+// advance_after <= now.
+func (s *CreditThenInvoiceTestSuite) TestUsageBasedChargeInsideServicePeriodIsScheduledForAdvancing() {
+	t := s.T()
+	ctx := t.Context()
+	ns := s.GetUniqueNamespace("charges-cti-usage-stuck-created")
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(t, ns)
+
+	sandboxApp := s.InstallSandboxApp(t, ns)
+	_ = s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID(), billingtest.WithManualApproval())
+	cust := s.CreateLedgerBackedCustomer(ns, "pixelforge-invoice")
+	feature := s.SetupApiRequestsTotalFeature(ctx, ns)
+	t.Cleanup(feature.Cleanup)
+
+	servicePeriod := timeutil.ClosedPeriod{
+		From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		To:   time.Date(2026, 1, 8, 0, 0, 0, 0, time.UTC),
+	}
+
+	clock.FreezeTime(servicePeriod.From.Add(-time.Hour))
+	defer clock.UnFreeze()
+
+	// given:
+	// - a custom currency with a dynamic USD cost basis
+	// - a subscription-managed credit_then_invoice usage charge created at its service period start
+	uicr := s.CreateCustomCurrency(ns, "UICR")
+	_, err := s.CurrencyService.CreateCostBasis(ctx, currencies.CreateCostBasisInput{
+		Namespace:  ns,
+		CurrencyID: uicr.ID,
+		FiatCode:   USD,
+		Rate:       alpacadecimal.NewFromFloat(0.01),
+	})
+	s.Require().NoError(err)
+
+	usd, err := currencyx.NewFiatCurrency(USD)
+	s.Require().NoError(err)
+
+	clock.FreezeTime(servicePeriod.From)
+
+	created, err := s.Charges.Create(ctx, charges.CreateInput{
+		Namespace: ns,
+		Intents: charges.NewCreateChargeIntents(usagebased.Intent{
+			Intent: meta.Intent{
+				ManagedBy:         billing.SubscriptionManagedLine,
+				UniqueReferenceID: lo.ToPtr("stuck-created-generations"),
+				CustomerID:        cust.ID,
+				Currency:          uicr,
+				TaxConfig: productcatalog.TaxCodeConfig{
+					TaxCodeID: defaults.InvoicingTaxCodeID,
+				},
+			},
+			IntentMutableFields: usagebased.IntentMutableFields{
+				IntentMutableFields: meta.IntentMutableFields{
+					Name:              "generations",
+					ServicePeriod:     servicePeriod,
+					FullServicePeriod: servicePeriod,
+					BillingPeriod:     servicePeriod,
+				},
+				InvoiceAt: servicePeriod.To,
+				Price: *productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+					Amount: alpacadecimal.NewFromInt(2),
+				}),
+			},
+			SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+			FeatureKey:     feature.Feature.Key,
+			CostBasis:      lo.ToPtr(costbasis.NewIntent(costbasis.DynamicIntent{FiatCurrency: usd})),
+		}),
+	})
+	s.Require().NoError(err)
+	s.Require().Len(created, 1)
+
+	charge, err := created[0].AsUsageBasedCharge()
+	s.Require().NoError(err)
+	t.Logf("after create: status=%s advanceAfter=%v resolvedCostBasis=%v", charge.Status, charge.State.AdvanceAfter, charge.State.ResolvedCostBasis)
+
+	// when:
+	// - a few minutes pass inside the service period
+	// - the advance job runs: list customers with advance_after <= now, advance each of them
+	clock.FreezeTime(servicePeriod.From.Add(7 * time.Minute))
+
+	customersToAdvance, err := s.Charges.ListCustomersToAdvance(ctx, charges.ListCustomersToAdvanceInput{
+		Namespaces:      []string{ns},
+		AdvanceAfterLTE: clock.Now(),
+	})
+	s.Require().NoError(err)
+	t.Logf("advance job sees customers: %v", customersToAdvance.Items)
+
+	for _, customerID := range customersToAdvance.Items {
+		_, err := s.Charges.AdvanceCharges(ctx, charges.AdvanceChargesInput{Customer: customerID})
+		s.Require().NoError(err)
+	}
+
+	// then:
+	// - the charge is active with its cost basis resolved and the next advance scheduled at period end
+	afterJob := s.MustGetChargeByID(charge.GetChargeID())
+	afterJobUsage, err := afterJob.AsUsageBasedCharge()
+	s.Require().NoError(err)
+	s.Equal(usagebased.StatusActive, afterJobUsage.Status, "advance job never schedules a credit_then_invoice usage charge sitting in created")
+	s.NotNil(afterJobUsage.State.ResolvedCostBasis)
+	if s.NotNil(afterJobUsage.State.AdvanceAfter) {
+		s.True(servicePeriod.To.Equal(*afterJobUsage.State.AdvanceAfter))
+	}
+
+	// - the state machine itself is able to activate the charge once anything advances the customer
+	s.Run("advancing the customer directly activates the charge", func() {
+		_, err := s.Charges.AdvanceCharges(ctx, charges.AdvanceChargesInput{Customer: cust.GetID()})
+		s.Require().NoError(err)
+
+		active := s.RequireUsageBasedChargeStatus(charge.GetChargeID(), usagebased.StatusActive)
+		s.Require().NotNil(active.State.AdvanceAfter)
+		s.True(servicePeriod.To.Equal(*active.State.AdvanceAfter))
+		s.NotNil(active.State.ResolvedCostBasis)
+	})
+}
+
+// A seat-based subscription is moved from another billing system in the middle of a period that
+// was already paid there. The plan fee covers the first seat and a seat add-on carries the rest,
+// so every invoice has two lines.
+func (s *CreditThenInvoiceTestSuite) TestSubscriptionBillingStartProratesSeats() {
+	// Given a Team subscription at $16 per seat per month, billed in advance, with 10 seats: the
+	// plan fee and 9 add-on seats. It starts on November 25 and bills on the 1st of each month.
+	// The service until December 17 was paid elsewhere, so billing starts there, inside a billing
+	// period. The seat count changes while the service is still unbilled.
+	ctx := s.T().Context()
+	ns := s.GetUniqueNamespace("subscription-billing-start-seats")
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	customInvoicing := s.SetupCustomInvoicing(ns)
+	s.ProvisionBillingProfile(ctx, ns, customInvoicing.App.GetID(), billingtest.WithManualApproval())
+	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
+
+	start := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+	billingAnchor := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	billingStartsAt := time.Date(2026, 12, 17, 0, 0, 0, 0, time.UTC)
+	january := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	february := time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	// The catalog exists before the subscription: an add-on can only be attached once it is active.
+	catalogPublishedAt := start.Add(-time.Hour)
+	clock.FreezeTime(catalogPublishedAt)
+	defer clock.UnFreeze()
+
+	monthly := datetime.MustParseDuration(s.T(), "P1M")
+	seatPrice := productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+		Amount:      alpacadecimal.NewFromInt(16),
+		PaymentTerm: productcatalog.InAdvancePaymentTerm,
+	})
+
+	seats, err := s.AddonService.CreateAddon(ctx, addon.CreateAddonInput{
+		NamespacedModel: models.NamespacedModel{Namespace: ns},
+		Addon: productcatalog.Addon{
+			AddonMeta: productcatalog.AddonMeta{
+				Name:         "Seats",
+				Key:          "seats",
+				Version:      1,
+				Currency:     currencies.NewCurrencyReference(USD),
+				InstanceType: productcatalog.AddonInstanceTypeMultiple,
+			},
+			RateCards: productcatalog.RateCards{&productcatalog.FlatFeeRateCard{
+				RateCardMeta:   productcatalog.RateCardMeta{Key: "seat", Name: "Seats", Price: seatPrice},
+				BillingCadence: &monthly,
+			}},
+		},
+	})
+	s.Require().NoError(err)
+
+	seats, err = s.AddonService.PublishAddon(ctx, addon.PublishAddonInput{
+		NamespacedID:    seats.NamespacedID,
+		EffectivePeriod: productcatalog.EffectivePeriod{EffectiveFrom: &catalogPublishedAt},
+	})
+	s.Require().NoError(err)
+
+	clock.FreezeTime(start)
+	defer clock.UnFreeze()
+
+	team, err := s.PlanService.CreatePlan(ctx, plan.CreatePlanInput{
+		NamespacedModel: models.NamespacedModel{Namespace: ns},
+		Plan: productcatalog.Plan{
+			PlanMeta: productcatalog.PlanMeta{
+				Name:           "Team",
+				Key:            "team",
+				Version:        1,
+				Currency:       currencies.NewCurrencyReference(USD),
+				BillingCadence: monthly,
+				SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+				ProRatingConfig: productcatalog.ProRatingConfig{
+					Enabled: true,
+					Mode:    productcatalog.ProRatingModeProratePrices,
+				},
+			},
+			Phases: []productcatalog.Phase{{
+				PhaseMeta: productcatalog.PhaseMeta{Key: "paid", Name: "Paid"},
+				RateCards: productcatalog.RateCards{&productcatalog.FlatFeeRateCard{
+					RateCardMeta:   productcatalog.RateCardMeta{Key: "team-plan-fee", Name: "Team plan fee", Price: seatPrice},
+					BillingCadence: &monthly,
+				}},
+			}},
+		},
+	})
+	s.Require().NoError(err)
+
+	_, err = s.PlanAddonService.CreatePlanAddon(ctx, planaddon.CreatePlanAddonInput{
+		NamespacedModel: models.NamespacedModel{Namespace: ns},
+		PlanID:          team.ID,
+		AddonID:         seats.ID,
+		FromPlanPhase:   "paid",
+	})
+	s.Require().NoError(err)
+
+	subscriptionPlan, err := s.SubscriptionPlanAdapter.GetVersion(ctx, ns, productcatalogsubscription.PlanRefInput{
+		Key:     team.Key,
+		Version: lo.ToPtr(1),
+	})
+	s.Require().NoError(err)
+
+	view, err := s.SubscriptionWorkflowService.CreateFromPlan(ctx, subscriptionworkflow.CreateSubscriptionWorkflowInput{
+		ChangeSubscriptionWorkflowInput: subscriptionworkflow.ChangeSubscriptionWorkflowInput{
+			Timing: subscription.Timing{Custom: &start},
+			Name:   "Team",
+		},
+		Namespace:       ns,
+		CustomerID:      cust.ID,
+		BillingAnchor:   &billingAnchor,
+		BillingStartsAt: &billingStartsAt,
+	}, subscriptionPlan)
+	s.Require().NoError(err)
+
+	_, seatAddon, err := s.SubscriptionWorkflowService.AddAddon(ctx, view.Subscription.NamespacedID, subscriptionworkflow.AddAddonWorkflowInput{
+		AddonID:         seats.ID,
+		InitialQuantity: 9,
+		Timing:          subscription.Timing{Enum: lo.ToPtr(subscription.TimingImmediate)},
+	})
+	s.Require().NoError(err)
+
+	type billedFee struct {
+		Name          string
+		ServicePeriod timeutil.ClosedPeriod
+		InvoiceAt     time.Time
+		Amount        float64
+	}
+
+	restOfDecember := timeutil.ClosedPeriod{From: billingStartsAt, To: january}
+	fullJanuary := timeutil.ClosedPeriod{From: january, To: february}
+
+	// provisionedFees returns the fees the subscription has charges for.
+	provisionedFees := func() []billedFee {
+		result, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
+			Namespace:      ns,
+			SubscriptionID: filter.NewULIDIn(view.Subscription.ID),
+		})
+		s.Require().NoError(err)
+
+		fees := make([]billedFee, 0, len(result.Items))
+		for _, item := range result.Items {
+			charge, err := item.AsFlatFeeCharge()
+			s.Require().NoError(err)
+
+			intent := charge.Intent.GetBaseIntent()
+			fees = append(fees, billedFee{
+				Name:          intent.Name,
+				ServicePeriod: intent.ServicePeriod,
+				InvoiceAt:     intent.InvoiceAt,
+				Amount:        charge.State.AmountAfterProration.InexactFloat64(),
+			})
+		}
+
+		return fees
+	}
+
+	// When the subscription is synced at its start.
+	s.Require().NoError(s.SubscriptionSync.SyncByID(ctx, view.Subscription.NamespacedID, clock.Now()))
+
+	// Then nothing exists for the service paid elsewhere. December is billed from the billing
+	// start only, 15 of its 31 days, and January in full.
+	s.ElementsMatch([]billedFee{
+		{Name: "Team plan fee", ServicePeriod: restOfDecember, InvoiceAt: billingStartsAt, Amount: 7.74},
+		{Name: "Seats", ServicePeriod: restOfDecember, InvoiceAt: billingStartsAt, Amount: 69.68},
+		{Name: "Team plan fee", ServicePeriod: fullJanuary, InvoiceAt: january, Amount: 16},
+		{Name: "Seats", ServicePeriod: fullJanuary, InvoiceAt: january, Amount: 144},
+	}, provisionedFees())
+
+	// changeSeats sets the number of add-on seats at the given time and syncs the subscription.
+	changeSeats := func(at time.Time, quantity int) {
+		clock.FreezeTime(at)
+		defer clock.UnFreeze()
+
+		_, _, err := s.SubscriptionWorkflowService.ChangeAddonQuantity(ctx, view.Subscription.NamespacedID, subscriptionworkflow.ChangeAddonQuantityWorkflowInput{
+			SubscriptionAddonID: seatAddon.NamespacedID,
+			Quantity:            quantity,
+			Timing:              subscription.Timing{Enum: lo.ToPtr(subscription.TimingImmediate)},
+		})
+		s.Require().NoError(err)
+
+		s.Require().NoError(s.SubscriptionSync.SyncByID(ctx, view.Subscription.NamespacedID, clock.Now()))
+	}
+
+	// When 2 seats are removed in the short first billing period, before billing starts.
+	changeSeats(time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC), 7)
+
+	// Then the change adds no fee for the time before the billing start, and the seat fees from
+	// the billing start follow the 7 add-on seats.
+	s.ElementsMatch([]billedFee{
+		{Name: "Team plan fee", ServicePeriod: restOfDecember, InvoiceAt: billingStartsAt, Amount: 7.74},
+		{Name: "Seats", ServicePeriod: restOfDecember, InvoiceAt: billingStartsAt, Amount: 54.19},
+		{Name: "Team plan fee", ServicePeriod: fullJanuary, InvoiceAt: january, Amount: 16},
+		{Name: "Seats", ServicePeriod: fullJanuary, InvoiceAt: january, Amount: 112},
+	}, provisionedFees())
+
+	// When 7 seats are added in December, still before billing starts.
+	changeSeats(time.Date(2026, 12, 5, 0, 0, 0, 0, time.UTC), 14)
+
+	// Then there is still no fee for the time before the billing start. The seat fees follow the
+	// 14 add-on seats in effect at the billing start, and December is prorated to 15 of 31 days.
+	decemberFees := []billedFee{
+		{Name: "Team plan fee", ServicePeriod: restOfDecember, InvoiceAt: billingStartsAt, Amount: 7.74},
+		{Name: "Seats", ServicePeriod: restOfDecember, InvoiceAt: billingStartsAt, Amount: 108.39},
+	}
+	januaryFees := []billedFee{
+		{Name: "Team plan fee", ServicePeriod: fullJanuary, InvoiceAt: january, Amount: 16},
+		{Name: "Seats", ServicePeriod: fullJanuary, InvoiceAt: january, Amount: 224},
+	}
+	s.ElementsMatch(slices.Concat(decemberFees, januaryFees), provisionedFees())
+
+	// invoiceDueFees invoices what is due at the given time and returns the fees on the invoice.
+	invoiceDueFees := func(at time.Time) (billing.StandardInvoice, []billedFee) {
+		clock.FreezeTime(at)
+		defer clock.UnFreeze()
+
+		invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+			Customer: cust.GetID(),
+			AsOf:     &at,
+		})
+		s.Require().NoError(err)
+		s.Require().Len(invoices, 1)
+
+		fees := lo.Map(invoices[0].Lines.OrEmpty(), func(line *billing.StandardLine, _ int) billedFee {
+			return billedFee{
+				Name:          line.Name,
+				ServicePeriod: line.Period,
+				InvoiceAt:     line.InvoiceAt,
+				Amount:        line.Totals.Total.InexactFloat64(),
+			}
+		})
+
+		return invoices[0], fees
+	}
+
+	// When invoicing is attempted a second before the billing start.
+	justBeforeBillingStart := billingStartsAt.Add(-time.Second)
+	clock.FreezeTime(justBeforeBillingStart)
+	defer clock.UnFreeze()
+
+	_, err = s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+		Customer: cust.GetID(),
+		AsOf:     &justBeforeBillingStart,
+	})
+
+	// Then there is nothing to invoice yet.
+	s.Require().ErrorIs(err, billing.ErrInvoiceCreateNoLines)
+
+	// When the billing start arrives.
+	firstInvoice, firstFees := invoiceDueFees(billingStartsAt)
+
+	// Then the first invoice has the two fees for the rest of December and nothing for the seats
+	// held before the billing start.
+	s.ElementsMatch(decemberFees, firstFees)
+	s.RequireTotals(billingtest.ExpectedTotals{Amount: 116.13, Total: 116.13}, firstInvoice.Totals)
+
+	// When January starts.
+	secondInvoice, secondFees := invoiceDueFees(january)
+
+	// Then the full month is invoiced for all 15 seats.
+	s.ElementsMatch(januaryFees, secondFees)
+	s.RequireTotals(billingtest.ExpectedTotals{Amount: 240, Total: 240}, secondInvoice.Totals)
 }

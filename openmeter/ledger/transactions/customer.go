@@ -51,6 +51,7 @@ func (t IssueCustomerReceivableTemplate) Validate() error {
 	if err := t.Currency.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("currency: %w", err))
 	}
+
 	if err := ledger.ValidateCostBasisCurrency(t.Currency.Code, t.CostBasisCurrency, t.CostBasis); err != nil {
 		errs = append(errs, fmt.Errorf("cost basis currency: %w", err))
 	}
@@ -243,8 +244,25 @@ func (t SettleCustomerReceivableFromPaymentTemplate) Validate() error {
 
 var _ CustomerTransactionTemplate = (SettleCustomerReceivableFromPaymentTemplate{})
 
-func (t SettleCustomerReceivableFromPaymentTemplate) correct(CorrectionInput) ([]ledger.TransactionInput, error) {
-	return nil, templateCorrectionNotImplemented(TemplateCode(t))
+func (t SettleCustomerReceivableFromPaymentTemplate) correct(scope CorrectionInput) ([]ledger.TransactionInput, error) {
+	return correctReceivablePayment(scope)
+}
+
+// Authorization and settlement each move a single amount between two routes.
+// A partial reversal must use the original sub-accounts and provenance.
+func correctReceivablePayment(scope CorrectionInput) ([]ledger.TransactionInput, error) {
+	entries := scope.OriginalTransaction.Entries()
+	if len(entries) != 2 || !entries[0].Amount().Neg().Equal(entries[1].Amount()) || scope.Amount.GreaterThan(entries[0].Amount().Abs()) {
+		return nil, fmt.Errorf("receivable payment correction requires a balanced entry pair covering %s", scope.Amount)
+	}
+
+	return []ledger.TransactionInput{&TransactionInput{
+		bookedAt: scope.At,
+		entryInputs: []*EntryInput{
+			reverseOriginalEntry(entries[0], scope.Amount),
+			reverseOriginalEntry(entries[1], scope.Amount),
+		},
+	}}, nil
 }
 
 func (t SettleCustomerReceivableFromPaymentTemplate) typeGuard() guard {
@@ -366,8 +384,8 @@ func (t AuthorizeCustomerReceivablePaymentTemplate) code() TransactionTemplateCo
 
 var _ CustomerTransactionTemplate = (AuthorizeCustomerReceivablePaymentTemplate{})
 
-func (t AuthorizeCustomerReceivablePaymentTemplate) correct(CorrectionInput) ([]ledger.TransactionInput, error) {
-	return nil, templateCorrectionNotImplemented(TemplateCode(t))
+func (t AuthorizeCustomerReceivablePaymentTemplate) correct(scope CorrectionInput) ([]ledger.TransactionInput, error) {
+	return correctReceivablePayment(scope)
 }
 
 func (t AuthorizeCustomerReceivablePaymentTemplate) resolve(ctx context.Context, customerID customer.CustomerID, resolvers ResolverDependencies) (ledger.TransactionInput, error) {
@@ -624,9 +642,11 @@ func (t CoverCustomerReceivableTemplate) Validate() error {
 		if !t.Amount.IsZero() {
 			errs = append(errs, errors.New("amount must be zero when sources are provided"))
 		}
+
 		if t.CostBasis != nil {
 			errs = append(errs, errors.New("cost basis must be nil when sources are provided"))
 		}
+
 		if t.CreditPriority != nil {
 			errs = append(errs, errors.New("credit priority must be nil when sources are provided"))
 		}
@@ -636,12 +656,15 @@ func (t CoverCustomerReceivableTemplate) Validate() error {
 				errs = append(errs, fmt.Errorf("sources[%d]: address is required", i))
 				continue
 			}
+
 			if source.Address.AccountType() != ledger.AccountTypeCustomerFBO {
 				errs = append(errs, fmt.Errorf("sources[%d]: account type must be customer_fbo", i))
 			}
+
 			if !source.Address.Route().Route().Currency.Equal(t.Currency) {
 				errs = append(errs, fmt.Errorf("sources[%d]: currency must be %s", i, t.Currency))
 			}
+
 			if err := ledger.ValidateTransactionAmount(source.Amount); err != nil {
 				errs = append(errs, fmt.Errorf("sources[%d].amount: %w", i, err))
 			}

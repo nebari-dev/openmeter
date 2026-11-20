@@ -32,6 +32,7 @@ func (e *TestEnv) Close(t *testing.T) {
 		if e.db == nil {
 			return
 		}
+
 		if e.Client != nil {
 			if err := e.Client.Close(); err != nil {
 				t.Errorf("failed to close ent client: %v", err)
@@ -56,38 +57,112 @@ func (e *TestEnv) CreateTaxCode(t *testing.T, namespace string, opts ...taxcode.
 	if len(opts) > 0 {
 		input = opts[0]
 	}
+
 	generated := testutils.NameGenerator.Generate()
 	input.Namespace = namespace
 	if input.Key == "" {
 		input.Key = generated.Key
 	}
+
 	if input.Name == "" {
 		input.Name = generated.Name
 	}
+
 	tc, err := e.Service.CreateTaxCode(t.Context(), input)
 	require.NoError(t, err)
+
 	return tc
 }
 
-// SetupNamespaceDefaults provisions two seed tax codes and upserts the org-default tax codes for namespace.
-func (e *TestEnv) SetupNamespaceDefaults(t *testing.T, namespace string) {
+// GetOrCreateByAppMapping returns (creating if necessary) the namespace's tax code mapped to
+// appType/code, mirroring how v1 handlers resolve a legacy stripe.code.
+func (e *TestEnv) GetOrCreateByAppMapping(t *testing.T, namespace string, appType app.AppType, code string) taxcode.TaxCode {
 	t.Helper()
-	invoicing := e.CreateTaxCode(t, namespace, taxcode.CreateTaxCodeInput{
-		Key:  taxcode.ProviderDefaultTaxCodeKey,
-		Name: "Provider Default",
+
+	tc, err := e.Service.GetOrCreateByAppMapping(t.Context(), taxcode.GetOrCreateByAppMappingInput{
+		Namespace: namespace,
+		AppType:   appType,
+		TaxCode:   code,
 	})
-	creditGrant := e.CreateTaxCode(t, namespace, taxcode.CreateTaxCodeInput{
-		Name: "Non-Taxable",
-		AppMappings: taxcode.TaxCodeAppMappings{
+	require.NoError(t, err)
+
+	return tc
+}
+
+// ProvisionDefaultTaxCodesInput overrides the app mappings ProvisionDefaultTaxCodes puts on the
+// invoicing/credit-grant tax codes. Nil fields keep the built-in defaults.
+type ProvisionDefaultTaxCodesInput struct {
+	InvoicingAppMappings   taxcode.TaxCodeAppMappings
+	CreditGrantAppMappings taxcode.TaxCodeAppMappings
+}
+
+// ProvisionDefaultTaxCodes creates (if necessary) the invoicing and credit-grant tax codes for
+// namespace and stores them as the namespace's organization defaults. Charge creation stamps the
+// namespace's default tax code when the caller provides none, so tests creating charges through
+// the real service must call this first. Idempotent: existing tax codes are reused by key, so it
+// is safe after ProvisionProviderDefaultTaxCode or a previous call for the same namespace.
+//
+// App mapping overrides apply only when this call creates the tax code.
+func (e *TestEnv) ProvisionDefaultTaxCodes(t *testing.T, namespace string, opts ...ProvisionDefaultTaxCodesInput) taxcode.OrganizationDefaultTaxCodes {
+	t.Helper()
+
+	var input ProvisionDefaultTaxCodesInput
+	if len(opts) > 0 {
+		input = opts[0]
+	}
+
+	creditGrantAppMappings := input.CreditGrantAppMappings
+	if creditGrantAppMappings == nil {
+		creditGrantAppMappings = taxcode.TaxCodeAppMappings{
 			{AppType: app.AppTypeStripe, TaxCode: "txcd_00000000"},
-		},
-	})
-	_, err := e.Service.UpsertOrganizationDefaultTaxCodes(t.Context(), taxcode.UpsertOrganizationDefaultTaxCodesInput{
+		}
+	}
+
+	invoicing := e.getOrCreateTaxCodeByKey(t, namespace, taxcode.ProviderDefaultTaxCodeKey, "Provider Default", input.InvoicingAppMappings)
+	creditGrant := e.getOrCreateTaxCodeByKey(t, namespace, taxcode.CreditGrantTaxCodeKey, "Non-Taxable", creditGrantAppMappings)
+
+	defaults, err := e.Service.UpsertOrganizationDefaultTaxCodes(t.Context(), taxcode.UpsertOrganizationDefaultTaxCodesInput{
 		Namespace:            namespace,
 		InvoicingTaxCodeID:   invoicing.ID,
 		CreditGrantTaxCodeID: creditGrant.ID,
 	})
-	require.NoError(t, err)
+	require.NoError(t, err, "upserting organization default tax codes")
+
+	return defaults
+}
+
+// ProvisionProviderDefaultTaxCode returns (creating if necessary) the tax code used when an
+// invoicing app omits an app-specific provider code. Unlike ProvisionDefaultTaxCodes it does not
+// configure organization defaults: invoice edit diffing needs this row to resolve an empty provider
+// tax config, but the namespace must still look like it has no org-level defaults. Idempotent.
+func (e *TestEnv) ProvisionProviderDefaultTaxCode(t *testing.T, namespace string) taxcode.TaxCode {
+	t.Helper()
+
+	return e.getOrCreateTaxCodeByKey(t, namespace, taxcode.ProviderDefaultTaxCodeKey, "Provider Default", nil)
+}
+
+func (e *TestEnv) getOrCreateTaxCodeByKey(t *testing.T, namespace, key, name string, appMappings taxcode.TaxCodeAppMappings) taxcode.TaxCode {
+	t.Helper()
+
+	tc, err := e.Service.GetTaxCodeByKey(t.Context(), taxcode.GetTaxCodeByKeyInput{
+		Namespace: namespace,
+		Key:       key,
+	})
+	if err == nil {
+		return tc
+	}
+
+	require.True(t, taxcode.IsTaxCodeNotFoundError(err), "getting tax code by key should either succeed or return not found: %v", err)
+
+	tc, err = e.Service.CreateTaxCode(t.Context(), taxcode.CreateTaxCodeInput{
+		Namespace:   namespace,
+		Key:         key,
+		Name:        name,
+		AppMappings: appMappings,
+	})
+	require.NoError(t, err, "creating tax code")
+
+	return tc
 }
 
 func NewTestEnv(t *testing.T) *TestEnv {

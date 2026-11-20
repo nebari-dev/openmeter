@@ -4,10 +4,29 @@ import { z } from 'zod'
 import * as schemas from '../schemas.js'
 import type { AcceptDateStrings } from '../../lib/wire.js'
 import type {
+  Charge,
   ChargePagePaginatedResponse,
   ListChargesParamsFilter,
   SortQueryInput,
 } from '../types.js'
+
+export interface GetChargeQuery {
+  /** Expand related entities, realization details, or real-time usage. */
+  expand?: (
+    | 'real_time_usage'
+    | 'customer'
+    | 'feature'
+    | 'subscription'
+    | 'realization.invoice'
+    | 'realization.totals'
+    | 'realization.detailed_lines'
+  )[]
+}
+
+export type GetChargeRequest = AcceptDateStrings<
+  GetChargeQuery & { chargeId: string }
+>
+export type GetChargeResponse = Charge
 
 export interface ListChargesQuery {
   /** Determines which page of the collection to retrieve. */
@@ -29,6 +48,9 @@ export interface ListChargesQuery {
    * To filter charges by customer add the following query param:
    * `filter[customer_id][eq]=<id>` or `filter[customer_id][oeq]=<id>,<id>`.
    *
+   * To filter charges by subscription, use `filter[subscription_id][eq]=<id>` or
+   * `filter[subscription_id][oeq]=<id>,<id>`.
+   *
    * To filter charges by status add the following query param:
    * `filter[status][oeq]=created,active`
    *
@@ -44,8 +66,10 @@ export interface ListChargesQuery {
    *
    * Supported values are:
    *
-   * - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage`
-   * and the `totals.realtime` fields.
+   * - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based
+   * charges and created usage-based charges whose effective service period
+   * contains the current time (inclusive start, exclusive end). Deleted charges
+   * are skipped.
    * - `customer`: Expand the charge's customer to the complete entity.
    * - `feature`: Expand the charge's feature to the complete entity.
    * - `subscription`: Expand the charge's subscription to the complete entity.

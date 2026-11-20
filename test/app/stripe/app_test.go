@@ -44,6 +44,10 @@ func TestAppStripe(t *testing.T) {
 			testSuite.TestUpdate(ctx, t)
 		})
 
+		t.Run("UpdateAPIKeyThroughAppUpdate", func(t *testing.T) {
+			testSuite.TestUpdateAPIKeyThroughAppUpdate(t)
+		})
+
 		t.Run("Uninstall", func(t *testing.T) {
 			testSuite.TestUninstall(ctx, t)
 		})
@@ -74,6 +78,10 @@ func TestAppStripe(t *testing.T) {
 
 		t.Run("TestUpdateAPIKey", func(t *testing.T) {
 			testSuite.TestUpdateAPIKey(ctx, t)
+		})
+
+		t.Run("TestExecuteAction", func(t *testing.T) {
+			testSuite.TestExecuteAction(ctx, t)
 		})
 	})
 }

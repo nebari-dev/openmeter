@@ -23,8 +23,8 @@ import (
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/openmeterio/openmeter/api"
-	apiv3 "github.com/openmeterio/openmeter/api/v3"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
 	appcustominvoicing "github.com/openmeterio/openmeter/openmeter/app/custominvoicing"
 	appstripe "github.com/openmeterio/openmeter/openmeter/app/stripe"
@@ -50,6 +50,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/namespace/namespacedriver"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	portaladapter "github.com/openmeterio/openmeter/openmeter/portal/adapter"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
@@ -167,12 +168,13 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				path:        "/api/v1/events",
 				contentType: "application/cloudevents+json",
-				body: func() *api.Event {
+				body: func() *apiv1models.Event {
 					e := event.New()
 					e.SetID("test-1")
 					e.SetType("type")
 					e.SetSubject("subject")
 					e.SetSource("source")
+
 					return &e
 				}(),
 			},
@@ -189,7 +191,7 @@ func TestRoutes(t *testing.T) {
 			},
 			res: testResponse{
 				status: http.StatusOK,
-				body: []api.IngestedEvent{
+				body: []apiv1models.IngestedEvent{
 					{
 						Event: mockEvent,
 						// empty string customer id because it's not set on the mock
@@ -209,7 +211,7 @@ func TestRoutes(t *testing.T) {
 			},
 			res: testResponse{
 				status: http.StatusOK,
-				body: []api.Meter{
+				body: []apiv1models.Meter{
 					meterhttphandler.ToAPIMeter(mockMeters[0]),
 					meterhttphandler.ToAPIMeter(mockMeters[1]),
 				},
@@ -236,9 +238,9 @@ func TestRoutes(t *testing.T) {
 			res: testResponse{
 				status: http.StatusOK,
 				body: struct {
-					Data []api.MeterQueryRow `json:"data"`
+					Data []apiv1models.MeterQueryRow `json:"data"`
 				}{
-					Data: []api.MeterQueryRow{
+					Data: []apiv1models.MeterQueryRow{
 						{WindowStart: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), WindowEnd: time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC), Value: 300},
 					},
 				},
@@ -250,12 +252,12 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body:        apiv3.MeterQueryRequest{},
+				body:        apiv3models.MeterQueryRequest{},
 			},
 			res: testResponse{
 				status: http.StatusOK,
-				body: apiv3.MeterQueryResult{
-					Data: []apiv3.MeterQueryRow{
+				body: apiv3models.MeterQueryResult{
+					Data: []apiv3models.MeterQueryRow{
 						{
 							Value:      "300",
 							From:       time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -283,7 +285,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
+				body: apiv3models.MeterQueryRequest{
 					GroupByDimensions: &[]string{"path", "method"},
 				},
 			},
@@ -313,7 +315,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
+				body: apiv3models.MeterQueryRequest{
 					GroupByDimensions: &[]string{"subject"},
 				},
 			},
@@ -332,9 +334,9 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
-					Filters: &apiv3.MeterQueryFilters{
-						Dimensions: &map[string]apiv3.QueryFilterStringMapItem{
+				body: apiv3models.MeterQueryRequest{
+					Filters: &apiv3models.MeterQueryFilters{
+						Dimensions: &map[string]apiv3models.QueryFilterStringMapItem{
 							"customer_id": {
 								Eq: lo.ToPtr("customer-1"),
 							},
@@ -370,7 +372,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
+				body: apiv3models.MeterQueryRequest{
 					GroupByDimensions: &[]string{"foo"},
 				},
 			},
@@ -388,9 +390,9 @@ func TestRoutes(t *testing.T) {
 			res: testResponse{
 				status: http.StatusOK,
 				body: struct {
-					Data []api.MeterQueryRow `json:"data"`
+					Data []apiv1models.MeterQueryRow `json:"data"`
 				}{
-					Data: []api.MeterQueryRow{
+					Data: []apiv1models.MeterQueryRow{
 						{Subject: mockQueryValue.Subject, WindowStart: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), WindowEnd: time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC), Value: 300},
 					},
 				},
@@ -402,9 +404,9 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
-					Filters: &apiv3.MeterQueryFilters{
-						Dimensions: &map[string]apiv3.QueryFilterStringMapItem{
+				body: apiv3models.MeterQueryRequest{
+					Filters: &apiv3models.MeterQueryFilters{
+						Dimensions: &map[string]apiv3models.QueryFilterStringMapItem{
 							"subject": {
 								Eq: lo.ToPtr("s1"),
 							},
@@ -414,8 +416,8 @@ func TestRoutes(t *testing.T) {
 			},
 			res: testResponse{
 				status: http.StatusOK,
-				body: apiv3.MeterQueryResult{
-					Data: []apiv3.MeterQueryRow{
+				body: apiv3models.MeterQueryResult{
+					Data: []apiv3models.MeterQueryRow{
 						{
 							Value: "300",
 							From:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -443,9 +445,9 @@ func TestRoutes(t *testing.T) {
 			res: testResponse{
 				status: http.StatusOK,
 				body: struct {
-					Data []api.MeterQueryRow `json:"data"`
+					Data []apiv1models.MeterQueryRow `json:"data"`
 				}{
-					Data: []api.MeterQueryRow{
+					Data: []apiv1models.MeterQueryRow{
 						{WindowStart: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), WindowEnd: time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC), Value: 300},
 					},
 				},
@@ -457,9 +459,9 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
-					Filters: &apiv3.MeterQueryFilters{
-						Dimensions: &map[string]apiv3.QueryFilterStringMapItem{
+				body: apiv3models.MeterQueryRequest{
+					Filters: &apiv3models.MeterQueryFilters{
+						Dimensions: &map[string]apiv3models.QueryFilterStringMapItem{
 							"method": {
 								Eq: lo.ToPtr("GET"),
 							},
@@ -469,8 +471,8 @@ func TestRoutes(t *testing.T) {
 			},
 			res: testResponse{
 				status: http.StatusOK,
-				body: apiv3.MeterQueryResult{
-					Data: []apiv3.MeterQueryRow{
+				body: apiv3models.MeterQueryResult{
+					Data: []apiv3models.MeterQueryRow{
 						{
 							Value:      "300",
 							From:       time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -507,9 +509,9 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID + "/query",
-				body: apiv3.MeterQueryRequest{
-					Filters: &apiv3.MeterQueryFilters{
-						Dimensions: &map[string]apiv3.QueryFilterStringMapItem{
+				body: apiv3models.MeterQueryRequest{
+					Filters: &apiv3models.MeterQueryFilters{
+						Dimensions: &map[string]apiv3models.QueryFilterStringMapItem{
 							"invalid": {
 								Eq: lo.ToPtr("abcd"),
 							},
@@ -590,7 +592,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				path:        "/api/v1/portal/tokens",
 				contentType: "application/json",
-				body: api.PortalToken{
+				body: apiv1models.PortalToken{
 					Subject: "customer-1",
 				},
 			},
@@ -615,7 +617,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPut,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/meters/" + mockMeters[0].ID,
-				body:        apiv3.UpdateMeterRequest{},
+				body:        apiv3models.UpdateMeterRequest{},
 			},
 			res: testResponse{
 				status: http.StatusOK,
@@ -648,7 +650,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/customers/01ARZ3NDEKTSV4RRFFQ69G5FAV/entitlements/01ARZ3NDEKTSV4RRFFQ69G5FAW/reset",
-				body:        apiv3.ResetCustomerEntitlementUsageRequest{},
+				body:        apiv3models.ResetCustomerEntitlementUsageRequest{},
 			},
 			res: testResponse{
 				status: http.StatusNoContent,
@@ -715,7 +717,7 @@ func TestRoutes(t *testing.T) {
 				method:      http.MethodPost,
 				contentType: "application/json",
 				path:        "/api/v3/openmeter/customers/01ARZ3NDEKTSV4RRFFQ69G5FAV/entitlements/01ARZ3NDEKTSV4RRFFQ69G5FAW/grants",
-				body: apiv3.BillingEntitlementGrantCreateRequest{
+				body: apiv3models.BillingEntitlementGrantCreateRequest{
 					Amount:      "100",
 					EffectiveAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 				},
@@ -779,10 +781,12 @@ func TestRoutes(t *testing.T) {
 			if tt.req.body != nil {
 				reqBody, _ = json.Marshal(tt.req.body)
 			}
+
 			req := httptest.NewRequest(tt.req.method, tt.req.path, bytes.NewReader(reqBody))
 			if tt.req.accept != "" {
 				req.Header.Set("Accept", tt.req.accept)
 			}
+
 			if tt.req.contentType != "" {
 				req.Header.Set("Content-Type", tt.req.contentType)
 			}
@@ -913,6 +917,7 @@ func getTestServer(t *testing.T, opts ...func(*router.Config)) (*Server, *MockSt
 			ProgressManager:         progressmanageradapter.NewNoop(),
 			StreamingConnector:      mockStreamingConnector,
 			TaxCodeService:          &NoopTaxCodeService{},
+			TaxCodeResolver:         &NoopTaxCodeResolver{},
 			// Use the subscription service
 			SubscriptionService: subscriptionService,
 			// Use the subscription workflow service
@@ -937,6 +942,7 @@ func getTestServer(t *testing.T, opts ...func(*router.Config)) (*Server, *MockSt
 	// Create server
 	server, err := NewServer(config)
 	assert.NoError(t, err, "failed to create server")
+
 	return server, mockStreamingConnector
 }
 
@@ -997,6 +1003,49 @@ func TestListChargesRoute(t *testing.T) {
 
 		require.Equal(t, http.StatusBadRequest, w.Code)
 	})
+
+	t.Run("accepts the subscription filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v3/openmeter/charges?filter[subscription_id][eq]=01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
+		w := httptest.NewRecorder()
+		testServer.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("rejects a malformed subscription filter", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v3/openmeter/charges?filter[subscription_id][eq]=not-a-ulid", nil)
+		w := httptest.NewRecorder()
+		testServer.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
+
+func TestGetChargeRoute(t *testing.T) {
+	testServer, _ := getTestServer(t, func(c *router.Config) {
+		c.ChargeService = &NoopChargeService{}
+	})
+	const chargeID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	const path = "/api/v3/openmeter/charges/"
+
+	tests := []struct {
+		name   string
+		path   string
+		status int
+	}{
+		{"missing charge", path + chargeID + "?expand=customer,realization.totals", http.StatusNotFound},
+		{"invalid charge ID", path + "not-a-ulid", http.StatusNotFound},
+		{"invalid expand", path + chargeID + "?expand=unknown", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			w := httptest.NewRecorder()
+			testServer.ServeHTTP(w, req)
+			require.Equal(t, tt.status, w.Code, w.Body.String())
+		})
+	}
 }
 
 // NoopChargeService is a no-op implementation of billingcharges.Service for testing.
@@ -1044,6 +1093,10 @@ func (n NoopChargeService) HandleCreditPurchaseExternalPaymentStateTransition(_ 
 
 func (n NoopChargeService) CreateCustomerCharge(_ context.Context, _ billingcharges.CreateCustomerChargeInput) (billingcharges.CustomerCharge, error) {
 	return billingcharges.CustomerCharge{}, nil
+}
+
+func (n NoopChargeService) GetCustomerCharge(_ context.Context, input billingcharges.GetByIDInput) (billingcharges.CustomerCharge, error) {
+	return billingcharges.CustomerCharge{}, models.NewGenericNotFoundError(fmt.Errorf("charge %s not found", input.ChargeID.ID))
 }
 
 func (n NoopChargeService) DeleteCustomerCharge(_ context.Context, _ billingcharges.DeleteCustomerChargeInput) error {
@@ -1152,6 +1205,7 @@ func (c *MockStreamingConnector) ListEvents(ctx context.Context, namespace strin
 			StoredAt:   time.Time{},
 		},
 	}
+
 	return events, nil
 }
 
@@ -1168,6 +1222,7 @@ func (c *MockStreamingConnector) ListEventsV2(ctx context.Context, params stream
 			StoredAt:   time.Time{},
 		},
 	}
+
 	return events, nil
 }
 
@@ -1480,6 +1535,22 @@ func (n NoopNotificationService) UpdateRule(_ context.Context, _ notification.Up
 	return &notification.Rule{}, nil
 }
 
+func (n NoopNotificationService) ListRuleViews(_ context.Context, _ notification.ListRulesInput) (pagination.Result[notification.RuleView], error) {
+	return pagination.Result[notification.RuleView]{}, nil
+}
+
+func (n NoopNotificationService) CreateRuleView(_ context.Context, _ notification.CreateRuleInput) (notification.RuleView, error) {
+	return notification.RuleView{}, nil
+}
+
+func (n NoopNotificationService) GetRuleView(_ context.Context, _ notification.GetRuleInput) (notification.RuleView, error) {
+	return notification.RuleView{}, nil
+}
+
+func (n NoopNotificationService) UpdateRuleView(_ context.Context, _ notification.UpdateRuleInput) (notification.RuleView, error) {
+	return notification.RuleView{}, nil
+}
+
 func (n NoopNotificationService) ListEvents(_ context.Context, _ notification.ListEventsInput) (notification.ListEventsResult, error) {
 	return notification.ListEventsResult{}, nil
 }
@@ -1568,6 +1639,10 @@ func (n NoopAppService) UninstallApp(ctx context.Context, input app.UninstallApp
 	return nil
 }
 
+func (n NoopAppService) ExecuteAppAction(ctx context.Context, input app.ExecuteAppActionInput) (app.App, error) {
+	return nil, nil
+}
+
 func (n NoopAppService) ListCustomerData(ctx context.Context, input app.ListCustomerInput) (pagination.Result[app.CustomerApp], error) {
 	return pagination.Result[app.CustomerApp]{}, nil
 }
@@ -1585,6 +1660,10 @@ var _ appstripe.Service = (*NoopAppStripeService)(nil)
 type NoopAppStripeService struct{}
 
 func (n NoopAppStripeService) UpdateAPIKey(ctx context.Context, input appstripe.UpdateAPIKeyInput) error {
+	return nil
+}
+
+func (n NoopAppStripeService) UpdateWebhookSchemaVersion(ctx context.Context, input appstripe.UpdateWebhookSchemaVersionInput) error {
 	return nil
 }
 
@@ -1618,6 +1697,14 @@ func (n NoopAppStripeService) DeleteStripeCustomerData(ctx context.Context, inpu
 
 func (n NoopAppStripeService) GetSupplierContact(ctx context.Context, input appstripe.GetSupplierContactInput) (billing.SupplierContact, error) {
 	return billing.SupplierContact{}, nil
+}
+
+func (n NoopAppStripeService) GetLatestInvoiceGeneration(ctx context.Context, invoiceID billing.InvoiceID) (int, error) {
+	return 0, nil
+}
+
+func (n NoopAppStripeService) IncrementInvoiceGeneration(ctx context.Context, invoiceID billing.InvoiceID) error {
+	return nil
 }
 
 func (n NoopAppStripeService) GetMaskedSecretAPIKey(ctx context.Context, secretAPIKeyID secretentity.SecretID) (string, error) {
@@ -2083,25 +2170,25 @@ func (n NoopBillingService) ResolveStripeAppIDFromBillingProfile(ctx context.Con
 	return app.AppID{}, nil
 }
 
-// CustomerOverrideService methods
-func (n NoopBillingService) UpsertCustomerOverride(ctx context.Context, input billing.UpsertCustomerOverrideInput) (billing.CustomerOverrideWithDetails, error) {
-	return billing.CustomerOverrideWithDetails{}, nil
+// CustomerBillingProfileService methods
+func (n NoopBillingService) SetCustomerBillingProfile(ctx context.Context, input billing.SetCustomerBillingProfileInput) (billing.CustomerBillingProfile, error) {
+	return billing.CustomerBillingProfile{}, nil
 }
 
-func (n NoopBillingService) DeleteCustomerOverride(ctx context.Context, input billing.DeleteCustomerOverrideInput) error {
+func (n NoopBillingService) ClearCustomerBillingProfile(ctx context.Context, input billing.ClearCustomerBillingProfileInput) error {
 	return nil
 }
 
-func (n NoopBillingService) GetCustomerOverride(ctx context.Context, input billing.GetCustomerOverrideInput) (billing.CustomerOverrideWithDetails, error) {
-	return billing.CustomerOverrideWithDetails{}, nil
+func (n NoopBillingService) GetCustomerBillingProfile(ctx context.Context, input billing.GetCustomerBillingProfileInput) (billing.CustomerBillingProfile, error) {
+	return billing.CustomerBillingProfile{}, nil
 }
 
 func (n NoopBillingService) GetCustomerApp(ctx context.Context, input billing.GetCustomerAppInput) (app.App, error) {
 	return nil, nil
 }
 
-func (n NoopBillingService) ListCustomerOverrides(ctx context.Context, input billing.ListCustomerOverridesInput) (billing.ListCustomerOverridesResult, error) {
-	return billing.ListCustomerOverridesResult{}, nil
+func (n NoopBillingService) ListCustomerBillingProfiles(ctx context.Context, input billing.ListCustomerBillingProfilesInput) (billing.ListCustomerBillingProfilesResult, error) {
+	return billing.ListCustomerBillingProfilesResult{}, nil
 }
 
 // InvoiceLineService methods
@@ -2135,23 +2222,6 @@ func (n NoopBillingService) GetStandardLinesForSubscription(ctx context.Context,
 
 func (n NoopBillingService) GetGatheringLinesForSubscription(ctx context.Context, input billing.GetLinesForSubscriptionInput) (billing.GatheringLines, error) {
 	return billing.GatheringLines{}, nil
-}
-
-// InvoiceSplitLineGroupService methods
-func (n NoopBillingService) DeleteSplitLineGroup(ctx context.Context, input billing.DeleteSplitLineGroupInput) error {
-	return nil
-}
-
-func (n NoopBillingService) UpdateSplitLineGroup(ctx context.Context, input billing.UpdateSplitLineGroupInput) (billing.SplitLineGroup, error) {
-	return billing.SplitLineGroup{}, nil
-}
-
-func (n NoopBillingService) GetSplitLineGroupsForSubscription(ctx context.Context, input billing.GetLinesForSubscriptionInput) ([]billing.SplitLineHierarchy, error) {
-	return []billing.SplitLineHierarchy{}, nil
-}
-
-func (n NoopBillingService) GetSplitLineGroup(ctx context.Context, input billing.GetSplitLineGroupInput) (billing.SplitLineHierarchy, error) {
-	return billing.SplitLineHierarchy{}, nil
 }
 
 // InvoiceService methods
@@ -2325,6 +2395,51 @@ func (n NoopTaxCodeService) GetOrganizationDefaultTaxCodes(ctx context.Context, 
 
 func (n NoopTaxCodeService) UpsertOrganizationDefaultTaxCodes(ctx context.Context, input taxcode.UpsertOrganizationDefaultTaxCodesInput) (taxcode.OrganizationDefaultTaxCodes, error) {
 	return taxcode.OrganizationDefaultTaxCodes{}, nil
+}
+
+// NoopTaxCodeResolver resolves nothing: responses render without stripe.code and legacy
+// stripe.code input resolves to a Tax Code with an empty ID.
+var (
+	_ productcatalog.TransactionalTaxCodeResolver = (*NoopTaxCodeResolver)(nil)
+	_ productcatalog.TaxCodeBackfillResolver      = (*NoopTaxCodeResolver)(nil)
+)
+
+type NoopTaxCodeResolver struct{}
+
+func (n NoopTaxCodeResolver) Resolve(ctx context.Context, namespace string, id string) (*taxcode.TaxCode, error) {
+	return &taxcode.TaxCode{}, nil
+}
+
+func (n NoopTaxCodeResolver) BatchResolve(ctx context.Context, namespace string, ids ...string) (map[string]*taxcode.TaxCode, error) {
+	return map[string]*taxcode.TaxCode{}, nil
+}
+
+func (n NoopTaxCodeResolver) WithNamespace(namespace string) productcatalog.NamespacedTaxCodeResolver {
+	return noopNamespacedTaxCodeResolver{namespace: namespace}
+}
+
+func (n NoopTaxCodeResolver) WithResolver(ctx context.Context, fn func(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver) error) error {
+	return fn(ctx, n)
+}
+
+func (n NoopTaxCodeResolver) ResolveOrBackfillTaxCode(ctx context.Context, input productcatalog.ResolveOrBackfillTaxCodeInput) (*taxcode.TaxCode, error) {
+	return &taxcode.TaxCode{}, nil
+}
+
+type noopNamespacedTaxCodeResolver struct {
+	namespace string
+}
+
+func (n noopNamespacedTaxCodeResolver) Resolve(ctx context.Context, id string) (*taxcode.TaxCode, error) {
+	return &taxcode.TaxCode{}, nil
+}
+
+func (n noopNamespacedTaxCodeResolver) BatchResolve(ctx context.Context, ids ...string) (map[string]*taxcode.TaxCode, error) {
+	return map[string]*taxcode.TaxCode{}, nil
+}
+
+func (n noopNamespacedTaxCodeResolver) Namespace() string {
+	return n.namespace
 }
 
 // SubjectService methods

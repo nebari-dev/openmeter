@@ -2,8 +2,10 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -19,12 +21,14 @@ import (
 
 	appsandbox "github.com/openmeterio/openmeter/openmeter/app/sandbox"
 	"github.com/openmeterio/openmeter/openmeter/billing"
-	billingadapter "github.com/openmeterio/openmeter/openmeter/billing/adapter"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
 	"github.com/openmeterio/openmeter/openmeter/billing/models/stddetailedline"
 	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating"
 	"github.com/openmeterio/openmeter/openmeter/billing/service/invoicecalc"
+	billingworkeradvance "github.com/openmeterio/openmeter/openmeter/billing/worker/advance"
 	"github.com/openmeterio/openmeter/openmeter/customer"
+	"github.com/openmeterio/openmeter/openmeter/ent/db"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
@@ -77,6 +81,38 @@ func (s *InvoicingTestSuite) TestSimulateInvoiceFeatureMeterValidation() {
 			ManagedBy:     billing.ManuallyManagedLine,
 		}, billing.WithFeatureKey(featureKey))
 	}
+
+	s.Run("rating warnings preserve caller input", func() {
+		// Given supplied negative usage and a missing feature on a transient line.
+		line := newLine("missing-feature")
+		line.UsageBased.MeteredQuantity = lo.ToPtr(alpacadecimal.NewFromInt(-5))
+		line.UsageBased.MeteredPreLinePeriodQuantity = lo.ToPtr(alpacadecimal.Zero)
+		before, err := json.Marshal(line)
+		s.Require().NoError(err)
+
+		// When simulation validates the feature and rates supplied quantities.
+		invoice, err := s.BillingService.SimulateInvoice(ctx, billing.SimulateInvoiceInput{
+			Namespace:  namespace,
+			CustomerID: &customerEntity.ID,
+			Currency:   currencyx.FiatCode(currency.USD),
+			Lines:      billing.NewStandardInvoiceLines(billing.StandardLines{line}),
+		})
+		s.Require().NoError(err)
+
+		// Then both issue channels survive, and normalization leaves the input intact.
+		s.Equal(billing.StandardInvoiceStatusDraftInvalid, invoice.Status)
+		s.Equal(float64(10), invoice.Totals.Total.InexactFloat64())
+		s.Require().Len(invoice.ValidationIssues, 2)
+		warning, found := lo.Find(invoice.ValidationIssues, func(issue billing.ValidationIssue) bool {
+			return issue.Code == billing.WarnNegativeMeteredQuantityClamped.Code
+		})
+		s.Require().True(found)
+		s.Equal(billing.LineEngineValidationComponent(billing.LineEngineTypeInvoice), warning.Component)
+		s.Equal(invoice.Lines.OrEmpty()[0].ID, warning.Attributes[billing.AttributeKeyLineID])
+		after, err := json.Marshal(line)
+		s.Require().NoError(err)
+		s.JSONEq(string(before), string(after))
+	})
 
 	s.Run("missing feature", func() {
 		// given:
@@ -155,6 +191,103 @@ func (s *InvoicingTestSuite) TestSimulateInvoiceFeatureMeterValidation() {
 				"feature_key": meterlessFeature.Key,
 			},
 		}}, billing.ValidationIssues{invoice.ValidationIssues[0]}.RemoveMetaForCompare())
+	})
+}
+
+func (s *InvoicingTestSuite) TestSimulateInvoiceSuppliedSnapshots() {
+	// Given supplied usage whose prior quantity crosses a graduated tier boundary.
+	ctx := s.T().Context()
+	namespace := s.GetUniqueNamespace("simulate-supplied-snapshots")
+	sandboxApp := s.InstallSandboxApp(s.T(), namespace)
+	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
+	customerEntity := s.CreateTestCustomer(namespace, "test-customer")
+	testFeature := s.SetupApiRequestsTotalFeature(ctx, namespace)
+	defer testFeature.Cleanup()
+	period := timeutil.ClosedPeriod{
+		From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		To:   time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+	line := billing.NewFlatFeeLine(billing.NewFlatFeeLineInput{
+		Period:        period,
+		InvoiceAt:     period.To,
+		Name:          "transient usage",
+		PerUnitAmount: alpacadecimal.NewFromInt(1),
+		PaymentTerm:   productcatalog.InArrearsPaymentTerm,
+		ManagedBy:     billing.ManuallyManagedLine,
+	}, billing.WithFeatureKey(testFeature.Feature.Key))
+	line.UsageBased.Price = productcatalog.NewPriceFrom(productcatalog.TieredPrice{
+		Mode: productcatalog.GraduatedTieredPrice,
+		Tiers: []productcatalog.PriceTier{
+			{
+				UpToAmount: lo.ToPtr(alpacadecimal.NewFromInt(50)),
+				UnitPrice:  &productcatalog.PriceTierUnitPrice{Amount: alpacadecimal.NewFromInt(1)},
+			},
+			{UnitPrice: &productcatalog.PriceTierUnitPrice{Amount: alpacadecimal.NewFromInt(2)}},
+		},
+	})
+	line.UsageBased.MeteredQuantity = lo.ToPtr(alpacadecimal.NewFromInt(20))
+	line.UsageBased.MeteredPreLinePeriodQuantity = lo.ToPtr(alpacadecimal.NewFromInt(40))
+	otherLine, err := line.Clone()
+	s.Require().NoError(err)
+	otherLine.Namespace = "caller-namespace"
+	otherLine.ID = "supplied-line-id"
+	otherLine.UsageBased.MeteredPreLinePeriodQuantity = lo.ToPtr(alpacadecimal.NewFromInt(10))
+
+	input := billing.SimulateInvoiceInput{
+		Namespace:  namespace,
+		CustomerID: &customerEntity.ID,
+		Currency:   currencyx.FiatCode(currency.USD),
+		Lines:      billing.NewStandardInvoiceLines(billing.StandardLines{line, otherLine}),
+	}
+	before, err := json.Marshal(input)
+	s.Require().NoError(err)
+
+	// When simulation rates snapshots without reading split groups or metered usage.
+	historyQueries := &splitLineHistoryQueryCounter{}
+	s.DBClient.BillingInvoiceSplitLineGroup.Intercept(historyQueries)
+	invoice, err := s.BillingService.SimulateInvoice(ctx, input)
+	s.Require().NoError(err)
+
+	// Then prior usage affects pricing, generated and supplied identities survive,
+	// and the input and database remain unchanged.
+	s.Require().Len(invoice.Lines.OrEmpty(), 2)
+	s.Equal(30.0, invoice.Lines.OrEmpty()[0].Totals.Total.InexactFloat64())
+	s.Equal(40.0, invoice.Lines.OrEmpty()[0].UsageBased.PreLinePeriodQuantity.InexactFloat64())
+	s.NotEmpty(invoice.Lines.OrEmpty()[0].ID)
+	s.Equal("supplied-line-id", invoice.Lines.OrEmpty()[1].ID)
+	s.Equal(namespace, invoice.Lines.OrEmpty()[0].Namespace)
+	s.Equal(namespace, invoice.Lines.OrEmpty()[1].Namespace)
+	s.Equal(20.0, invoice.Lines.OrEmpty()[1].Totals.Total.InexactFloat64())
+	s.Equal(50.0, invoice.Totals.Total.InexactFloat64())
+	s.Zero(historyQueries.count)
+	s.Empty(invoice.ValidationIssues)
+	after, err := json.Marshal(input)
+	s.Require().NoError(err)
+	s.JSONEq(string(before), string(after))
+	_, err = s.BillingAdapter.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+		Invoice: invoice.GetInvoiceID(),
+	})
+	s.ErrorIs(err, billing.ErrInvoiceNotFound)
+
+	s.Run("missing split group fails without a fallback", func() {
+		// Given a clone of an otherwise valid supplied line carrying a group ID.
+		splitLine, err := line.Clone()
+		s.Require().NoError(err)
+		splitLine.SplitLineGroupID = lo.ToPtr("unpersisted-group")
+		before, err := json.Marshal(splitLine)
+		s.Require().NoError(err)
+		splitInput := input
+		splitInput.Lines = billing.NewStandardInvoiceLines(billing.StandardLines{splitLine})
+
+		// When simulation resolves a group absent from the namespace.
+		_, err = s.BillingService.SimulateInvoice(ctx, splitInput)
+
+		// Then missing history fails explicitly and the caller's input is untouched.
+		s.ErrorContains(err, "split line group[unpersisted-group]")
+		s.Equal(1, historyQueries.count)
+		after, err := json.Marshal(splitLine)
+		s.Require().NoError(err)
+		s.JSONEq(string(before), string(after))
 	})
 }
 
@@ -241,8 +374,8 @@ func (s *InvoicingTestSuite) TestPendingLineCreation() {
 
 	s.T().Run("CreateInvoiceItems", func(t *testing.T) {
 		// When we create invoice items
-
-		res, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+		res, err := s.BillingService.CreatePendingInvoiceLines(
+			ctx,
 			billing.CreatePendingInvoiceLinesInput{
 				Customer: customerEntity.GetID(),
 				Currency: currencyx.FiatCode(currency.USD),
@@ -395,7 +528,7 @@ func (s *InvoicingTestSuite) TestPendingLineCreation() {
 				// The customer snapshot
 				CustomerID: customerEntity.ID,
 
-				SchemaLevel: billingadapter.DefaultInvoiceWriteSchemaLevel,
+				SchemaLevel: billing.CurrentInvoiceSchemaLevel,
 			},
 
 			Lines: billing.NewGatheringInvoiceLines([]billing.GatheringLine{expectedUSDLine}),
@@ -462,7 +595,8 @@ func (s *InvoicingTestSuite) TestPendingLineCreation() {
 		tieredPrice, err := tieredLine.Price.AsTiered()
 		require.NoError(s.T(), err)
 
-		require.Equal(s.T(),
+		require.Equal(
+			s.T(),
 			tieredPrice,
 			productcatalog.TieredPrice{
 				Mode: productcatalog.GraduatedTieredPrice,
@@ -831,7 +965,8 @@ func (s *InvoicingTestSuite) TestListCustomerIDsPendingCollectionReturnsUniqueCu
 		Customer:  secondCustomer,
 	})
 
-	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx,
+	_, err = s.TestDB.PGDriver.DB().ExecContext(
+		ctx,
 		`UPDATE billing_workflow_configs
 		 SET namespace = $1
 		 WHERE id = (
@@ -1062,7 +1197,7 @@ func (s *InvoicingTestSuite) TestInvoicingFlow() {
 			s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID(), WithBillingProfileEditFn(func(profile *billing.CreateProfileInput) {
 				profile.WorkflowConfig = tc.workflowConfig
 			}))
-			s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+			s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 			invoice := s.CreateDraftInvoice(s.T(), ctx, DraftInvoiceInput{
 				Namespace: namespace,
@@ -1290,7 +1425,8 @@ func (s *InvoicingTestSuite) TestInvoicingFlowErrorHandling() {
 				})
 				require.NoError(t, err)
 				require.Len(t, issues, 1)
-				require.Equal(t,
+				require.Equal(
+					t,
 					billing.ValidationIssue{
 						Severity:   billing.ValidationIssueSeverityCritical,
 						Code:       "test1",
@@ -1357,7 +1493,8 @@ func (s *InvoicingTestSuite) TestInvoicingFlowErrorHandling() {
 				})
 				require.True(t, ok, "old issue should be present")
 				require.NotNil(t, invoiceIssue.DeletedAt)
-				require.Equal(t,
+				require.Equal(
+					t,
 					billing.ValidationIssue{
 						Severity:   billing.ValidationIssueSeverityCritical,
 						Code:       "test1",
@@ -1374,7 +1511,8 @@ func (s *InvoicingTestSuite) TestInvoicingFlowErrorHandling() {
 				})
 				require.True(t, ok, "the issue should be present")
 				require.NotNil(t, downgradedIssue.DeletedAt)
-				require.Equal(t,
+				require.Equal(
+					t,
 					billing.ValidationIssue{
 						Severity:   billing.ValidationIssueSeverityWarning,
 						Code:       "test1",
@@ -1390,7 +1528,8 @@ func (s *InvoicingTestSuite) TestInvoicingFlowErrorHandling() {
 					return i.Code == "test2"
 				})
 				require.True(t, ok, "new issue should be present")
-				require.Equal(t,
+				require.Equal(
+					t,
 					billing.ValidationIssue{
 						Severity:  billing.ValidationIssueSeverityCritical,
 						Code:      "test2",
@@ -1846,7 +1985,7 @@ func (s *InvoicingTestSuite) TestBillingProfileChange() {
 
 	sandboxApp := s.InstallSandboxApp(s.T(), namespace)
 
-	oldCreateProfileInput := minimalCreateProfileInputTemplate(sandboxApp.GetID())
+	oldCreateProfileInput := MinimalCreateProfileInputTemplate(sandboxApp.GetID())
 	oldCreateProfileInput.Namespace = namespace
 	oldCreateProfileInput.WorkflowConfig.Invoicing.ProgressiveBilling = true
 
@@ -1854,7 +1993,7 @@ func (s *InvoicingTestSuite) TestBillingProfileChange() {
 	s.NoError(err)
 	s.NotNil(oldBillingProfile)
 
-	newCreateProfileInput := minimalCreateProfileInputTemplate(sandboxApp.GetID())
+	newCreateProfileInput := MinimalCreateProfileInputTemplate(sandboxApp.GetID())
 	newCreateProfileInput.Namespace = namespace
 	newCreateProfileInput.WorkflowConfig.Invoicing.ProgressiveBilling = true
 
@@ -2004,12 +2143,13 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 
 	// Given we have a default profile for the namespace
 	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID(), WithProgressiveBilling())
-	s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+	s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 	lines := ubpPendingLines{}
 	s.Run("create pending invoice items", func() {
 		// When we create pending invoice items
-		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+			ctx,
 			billing.CreatePendingInvoiceLinesInput{
 				Customer: customerEntity.GetID(),
 				Currency: currencyx.FiatCode(currency.USD),
@@ -2128,12 +2268,14 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 		}
 
 		// The flat fee line should not be truncated
-		require.Equal(s.T(),
+		require.Equal(
+			s.T(),
 			timeutil.ClosedPeriod{From: truncatedPeriodStart, To: truncatedPeriodEnd},
 			lines.flatFee.ServicePeriod,
 			"period should not be truncated",
 		)
-		require.Equal(s.T(),
+		require.Equal(
+			s.T(),
 			lines.flatFee.InvoiceAt,
 			truncatedPeriodEnd,
 			"invoice at should be unchanged",
@@ -2141,13 +2283,15 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 
 		// The pending invoice items should be truncated to 1 min resolution (start => up to next, end down to previous)
 		for _, line := range []billing.GatheringLine{lines.flatPerUnit, lines.tieredGraduated, lines.tieredVolume} {
-			require.Equal(s.T(),
+			require.Equal(
+				s.T(),
 				timeutil.ClosedPeriod{From: testutils.GetRFC3339Time(s.T(), "2024-09-02T12:13:14Z"), To: testutils.GetRFC3339Time(s.T(), "2024-09-03T12:13:14Z")},
 				line.ServicePeriod,
 				"period should be truncated to 1 min resolution",
 			)
 
-			require.Equal(s.T(),
+			require.Equal(
+				s.T(),
 				line.InvoiceAt,
 				truncatedPeriodEnd,
 				"invoice at should be unchanged",
@@ -2213,17 +2357,15 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 		}
 
 		// Let's validate the output of the split itself
-		s.NotNil(tieredGraduated.SplitLineHierarchy)
-		s.sortedSplitLineGroupChildren(tieredGraduated)
-		tieredGraduatedHierarchy := tieredGraduated.SplitLineHierarchy
+		tieredGraduatedHierarchy := s.loadSortedSplitLineHierarchy(tieredGraduated)
 
 		require.Equal(s.T(), flatPerUnit.UsageBased.Quantity.InexactFloat64(), float64(10), "flat per unit should have 10 units")
 		require.Len(s.T(), tieredGraduatedHierarchy.Lines, 2, "there should be to child lines [id=%s]", tieredGraduatedHierarchy.Group.ID)
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[0].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[0].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart,
 			To:   truncatedPeriodStart.Add(time.Hour),
 		}), "first child period should be truncated")
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[1].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[1].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart.Add(time.Hour),
 			To:   truncatedPeriodEnd,
 		}), "second child period should be until the end of parent's period")
@@ -2267,6 +2409,7 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 					line.UsageBased.Price = productcatalog.NewPriceFrom(productcatalog.UnitPrice{
 						Amount: alpacadecimal.NewFromFloat(250),
 					})
+
 					return nil
 				},
 			})
@@ -2317,6 +2460,7 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 					}
 
 					line.DeletedAt = lo.ToPtr(clock.Now())
+
 					return nil
 				},
 				IncludeDeletedLines: true,
@@ -2499,21 +2643,19 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 		}
 
 		// Let's validate the output of the split itself
-		s.sortedSplitLineGroupChildren(tieredGraduated)
-		s.NotNil(tieredGraduated.SplitLineHierarchy)
-		tieredGraduatedHierarchy := tieredGraduated.SplitLineHierarchy
+		tieredGraduatedHierarchy := s.loadSortedSplitLineHierarchy(tieredGraduated)
 
 		require.True(s.T(), tieredGraduatedHierarchy.Group.ServicePeriod.Equal(lines.tieredGraduated.ServicePeriod))
 		require.Len(s.T(), tieredGraduatedHierarchy.Lines, 3, "there should be to child lines [id=%s]", tieredGraduatedHierarchy.Group.ID)
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[0].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[0].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart,
 			To:   truncatedPeriodStart.Add(time.Hour),
 		}), "first child period should be truncated")
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[1].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[1].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart.Add(time.Hour),
 			To:   truncatedPeriodStart.Add(2 * time.Hour),
 		}), "second child period should be between the first and the third child's period")
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[2].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[2].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart.Add(2 * time.Hour),
 			To:   truncatedPeriodEnd,
 		}), "third child period should be until the end of parent's period")
@@ -2701,25 +2843,24 @@ func (s *InvoicingTestSuite) TestUBPProgressiveInvoicing() {
 		for _, line := range []*billing.StandardLine{flatPerUnit, tieredGraduated} {
 			require.True(s.T(), expectedPeriod.Equal(line.Period), "period should be changed for the line items")
 		}
+
 		require.True(s.T(), tieredVolume.Period.Equal(lines.tieredVolume.ServicePeriod), "period should be unchanged for the tiered volume line")
 		require.True(s.T(), flatFee.Period.Equal(lines.flatFee.ServicePeriod), "period should be unchanged for the flat line")
 
 		// Let's validate the output of the split itself: no new split should have occurred
-		s.sortedSplitLineGroupChildren(tieredGraduated)
-		tieredGraduatedHierarchy := tieredGraduated.SplitLineHierarchy
-		s.NotNil(tieredGraduatedHierarchy)
+		tieredGraduatedHierarchy := s.loadSortedSplitLineHierarchy(tieredGraduated)
 
 		require.True(s.T(), tieredGraduatedHierarchy.Group.ServicePeriod.Equal(lines.tieredGraduated.ServicePeriod))
 		require.Len(s.T(), tieredGraduatedHierarchy.Lines, 3, "there should be to child lines [id=%s]", tieredGraduatedHierarchy.Group.ID)
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[0].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[0].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart,
 			To:   truncatedPeriodStart.Add(time.Hour),
 		}), "first child period should be truncated")
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[1].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[1].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart.Add(time.Hour),
 			To:   truncatedPeriodStart.Add(2 * time.Hour),
 		}), "second child period should be between the first and the third child's period")
-		require.True(s.T(), tieredGraduatedHierarchy.Lines[2].Line.GetServicePeriod().Equal(timeutil.ClosedPeriod{
+		require.True(s.T(), tieredGraduatedHierarchy.Lines[2].ServicePeriod.Equal(timeutil.ClosedPeriod{
 			From: truncatedPeriodStart.Add(2 * time.Hour),
 			To:   truncatedPeriodEnd,
 		}), "third child period should be until the end of parent's period")
@@ -2880,7 +3021,8 @@ func (s *InvoicingTestSuite) TestUBPGraduatingFlatFeeTier1() {
 	var pendingLine billing.GatheringLine
 	s.Run("create pending invoice items", func() {
 		// When we create pending invoice items
-		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+			ctx,
 			billing.CreatePendingInvoiceLinesInput{
 				Customer: customerEntity.GetID(),
 				Currency: currencyx.FiatCode(currency.USD),
@@ -3009,7 +3151,6 @@ func (s *InvoicingTestSuite) TestUBPGraduatingFlatFeeTier1() {
 
 	s.Run("create new invoice, with usage", func() {
 		// Period
-
 		s.MockStreamingConnector.AddSimpleEvent("tiered-graduated", 15, periodStart.Add(time.Minute*130)) // 2h10m
 
 		asOf := periodStart.Add(3 * time.Hour)
@@ -3196,7 +3337,8 @@ func (s *InvoicingTestSuite) TestUBPNonProgressiveInvoicing() {
 	lines := ubpPendingLines{}
 	s.Run("create pending invoice items", func() {
 		// When we create pending invoice items
-		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+			ctx,
 			billing.CreatePendingInvoiceLinesInput{
 				Customer: customerEntity.GetID(),
 				Currency: currencyx.FiatCode(currency.USD),
@@ -3316,13 +3458,15 @@ func (s *InvoicingTestSuite) TestUBPNonProgressiveInvoicing() {
 
 		// The pending invoice items should be truncated to 1 min resolution (start => up to next, end down to previous)
 		for _, line := range []billing.GatheringLine{lines.flatPerUnit, lines.tieredGraduated, lines.tieredVolume, lines.flatFee} {
-			require.Equal(s.T(),
+			require.Equal(
+				s.T(),
 				timeutil.ClosedPeriod{From: truncatedPeriodStart, To: truncatedPeriodEnd},
 				line.ServicePeriod,
 				"period should be truncated to 1 min resolution",
 			)
 
-			require.Equal(s.T(),
+			require.Equal(
+				s.T(),
 				line.InvoiceAt,
 				truncatedPeriodEnd,
 				"invoice at should be unchanged",
@@ -3388,7 +3532,8 @@ func (s *InvoicingTestSuite) TestUBPNonProgressiveInvoicing() {
 			require.True(s.T(), expectedPeriod.Equal(line.Period), "period should not be changed for the line items")
 		}
 
-		require.Equal(s.T(),
+		require.Equal(
+			s.T(),
 			timeutil.ClosedPeriod{
 				From: truncatedPeriodStart,
 				To:   truncatedPeriodEnd,
@@ -3485,18 +3630,19 @@ func (s *InvoicingTestSuite) lineInSameSplitLineGroup(lines []*billing.StandardL
 	s.T().Helper()
 
 	for _, line := range lines {
-		if line.SplitLineHierarchy == nil {
+		if line.SplitLineGroupID == nil {
 			continue
 		}
 
-		for _, child := range line.SplitLineHierarchy.Lines {
-			if child.Line.GetID() == shiblingLineID {
+		for _, child := range s.loadSortedSplitLineHierarchy(line).Lines {
+			if child.ID == shiblingLineID {
 				return line
 			}
 		}
 	}
 
 	require.Fail(s.T(), "line with parent not found")
+
 	return nil
 }
 
@@ -3509,22 +3655,31 @@ func (s *InvoicingTestSuite) lineByID(lines []*billing.StandardLine, id string) 
 	}
 
 	require.Fail(s.T(), "line not found")
+
 	return nil
 }
 
-func (s *InvoicingTestSuite) sortedSplitLineGroupChildren(line *billing.StandardLine) {
-	s.NotNil(line.SplitLineHierarchy)
+func (s *InvoicingTestSuite) loadSortedSplitLineHierarchy(line *billing.StandardLine) splitlinegroup.SplitLineHierarchy {
+	s.T().Helper()
+	s.Require().NotNil(line.SplitLineGroupID)
+	hierarchy, err := s.SplitLineGroupService.GetSplitLineGroup(s.T().Context(), models.NamespacedID{
+		Namespace: line.Namespace,
+		ID:        *line.SplitLineGroupID,
+	})
+	s.Require().NoError(err)
 
-	slices.SortFunc(line.SplitLineHierarchy.Lines, func(a, b billing.LineWithInvoiceHeader) int {
+	slices.SortFunc(hierarchy.Lines, func(a, b splitlinegroup.SplitLineHierarchyLine) int {
 		switch {
-		case a.Line.GetServicePeriod().From.Equal(b.Line.GetServicePeriod().From):
+		case a.ServicePeriod.From.Equal(b.ServicePeriod.From):
 			return 0
-		case a.Line.GetServicePeriod().From.Before(b.Line.GetServicePeriod().From):
+		case a.ServicePeriod.From.Before(b.ServicePeriod.From):
 			return -1
 		default:
 			return 1
 		}
 	})
+
+	return hierarchy
 }
 
 type ubpPendingLines struct {
@@ -3696,7 +3851,8 @@ func (s *InvoicingTestSuite) TestGatheringInvoiceRecalculation() {
 
 	s.Run("create pending invoice items", func() {
 		// When we create pending invoice items
-		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+			ctx,
 			billing.CreatePendingInvoiceLinesInput{
 				Customer: customerEntity.GetID(),
 				Currency: currencyx.FiatCode(currency.USD),
@@ -3726,13 +3882,14 @@ func (s *InvoicingTestSuite) TestGatheringInvoiceRecalculation() {
 	})
 
 	s.Run("fetch gathering invoice", func() {
-		invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
-			Namespace:        namespace,
-			CustomerID:       &filter.FilterULID{FilterString: filter.FilterString{Eq: &customerEntity.ID}},
-			ExtendedStatuses: []billing.StandardInvoiceStatus{billing.StandardInvoiceStatusGathering},
-			Expand: billing.InvoiceExpands{}.
-				With(billing.InvoiceExpandCalculateGatheringInvoiceWithLiveData),
-		},
+		invoices, err := s.BillingService.ListInvoices(
+			ctx, billing.ListInvoicesInput{
+				Namespace:        namespace,
+				CustomerID:       &filter.FilterULID{FilterString: filter.FilterString{Eq: &customerEntity.ID}},
+				ExtendedStatuses: []billing.StandardInvoiceStatus{billing.StandardInvoiceStatusGathering},
+				Expand: billing.InvoiceExpands{}.
+					With(billing.InvoiceExpandCalculateGatheringInvoiceWithLiveData),
+			},
 		)
 
 		require.NoError(s.T(), err)
@@ -3792,7 +3949,6 @@ func (s *InvoicingTestSuite) TestEmptyInvoiceGenerationZeroUsage() {
 	// Given we have a test customer and an UBP line without usage priced at 0
 	// we can create the invoice and even if there are no detailed lines the validation
 	// errors should be empty
-
 	namespace := "ns-empty-invoice-generation"
 	ctx := context.Background()
 	periodStart := lo.Must(time.Parse(time.RFC3339, "2024-09-02T12:13:14Z"))
@@ -3863,7 +4019,8 @@ func (s *InvoicingTestSuite) TestEmptyInvoiceGenerationZeroUsage() {
 	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
 
 	// Given we have pending invoice items without usage
-	pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+	pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+		ctx,
 		billing.CreatePendingInvoiceLinesInput{
 			Customer: customerEntity.GetID(),
 			Currency: currencyx.FiatCode(currency.USD),
@@ -3911,7 +4068,6 @@ func (s *InvoicingTestSuite) TestEmptyInvoiceGenerationZeroPrice() {
 	// Given we have a test customer and an UBP line with usage priced at 0
 	// we can create the invoice and there should be one detailed line with 0 total
 	// amount and no validation issues
-
 	namespace := "ns-empty-invoice-generation-zero-price"
 	ctx := context.Background()
 	periodStart := lo.Must(time.Parse(time.RFC3339, "2024-09-02T12:13:14Z"))
@@ -3982,7 +4138,8 @@ func (s *InvoicingTestSuite) TestEmptyInvoiceGenerationZeroPrice() {
 	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
 
 	// Given we have pending invoice items without usage
-	pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+	pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+		ctx,
 		billing.CreatePendingInvoiceLinesInput{
 			Customer: customerEntity.GetID(),
 			Currency: currencyx.FiatCode(currency.USD),
@@ -4155,7 +4312,8 @@ func (s *InvoicingTestSuite) TestListPendingAdvancementDoesNotResolveWorkflowRef
 	s.Require().NoError(err)
 	s.Require().Len(invoices, 1)
 
-	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx,
+	_, err = s.TestDB.PGDriver.DB().ExecContext(
+		ctx,
 		`UPDATE billing_workflow_configs
 		 SET namespace = $1
 		 WHERE id = (
@@ -4178,6 +4336,56 @@ func (s *InvoicingTestSuite) TestListPendingAdvancementDoesNotResolveWorkflowRef
 	s.Require().Len(candidates, 1)
 	s.Equal(invoices[0].GetInvoiceID(), candidates[0].InvoiceID)
 	s.Equal(customerEntity.ID, candidates[0].CustomerID)
+}
+
+func (s *InvoicingTestSuite) TestAutoAdvancerSkipsCandidatesYoungerThanMinimumAge() {
+	// given:
+	// - an advanceable invoice that was just updated
+	// - an auto advancer configured with a one hour minimum age
+	// when:
+	// - candidates are listed before and after the invoice is backdated past the minimum age
+	// then:
+	// - the invoice is only listed once it is older than the minimum age
+	ctx := s.T().Context()
+	namespace := s.GetUniqueNamespace("advancer-minimum-age")
+	s.ProvisionBillingProfile(ctx, namespace, s.InstallSandboxApp(s.T(), namespace).GetID())
+	customerEntity := s.CreateTestCustomer(namespace, "test-customer")
+	s.CreateGatheringInvoice(s.T(), ctx, DraftInvoiceInput{
+		Namespace: namespace,
+		Customer:  customerEntity,
+	})
+
+	invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+		Customer:          customerEntity.GetID(),
+		ForceAsyncAdvance: true,
+	})
+	s.Require().NoError(err)
+	s.Require().Len(invoices, 1)
+
+	advancer, err := billingworkeradvance.NewAdvancer(billingworkeradvance.Config{
+		BillingService: s.BillingService,
+		Logger:         slog.Default(),
+		MinimumAge:     time.Hour,
+	})
+	s.Require().NoError(err)
+
+	candidates, err := advancer.ListInvoicesToAdvance(ctx, []string{namespace}, nil)
+	s.Require().NoError(err)
+	s.Empty(candidates)
+
+	_, err = s.TestDB.PGDriver.DB().ExecContext(
+		ctx,
+		`UPDATE billing_invoices SET updated_at = $1 WHERE namespace = $2 AND id = $3`,
+		time.Now().Add(-2*time.Hour),
+		namespace,
+		invoices[0].ID,
+	)
+	s.Require().NoError(err)
+
+	candidates, err = advancer.ListInvoicesToAdvance(ctx, []string{namespace}, nil)
+	s.Require().NoError(err)
+	s.Require().Len(candidates, 1)
+	s.Equal(invoices[0].GetInvoiceID(), candidates[0].InvoiceID)
 }
 
 func (s *InvoicingTestSuite) TestProgressiveBillLate() {
@@ -4243,7 +4451,8 @@ func (s *InvoicingTestSuite) TestProgressiveBillLate() {
 									},
 								},
 							},
-						})),
+						},
+					)),
 				},
 			},
 		}),
@@ -4522,7 +4731,6 @@ func (s *InvoicingTestSuite) TestSortLines() {
 func (s *InvoicingTestSuite) TestGatheringInvoicePeriodPersisting() {
 	// When a gathering invoice has been created
 	// Then the period is persisted into the database (so that we can filter/sort by it)
-
 	namespace := "ns-gathering-invoice-period-persisting"
 	ctx := context.Background()
 
@@ -4625,7 +4833,7 @@ func (s *InvoicingTestSuite) TestDeleteGatheringInvoiceViaService() {
 
 	sandboxApp := s.InstallSandboxApp(s.T(), namespace)
 	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
-	s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+	s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	periodStart := now.Add(-24 * time.Hour)
@@ -4792,7 +5000,7 @@ func (s *InvoicingTestSuite) TestSnapshotQuantityMissingFeature() {
 	defer clock.UnFreeze()
 
 	sandboxApp := s.InstallSandboxApp(s.T(), namespace)
-	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID())
+	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID(), WithCollectionInterval(datetime.MustParseDuration(s.T(), "PT1H")))
 
 	testFeature := s.SetupApiRequestsTotalFeature(ctx, namespace)
 	defer testFeature.Cleanup()
@@ -4825,12 +5033,22 @@ func (s *InvoicingTestSuite) TestSnapshotQuantityMissingFeature() {
 	pendingLineID := pendingLines.Lines[0].ID
 	usageBasedConfigID := pendingLines.Lines[0].UBPConfigID
 
-	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx,
+	_, err = s.TestDB.PGDriver.DB().ExecContext(
+		ctx,
 		`UPDATE billing_invoice_usage_based_line_configs SET feature_key = $1 WHERE id = $2`,
 		"missing-feature",
 		usageBasedConfigID,
 	)
 	s.Require().NoError(err)
+
+	// A live preview currently rejects the incomplete builder output before it
+	// can expose the missing-feature issue. Preserve this independent limitation.
+	_, err = s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
+		Namespace: namespace,
+		Expand: billing.InvoiceExpands{}.
+			With(billing.InvoiceExpandCalculateGatheringInvoiceWithLiveData),
+	})
+	s.Require().ErrorContains(err, "validating build standard invoice lines with live data ids")
 
 	// when:
 	// - billing collects the line after the feature can no longer be resolved
@@ -4856,10 +5074,33 @@ func (s *InvoicingTestSuite) TestSnapshotQuantityMissingFeature() {
 	s.Equal(billing.LineEngineValidationComponent(billing.LineEngineTypeInvoice), issue.Component)
 	s.Equal(fmt.Sprintf("/lines/%s", pendingLineID), issue.Path)
 
+	// Retrying before the cutoff permits waiting, but forcing an incomplete
+	// snapshot still fails without replacing the persisted lines or issues.
+	queuedBillingService := s.BillingService.WithAdvancementStrategy(billing.QueuedAdvancementStrategy)
+	invoice, err = queuedBillingService.RetryInvoice(ctx, invoice.GetInvoiceID())
+	s.Require().NoError(err)
+	invoice, err = s.BillingService.AdvanceInvoice(ctx, invoice.GetInvoiceID())
+	s.Require().NoError(err)
+	s.Equal(billing.StandardInvoiceStatusDraftWaitingForCollection, invoice.Status)
+	_, err = s.BillingService.ForceCollectInvoice(ctx, invoice.GetInvoiceID())
+	s.Require().ErrorContains(err, "metered quantity is required")
+	invoice, err = s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+		Invoice: invoice.GetInvoiceID(),
+		Expand:  billing.StandardInvoiceExpandAll,
+	})
+	s.Require().NoError(err)
+	s.Nil(invoice.QuantitySnapshotedAt)
+	s.Nil(invoice.Lines.OrEmpty()[0].UsageBased.MeteredQuantity)
+	s.Require().Len(invoice.ValidationIssues, 1)
+	s.Equal(billing.ValidationIssueSeverityWarning, invoice.ValidationIssues[0].Severity)
+
 	// when:
 	// - collection is retried while the feature is still missing
-	clock.SetTime(invoice.DefaultCollectionAtForStandardInvoice().Add(time.Minute))
-	queuedBillingService := s.BillingService.WithAdvancementStrategy(billing.QueuedAdvancementStrategy)
+	clock.FreezeTime(invoice.DefaultCollectionAtForStandardInvoice().Add(time.Minute))
+	defer clock.UnFreeze()
+	invoice, err = s.BillingService.AdvanceInvoice(ctx, invoice.GetInvoiceID())
+	s.Require().NoError(err)
+	s.Equal(billing.StandardInvoiceStatusDraftInvalidCreated, invoice.Status)
 	invoice, err = queuedBillingService.RetryInvoice(ctx, invoice.GetInvoiceID())
 	s.Require().NoError(err)
 	s.Equal(billing.StandardInvoiceStatusDraftCreated, invoice.Status)
@@ -4875,7 +5116,8 @@ func (s *InvoicingTestSuite) TestSnapshotQuantityMissingFeature() {
 
 	// when:
 	// - the feature reference is repaired and collection is retried
-	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx,
+	_, err = s.TestDB.PGDriver.DB().ExecContext(
+		ctx,
 		`UPDATE billing_invoice_usage_based_line_configs SET feature_key = $1 WHERE id = $2`,
 		testFeature.Feature.Key,
 		standardUsageBasedConfigID,
@@ -4975,7 +5217,8 @@ func (s *InvoicingTestSuite) TestSnapshotQuantityInvalidDatabaseState() {
 		s.NotEmpty(customerEntity.ID)
 		customerID = customerEntity.GetID()
 
-		s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID(),
+		s.ProvisionBillingProfile(
+			ctx, namespace, sandboxApp.GetID(),
 			WithCollectionInterval(datetime.NewISODuration(0, 0, 0, 1, 0, 0, 0)), // 1 day collection interval
 		)
 
@@ -4984,7 +5227,8 @@ func (s *InvoicingTestSuite) TestSnapshotQuantityInvalidDatabaseState() {
 
 		s.MockStreamingConnector.AddSimpleEvent(meterSlug, 7, periodStart.Add(time.Minute))
 
-		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(ctx,
+		pendingLines, err := s.BillingService.CreatePendingInvoiceLines(
+			ctx,
 			billing.CreatePendingInvoiceLinesInput{
 				Customer: customerID,
 				Currency: currencyx.FiatCode(currency.USD),
@@ -5220,7 +5464,7 @@ func (s *InvoicingTestSuite) TestUpdateInvoice() {
 			},
 		}
 	}))
-	s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+	s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 	s.Run("gathering invoice", func() {
 		var gatheringInvoiceID billing.InvoiceID
@@ -5359,6 +5603,7 @@ func (s *InvoicingTestSuite) TestUpdateInvoice() {
 					}
 
 					line.DeletedAt = lo.ToPtr(clock.Now())
+
 					return nil
 				},
 			})
@@ -5412,5 +5657,18 @@ func (s *InvoicingTestSuite) TestUpdateInvoice() {
 				require.NotNil(s.T(), reloadedDeletedLine.DeletedAt)
 			})
 		})
+	})
+}
+
+// Counts group-history reads so ordinary simulation and invoice reads remain
+// independent of history, while explicit split-group calculations can load it.
+type splitLineHistoryQueryCounter struct {
+	count int
+}
+
+func (c *splitLineHistoryQueryCounter) Intercept(next db.Querier) db.Querier {
+	return db.QuerierFunc(func(ctx context.Context, query db.Query) (db.Value, error) {
+		c.count++
+		return next.Query(ctx, query)
 	})
 }

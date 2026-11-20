@@ -52,6 +52,7 @@ func (i Input) Validate() error {
 			intentServicePeriod.From.Format(time.RFC3339), intentServicePeriod.To.Format(time.RFC3339),
 			i.CurrentPeriod.ServicePeriod.From.Format(time.RFC3339), i.CurrentPeriod.ServicePeriod.To.Format(time.RFC3339)))
 	}
+
 	if err := i.CurrentPeriod.ServicePeriod.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("current period service period: %w", err))
 	}
@@ -64,6 +65,7 @@ func (i Input) Validate() error {
 				intentServicePeriod.From.Format(time.RFC3339), intentServicePeriod.To.Format(time.RFC3339),
 				priorPeriod.ServicePeriod.From.Format(time.RFC3339), priorPeriod.ServicePeriod.To.Format(time.RFC3339)))
 		}
+
 		if err := priorPeriod.ServicePeriod.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("prior periods[%d] service period: %w", idx, err))
 		}
@@ -213,9 +215,7 @@ func (e Engine) buildDetailsByEpoch(ctx context.Context, in Input, recorder *bil
 	previouslyGeneratedDetailedLines := make(usagebased.DetailedLines, 0, 32) // 32 is a reasonable default size for most cases
 	result := make(map[epochClosedPeriod]usagebased.DetailedLines, len(fullRatingInput))
 	for _, epoch := range fullRatingInput {
-		opts := []billingrating.GenerateDetailedLinesOption{
-			billingrating.WithCreditsMutatorDisabled(),
-		}
+		var opts []billingrating.GenerateDetailedLinesOption
 		// Minimum commitment is charged only on the final service-period snapshot.
 		if epoch.To < in.Intent.ServicePeriod.To.Unix() {
 			opts = append(opts, billingrating.WithMinimumCommitmentIgnored())

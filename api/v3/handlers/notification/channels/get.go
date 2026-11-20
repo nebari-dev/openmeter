@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
@@ -14,7 +14,7 @@ import (
 
 type (
 	GetNotificationChannelRequest  = notification.GetChannelInput
-	GetNotificationChannelResponse = api.NotificationChannel
+	GetNotificationChannelResponse = apiv3models.BillingNotificationChannel
 	GetNotificationChannelParams   = string
 	GetNotificationChannelHandler  = httptransport.HandlerWithArgs[GetNotificationChannelRequest, GetNotificationChannelResponse, GetNotificationChannelParams]
 )
@@ -48,7 +48,7 @@ func (h *handler) GetNotificationChannel() GetNotificationChannelHandler {
 		commonhttp.JSONResponseEncoderWithStatus[GetNotificationChannelResponse](http.StatusOK),
 		httptransport.AppendOptions(
 			h.options,
-			httptransport.WithOperationName("get-notification-channel"),
+			httptransport.WithOperationName("get-billing-notification-channel"),
 			httptransport.WithErrorEncoder(apierrors.GenericErrorEncoder()),
 			httptransport.WithErrorEncoder(errorEncoder()),
 		)...,

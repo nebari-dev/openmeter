@@ -32,6 +32,7 @@ func (s *service) AdvanceCharge(ctx context.Context, input usagebased.AdvanceCha
 		if err != nil {
 			return nil, fmt.Errorf("charge state trigger failed with: %w", err)
 		}
+
 		if !canAdvance {
 			return nil, nil
 		}
@@ -40,6 +41,7 @@ func (s *service) AdvanceCharge(ctx context.Context, input usagebased.AdvanceCha
 		if err != nil {
 			return nil, fmt.Errorf("error advance the invoice patches: %w", err)
 		}
+
 		canAdvance, err = stateMachine.CanFire(ctx, meta.TriggerNext)
 		if err != nil {
 			return nil, fmt.Errorf("check next transition: %w", err)
@@ -116,6 +118,7 @@ func (s *service) TriggerPatch(ctx context.Context, chargeID meta.ChargeID, patc
 		if err != nil {
 			return nil, err
 		}
+
 		canAdvance, err := stateMachine.CanFire(ctx, meta.TriggerNext)
 		if err != nil {
 			return nil, fmt.Errorf("check next transition: %w", err)
@@ -151,6 +154,7 @@ func applyBaseIntentPatchForOverriddenCharge(charge usagebased.Charge, patch met
 		if err := charge.Intent.Mutate(meta.ChangeTargetBase, func(fields *usagebased.IntentMutableFields) error {
 			deletedAt := clock.Now()
 			fields.IntentDeletedAt = &deletedAt
+
 			return nil
 		}); err != nil {
 			return nil, fmt.Errorf("mutating base intent for %s patch: %w", patch.Op(), err)
@@ -300,15 +304,15 @@ func (s *service) getStateMachineConfigForCharge(ctx context.Context, charge usa
 // getStateMachineConfigForChargeWithHints resolves omitted state-machine dependencies
 // while treating supplied advancement hints as authoritative snapshots.
 func (s *service) getStateMachineConfigForChargeWithHints(ctx context.Context, charge usagebased.Charge, hints usagebased.AdvanceChargeInput) (StateMachineConfig, error) {
-	customerOverride, hasCustomerOverrideHint := hints.CustomerOverride.Get()
+	customerOverride, hasCustomerOverrideHint := hints.CustomerBillingProfile.Get()
 	if !hasCustomerOverrideHint {
 		var err error
-		customerOverride, err = s.customerOverrideService.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+		customerOverride, err = s.customerOverrideService.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 			Customer: customer.CustomerID{
 				Namespace: charge.Namespace,
 				ID:        charge.Intent.GetCustomerID(),
 			},
-			Expand: billing.CustomerOverrideExpand{
+			Expand: billing.CustomerBillingProfileExpand{
 				Customer: true,
 			},
 		})
@@ -325,14 +329,14 @@ func (s *service) getStateMachineConfigForChargeWithHints(ctx context.Context, c
 	currency := charge.Intent.GetCurrency()
 
 	return StateMachineConfig{
-		Charge:             charge,
-		Adapter:            s.adapter,
-		Rater:              s.rater,
-		Runs:               s.runs,
-		CustomerOverride:   customerOverride,
-		FeatureMeters:      featureMeters,
-		CurrencyCalculator: currency,
-		CostBasisResolver:  s.costbasisResolver,
+		Charge:                 charge,
+		Adapter:                s.adapter,
+		Rater:                  s.rater,
+		Runs:                   s.runs,
+		CustomerBillingProfile: customerOverride,
+		FeatureMeters:          featureMeters,
+		CurrencyCalculator:     currency,
+		CostBasisResolver:      s.costbasisResolver,
 	}, nil
 }
 

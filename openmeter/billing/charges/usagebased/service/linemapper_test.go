@@ -27,6 +27,64 @@ import (
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
 
+func TestMapUsageBasedDetailedLinesPreservesDiscountSnapshots(t *testing.T) {
+	t.Parallel()
+	for _, sign := range []int64{1, -1} {
+		t.Run(alpacadecimal.NewFromInt(sign).String(), func(t *testing.T) {
+			// given: a realization snapshot, including a possible discount reversal
+			period := timeutil.ClosedPeriod{
+				From: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+				To:   time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			}
+			line := newUsageBasedStandardLineForTest(period)
+			snapshot := newUsageBasedDetailedLineForTest("usage", period, alpacadecimal.NewFromInt(1))
+			snapshot.Quantity = alpacadecimal.NewFromInt(100 * sign)
+			snapshot.Totals = totals.Totals{
+				Amount:         alpacadecimal.NewFromInt(100 * sign),
+				DiscountsTotal: alpacadecimal.NewFromInt(50 * sign),
+				Total:          alpacadecimal.NewFromInt(50 * sign),
+			}
+			snapshot.AmountDiscounts = chargedetailedline.AmountDiscounts{{
+				ChildUniqueReferenceID: "discount-reference",
+				Description:            lo.ToPtr("percentage discount"),
+				Reason: billing.NewDiscountReasonFrom(billing.PercentageDiscount{
+					PercentageDiscount: productcatalog.PercentageDiscount{Percentage: models.NewPercentage(50)},
+					CorrelationID:      "percentage-discount",
+				}),
+				Amount:         alpacadecimal.NewFromFloat(49.99 * float64(sign)),
+				RoundingAmount: alpacadecimal.NewFromFloat(0.01 * float64(sign)),
+			}}
+			currency, err := line.Currency.AsFiatCurrency()
+			require.NoError(t, err)
+
+			// when: the charge facts are mapped into billing-managed resources
+			mapped, err := mapUsageBasedDetailedLines(line, usagebased.RealizationRun{
+				DetailedLines: mo.Some(usagebased.DetailedLines{snapshot}),
+			}, currency)
+			require.NoError(t, err)
+
+			// then: facts survive mapping, but invoice validation rejects negative discounts
+			require.Len(t, mapped, 1)
+			detail := mapped[0]
+			require.NoError(t, detail.Validate())
+
+			require.Equal(t, snapshot.Totals, detail.Totals)
+			require.Equal(t, line.InvoiceID, detail.InvoiceID)
+			require.Equal(t, snapshot.ChildUniqueReferenceID, detail.ChildUniqueReferenceID)
+			require.Len(t, detail.AmountDiscounts, 1)
+			discount := detail.AmountDiscounts[0]
+			require.Equal(t, models.ManagedModelWithID{}, discount.ManagedModelWithID)
+			require.Equal(t, "discount-reference", lo.FromPtr(discount.ChildUniqueReferenceID))
+			require.Equal(t, snapshot.AmountDiscounts[0].Reason, discount.Reason)
+			require.Equal(t, 49.99*float64(sign), discount.Amount.InexactFloat64())
+			require.Equal(t, 0.01*float64(sign), discount.RoundingAmount.InexactFloat64())
+			require.True(t, detail.AmountDiscounts.SumAmount(currency).Equal(detail.Totals.DiscountsTotal))
+			*discount.Description = "invoice-only description"
+			require.Equal(t, "percentage discount", *snapshot.AmountDiscounts[0].Description)
+		})
+	}
+}
+
 func TestPopulateUsageBasedStandardLineFromRunProjectsDetailsAndCredits(t *testing.T) {
 	period := timeutil.ClosedPeriod{
 		From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -59,7 +117,7 @@ func TestPopulateUsageBasedStandardLineFromRunProjectsDetailsAndCredits(t *testi
 			StoredAtLT:      period.To,
 			ServicePeriodTo: period.To,
 			MeteredQuantity: alpacadecimal.NewFromInt(20),
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount:       alpacadecimal.NewFromInt(20),
 				CreditsTotal: alpacadecimal.NewFromInt(7),
 				Total:        alpacadecimal.NewFromInt(13),
@@ -97,7 +155,7 @@ func TestPopulateUsageBasedStandardLineFromRunProjectsDetailsAndCredits(t *testi
 			StoredAtLT:      period.From,
 			ServicePeriodTo: period.From.Add(24 * time.Hour),
 			MeteredQuantity: alpacadecimal.NewFromInt(5),
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount: alpacadecimal.NewFromInt(5),
 				Total:  alpacadecimal.NewFromInt(5),
 			},
@@ -155,7 +213,7 @@ func TestPopulateUsageBasedStandardLineFromRunAppliesUsageDiscount(t *testing.T)
 			StoredAtLT:      period.To,
 			ServicePeriodTo: period.To,
 			MeteredQuantity: alpacadecimal.NewFromInt(20),
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount: alpacadecimal.NewFromInt(10),
 				Total:  alpacadecimal.NewFromInt(10),
 			},
@@ -260,7 +318,7 @@ func TestPopulateUsageBasedStandardLineFromRunRequiresExpandedDetails(t *testing
 			StoredAtLT:      period.To,
 			ServicePeriodTo: period.To,
 			MeteredQuantity: alpacadecimal.NewFromInt(20),
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount: alpacadecimal.NewFromInt(20),
 				Total:  alpacadecimal.NewFromInt(20),
 			},
@@ -369,7 +427,7 @@ func TestPopulateUsageBasedStandardLineFromCustomCurrencyRunCreatesFiatOverage(t
 			},
 			Type:       usagebased.RealizationRunTypeFinalRealization,
 			StoredAtLT: period.To,
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Total: alpacadecimal.NewFromInt(3),
 			},
 		},
@@ -412,7 +470,7 @@ func TestPopulateUsageBasedStandardLineFromCustomCurrencyRunCreatesFiatOverage(t
 	preparedRun := run
 	preparedRun.InvoiceUsage = &invoicedusage.AccruedUsage{
 		ServicePeriod: period,
-		Totals: totals.Totals{
+		Totals: totals.DeltaTotals{
 			Amount: alpacadecimal.NewFromInt(5),
 			Total:  alpacadecimal.NewFromInt(5),
 		},
@@ -437,7 +495,7 @@ func TestPopulateUsageBasedStandardLineFromCustomCurrencyRunCreatesFiatOverage(t
 				// given: a zero converted overage whose transaction flag does not request payment skipping
 				zeroOverageRun := run
 				zeroOverageRun.NoFiatTransactionRequired = false
-				zeroOverageRun.Totals = totals.Totals{
+				zeroOverageRun.Totals = totals.DeltaTotals{
 					Amount:       alpacadecimal.NewFromInt(3),
 					CreditsTotal: alpacadecimal.NewFromInt(3),
 				}

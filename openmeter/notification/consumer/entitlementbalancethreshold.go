@@ -14,15 +14,16 @@ import (
 	"github.com/samber/lo"
 	"github.com/zeebo/xxh3"
 
-	"github.com/openmeterio/openmeter/api"
-	customerhttphandler "github.com/openmeterio/openmeter/openmeter/customer/httpdriver"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
+	customerconvert "github.com/openmeterio/openmeter/openmeter/customer/apiconvert"
 	"github.com/openmeterio/openmeter/openmeter/entitlement"
-	entitlementdriver "github.com/openmeterio/openmeter/openmeter/entitlement/driver"
+	entitlementconvert "github.com/openmeterio/openmeter/openmeter/entitlement/apiconvert"
 	"github.com/openmeterio/openmeter/openmeter/entitlement/snapshot"
 	"github.com/openmeterio/openmeter/openmeter/notification"
-	productcatalogdriver "github.com/openmeterio/openmeter/openmeter/productcatalog/driver"
-	subjecthttphandler "github.com/openmeterio/openmeter/openmeter/subject/httphandler"
+	featureconvert "github.com/openmeterio/openmeter/openmeter/productcatalog/feature/apiconvert"
+	subjectconvert "github.com/openmeterio/openmeter/openmeter/subject/apiconvert"
 	"github.com/openmeterio/openmeter/pkg/clock"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/sortx"
@@ -38,8 +39,9 @@ var ErrNoBalanceAvailable = errors.New("no balance available")
 func (b *EntitlementSnapshotHandler) handleAsSnapshotEvent(ctx context.Context, event snapshot.SnapshotEvent) error {
 	// TODO[issue-1364]: this must be cached to prevent going to the DB for each balance.snapshot event
 	affectedRulesPaged, err := b.Notification.ListRules(ctx, notification.ListRulesInput{
-		Namespaces: []string{event.Namespace.ID},
-		Types:      []notification.EventType{notification.EventTypeBalanceThreshold},
+		Namespace: event.Namespace.ID,
+		Type:      &filter.FilterString{Eq: lo.ToPtr(string(notification.EventTypeBalanceThreshold))},
+		Disabled:  &filter.FilterBoolean{Eq: lo.ToPtr(false)},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list notification rules: %w", err)
@@ -74,7 +76,6 @@ func (b *EntitlementSnapshotHandler) handleAsSnapshotEvent(ctx context.Context, 
 
 func (b *EntitlementSnapshotHandler) handleRule(ctx context.Context, balSnapshot snapshot.SnapshotEvent, rule notification.Rule) error {
 	// Check 1: do we have a threshold we should create an event for?
-
 	thresholds, err := getActiveThresholdsWithHighestPriority(rule.Config.BalanceThreshold.Thresholds, *balSnapshot.Value)
 	if err != nil {
 		return fmt.Errorf("failed to calculate active thresholds: %w", err)
@@ -101,8 +102,10 @@ func (b *EntitlementSnapshotHandler) handleRule(ctx context.Context, balSnapshot
 			},
 			Namespaces: []string{balSnapshot.Namespace.ID},
 
-			From: balSnapshot.Entitlement.CurrentUsagePeriod.From,
-			To:   balSnapshot.Entitlement.CurrentUsagePeriod.To,
+			CreatedAt: filter.NewFilterTime(
+				&balSnapshot.Entitlement.CurrentUsagePeriod.From,
+				&balSnapshot.Entitlement.CurrentUsagePeriod.To,
+			),
 
 			DeduplicationHashes: []string{dedupHash.V1(), dedupHash.V2()},
 			OrderBy:             notification.OrderByCreatedAt,
@@ -179,7 +182,7 @@ type createBalanceThresholdEventInput struct {
 }
 
 func (b *EntitlementSnapshotHandler) createEvent(ctx context.Context, in createBalanceThresholdEventInput) error {
-	entitlementAPIEntity, err := entitlementdriver.Parser.ToMetered(&entitlement.EntitlementWithCustomer{Entitlement: in.Snapshot.Entitlement, Customer: in.Snapshot.Customer})
+	entitlementAPIEntity, err := entitlementconvert.ToAPIEntitlementMetered(&entitlement.EntitlementWithCustomer{Entitlement: in.Snapshot.Entitlement, Customer: in.Snapshot.Customer})
 	if err != nil {
 		return fmt.Errorf("failed to map entitlement value to API: %w", err)
 	}
@@ -203,7 +206,7 @@ func (b *EntitlementSnapshotHandler) createEvent(ctx context.Context, in createB
 		annotations[notification.AnnotationEventFeatureID] = in.Snapshot.Feature.ID
 	}
 
-	featureResp, err := productcatalogdriver.MapFeatureToResponse(in.Snapshot.Feature)
+	featureResp, err := featureconvert.ToAPIFeature(in.Snapshot.Feature)
 	if err != nil {
 		return fmt.Errorf("failed to map feature to API: %w", err)
 	}
@@ -211,18 +214,13 @@ func (b *EntitlementSnapshotHandler) createEvent(ctx context.Context, in createB
 	valueBase := notification.EntitlementValuePayloadBase{
 		Entitlement: *entitlementAPIEntity,
 		Feature:     featureResp,
-		Subject:     subjecthttphandler.FromSubject(in.Snapshot.Subject),
-		Value:       api.EntitlementValue(*in.Snapshot.Value),
+		Subject:     subjectconvert.ToAPISubject(in.Snapshot.Subject),
+		Value:       apiv1models.EntitlementValue(*in.Snapshot.Value),
 	}
 
 	// TODO(OM-1508): As we're reusing the same event version, we need to add this temporary check
 	if in.Snapshot.Customer.ID != "" {
-		apiCustomer, err := customerhttphandler.CustomerToAPI(in.Snapshot.Customer, nil, nil)
-		if err != nil {
-			return fmt.Errorf("failed to map customer to API: %w", err)
-		}
-
-		valueBase.Customer = apiCustomer
+		valueBase.Customer = customerconvert.ToAPICustomer(in.Snapshot.Customer)
 	}
 
 	_, err = b.Notification.CreateEvent(ctx, notification.CreateEventInput{
@@ -279,11 +277,11 @@ const (
 
 func thresholdKindFromThreshold(t notification.BalanceThreshold) (ThresholdKind, error) {
 	switch t.Type {
-	case api.NotificationRuleBalanceThresholdValueTypeBalanceValue:
+	case apiv1models.NotificationRuleBalanceThresholdValueTypeBalanceValue:
 		return ThresholdKindBalanceThreshold, nil
-	case api.NotificationRuleBalanceThresholdValueTypePercent, api.NotificationRuleBalanceThresholdValueTypeNumber:
+	case apiv1models.NotificationRuleBalanceThresholdValueTypePercent, apiv1models.NotificationRuleBalanceThresholdValueTypeNumber:
 		fallthrough
-	case api.NotificationRuleBalanceThresholdValueTypeUsagePercentage, api.NotificationRuleBalanceThresholdValueTypeUsageValue:
+	case apiv1models.NotificationRuleBalanceThresholdValueTypeUsagePercentage, apiv1models.NotificationRuleBalanceThresholdValueTypeUsageValue:
 		return ThresholdKindUsageThreshold, nil
 	default:
 		return "", fmt.Errorf("unknown threshold type: %s", t.Type)
@@ -392,7 +390,7 @@ type numericThreshold struct {
 
 const absoluteZero = 1e-9
 
-func getNumericThreshold(threshold notification.BalanceThreshold, value api.EntitlementValue) (*numericThreshold, error) {
+func getNumericThreshold(threshold notification.BalanceThreshold, value apiv1models.EntitlementValue) (*numericThreshold, error) {
 	var (
 		balance     = lo.FromPtr(value.Balance)
 		usage       = lo.FromPtr(value.Usage)
@@ -411,15 +409,15 @@ func getNumericThreshold(threshold notification.BalanceThreshold, value api.Enti
 	}
 
 	switch threshold.Type {
-	// Deprecated: obsoleted by api.NotificationRuleBalanceThresholdValueTypeUsageValue
-	case api.NotificationRuleBalanceThresholdValueTypeUsageValue, api.NotificationRuleBalanceThresholdValueTypeNumber:
+	// Deprecated: obsoleted by apiv1models.NotificationRuleBalanceThresholdValueTypeUsageValue
+	case apiv1models.NotificationRuleBalanceThresholdValueTypeUsageValue, apiv1models.NotificationRuleBalanceThresholdValueTypeNumber:
 		return &numericThreshold{
 			BalanceThreshold: threshold,
 			ThresholdValue:   threshold.Value,
 			Active:           threshold.Value < usage,
 		}, nil
-	// Deprecated: obsoleted by api.NotificationRuleBalanceThresholdValueTypeUsagePercentage
-	case api.NotificationRuleBalanceThresholdValueTypeUsagePercentage, api.NotificationRuleBalanceThresholdValueTypePercent:
+	// Deprecated: obsoleted by apiv1models.NotificationRuleBalanceThresholdValueTypeUsagePercentage
+	case apiv1models.NotificationRuleBalanceThresholdValueTypeUsagePercentage, apiv1models.NotificationRuleBalanceThresholdValueTypePercent:
 		thresholdValue := totalGrants * (threshold.Value / 100)
 
 		return &numericThreshold{
@@ -427,7 +425,7 @@ func getNumericThreshold(threshold notification.BalanceThreshold, value api.Enti
 			ThresholdValue:   thresholdValue,
 			Active:           thresholdValue < usage,
 		}, nil
-	case api.NotificationRuleBalanceThresholdValueTypeBalanceValue:
+	case apiv1models.NotificationRuleBalanceThresholdValueTypeBalanceValue:
 		active := threshold.Value > balance
 
 		if threshold.Value == 0 {
@@ -468,7 +466,7 @@ func getActiveThresholdsWithHighestPriority(thresholds []notification.BalanceThr
 	)
 
 	for _, threshold := range thresholds {
-		numThreshold, err := getNumericThreshold(threshold, api.EntitlementValue(value))
+		numThreshold, err := getNumericThreshold(threshold, apiv1models.EntitlementValue(value))
 		if err != nil {
 			if errors.Is(err, ErrNoBalanceAvailable) {
 				continue
@@ -483,25 +481,27 @@ func getActiveThresholdsWithHighestPriority(thresholds []notification.BalanceThr
 		}
 
 		switch numThreshold.BalanceThreshold.Type {
-		case api.NotificationRuleBalanceThresholdValueTypeBalanceValue:
+		case apiv1models.NotificationRuleBalanceThresholdValueTypeBalanceValue:
 			if balance == nil {
 				balance = numThreshold
 			} else if balance.ThresholdValue > numThreshold.ThresholdValue {
 				balance = numThreshold
 			}
-		// Deprecated: obsoleted by api.NotificationRuleBalanceThresholdValueTypeUsagePercentage
-		case api.NotificationRuleBalanceThresholdValueTypePercent:
+
+		// Deprecated: obsoleted by apiv1models.NotificationRuleBalanceThresholdValueTypeUsagePercentage
+		case apiv1models.NotificationRuleBalanceThresholdValueTypePercent:
 			fallthrough
-		case api.NotificationRuleBalanceThresholdValueTypeUsagePercentage:
+		case apiv1models.NotificationRuleBalanceThresholdValueTypeUsagePercentage:
 			if usage == nil {
 				usage = numThreshold
 			} else if usage.ThresholdValue <= numThreshold.ThresholdValue {
 				usage = numThreshold
 			}
-		// Deprecated: obsoleted by api.NotificationRuleBalanceThresholdValueTypeUsageValue
-		case api.NotificationRuleBalanceThresholdValueTypeNumber:
+
+		// Deprecated: obsoleted by apiv1models.NotificationRuleBalanceThresholdValueTypeUsageValue
+		case apiv1models.NotificationRuleBalanceThresholdValueTypeNumber:
 			fallthrough
-		case api.NotificationRuleBalanceThresholdValueTypeUsageValue:
+		case apiv1models.NotificationRuleBalanceThresholdValueTypeUsageValue:
 			if usage == nil {
 				usage = numThreshold
 			} else if usage.ThresholdValue < numThreshold.ThresholdValue {

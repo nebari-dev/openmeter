@@ -8,7 +8,7 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	"github.com/openmeterio/openmeter/openmeter/subject"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
@@ -113,7 +113,7 @@ func (h *handler) QueryMeterPostCSV() QueryMeterPostCSVHandler {
 				return QueryMeterPostCSVRequest{}, err
 			}
 
-			var request api.QueryMeterPostJSONRequestBody
+			var request apiv1models.QueryMeterPostJSONRequestBody
 			if err := commonhttp.JSONRequestBodyDecoder(r, &request); err != nil {
 				return QueryMeterPostCSVRequest{}, fmt.Errorf("failed to decode request body: %w", err)
 			}
@@ -223,6 +223,7 @@ func (a *queryMeterCSVResult) Records() [][]string {
 			hasSubjectHeader = true
 			continue
 		}
+
 		groupByKeys = append(groupByKeys, k)
 	}
 
@@ -245,6 +246,7 @@ func (a *queryMeterCSVResult) Records() [][]string {
 	if len(groupByKeys) > 0 {
 		headers = append(headers, groupByKeys...)
 	}
+
 	headers = append(headers, "value")
 
 	records = append(records, headers)
@@ -274,8 +276,10 @@ func (a *queryMeterCSVResult) Records() [][]string {
 			if row.GroupBy[k] != nil {
 				groupByValue = *row.GroupBy[k]
 			}
+
 			data = append(data, groupByValue)
 		}
+
 		data = append(data, fmt.Sprintf("%f", row.Value))
 		records = append(records, data)
 	}

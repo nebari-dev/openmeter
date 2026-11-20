@@ -43,7 +43,7 @@ func (s *AdvanceChargesTestSuite) TearDownTest() {
 func (s *AdvanceChargesTestSuite) TestAdvanceChargesReturnsEmptyForAlreadyActiveCreditCharges() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-advance-usage-only")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "test-subject")
 	s.NotEmpty(cust.ID)
@@ -131,7 +131,7 @@ func (s *AdvanceChargesTestSuite) TestAdvanceChargesReturnsEmptyForAlreadyActive
 func (s *AdvanceChargesTestSuite) TestAdvanceChargesActivatesCreditThenInvoiceFlatFeeAtServicePeriodStart() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-advance-empty")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "test-subject")
 	s.NotEmpty(cust.ID)
@@ -182,7 +182,7 @@ func (s *AdvanceChargesTestSuite) TestAdvanceChargesActivatesCreditThenInvoiceFl
 func (s *AdvanceChargesTestSuite) TestAdvanceChargesActivatesCreditThenInvoiceUsageBasedChargesAtServicePeriodStart() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-advance-credit-then-invoice")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "test-subject")
 	s.NotEmpty(cust.ID)
@@ -197,7 +197,7 @@ func (s *AdvanceChargesTestSuite) TestAdvanceChargesActivatesCreditThenInvoiceUs
 		To:   datetime.MustParseTimeInLocation(s.T(), "2026-06-01T00:00:00Z", time.UTC).AsTime(),
 	}
 
-	clock.SetTime(servicePeriod.From)
+	clock.SetTime(servicePeriod.From.Add(-24 * time.Hour))
 
 	createdCharges, err := s.Charges.Create(ctx, charges.CreateInput{
 		Namespace: ns,
@@ -222,6 +222,14 @@ func (s *AdvanceChargesTestSuite) TestAdvanceChargesActivatesCreditThenInvoiceUs
 
 	usageBasedChargeID, err := createdCharges[0].GetChargeID()
 	s.NoError(err)
+
+	createdCharge, err := createdCharges[0].AsUsageBasedCharge()
+	s.NoError(err)
+	s.Equal(meta.ChargeStatusCreated, meta.ChargeStatus(createdCharge.Status))
+	s.Require().NotNil(createdCharge.State.AdvanceAfter)
+	s.True(servicePeriod.From.Equal(*createdCharge.State.AdvanceAfter))
+
+	clock.SetTime(servicePeriod.From)
 
 	advancedCharges, err := s.Charges.AdvanceCharges(ctx, charges.AdvanceChargesInput{
 		Customer: cust.GetID(),
@@ -257,7 +265,7 @@ var usageBasedIntentServicePeriod = timeutil.ClosedPeriod{
 func (s *AdvanceChargesTestSuite) TestAdvanceChargesCustomCurrencyCreditThenInvoiceRecognitionDoesNotFail() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-advance-custom-cti")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -293,7 +301,7 @@ func (s *AdvanceChargesTestSuite) TestAdvanceChargesCustomCurrencyCreditThenInvo
 func (s *AdvanceChargesTestSuite) TestAdvanceChargesCustomCurrencyCreditOnlyRecognitionDoesNotFail() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-advance-custom-credit-only")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)

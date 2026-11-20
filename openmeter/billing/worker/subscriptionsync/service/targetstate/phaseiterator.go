@@ -81,7 +81,12 @@ func (r SubscriptionItemWithPeriods) GetInvoiceAt() time.Time {
 	// Flat-fee in advance is the only case we bill in advance
 	if r.Spec.RateCard.AsMeta().Price.Type() == productcatalog.FlatPriceType {
 		flatFee, _ := r.Spec.RateCard.AsMeta().Price.AsFlat()
-		if flatFee.PaymentTerm == productcatalog.InAdvancePaymentTerm {
+		paymentTerm := flatFee.PaymentTerm
+		if paymentTerm == "" {
+			paymentTerm = productcatalog.DefaultPaymentTerm
+		}
+
+		if paymentTerm == productcatalog.InAdvancePaymentTerm {
 			// In advance invoicing
 			// For in advance invoicing we attempt to incoice at the start of the billing period
 			return r.BillingPeriod.From
@@ -92,6 +97,46 @@ func (r SubscriptionItemWithPeriods) GetInvoiceAt() time.Time {
 	// - not before its billing period is over
 	// - not before its service period is over
 	return lo.Latest(r.ServicePeriod.To, r.BillingPeriod.To)
+}
+
+// startBillingAt applies the subscription's billing start to the item. The service before
+// billingStartsAt was billed elsewhere, so the item is billed only from there on. It reports false
+// when nothing is left to bill.
+//
+// firstBillingPeriod is the billing period that billing starts in. It is unset when the
+// subscription ends before billing starts: no item is billed then.
+//
+// The period index and unique ID are kept: later syncs must find the same item under the same ID.
+func (r SubscriptionItemWithPeriods) startBillingAt(billingStartsAt time.Time, firstBillingPeriod timeutil.ClosedPeriod) (SubscriptionItemWithPeriods, bool) {
+	// Item periods are at meter resolution, see truncateItemsIfNeeded.
+	billingStartsAt = billingStartsAt.Truncate(streaming.MinimumWindowSizeDuration)
+
+	switch {
+	case !r.ServicePeriod.From.Before(billingStartsAt):
+		// The whole service is billed here.
+	case !r.ServicePeriod.To.After(billingStartsAt):
+		return r, false
+	case r.Spec.RateCard.GetBillingCadence() == nil:
+		// A one-time fee is charged for the moment the item starts, not for service over time,
+		// so there is no later part of it to bill.
+		return r, false
+	default:
+		// Bill the rest of the period. FullServicePeriod stays, so the price can be prorated.
+		r.ServicePeriod.From = billingStartsAt
+	}
+
+	// The item's billing period ended before billing starts, so bill it in the first billed one.
+	if !r.BillingPeriod.To.After(billingStartsAt) {
+		r.BillingPeriod = firstBillingPeriod.Truncate(streaming.MinimumWindowSizeDuration)
+	}
+
+	// Billing cannot begin before the billing start. This also makes fees billed in advance
+	// invoice at the billing start instead of at the start of a period that began earlier.
+	if r.BillingPeriod.From.Before(billingStartsAt) {
+		r.BillingPeriod.From = billingStartsAt
+	}
+
+	return r, true
 }
 
 func NewPhaseIterator(logger *slog.Logger, tracer trace.Tracer, subs subscription.SubscriptionView, phaseKey string) (*PhaseIterator, error) {
@@ -184,17 +229,14 @@ func (it *PhaseIterator) GetMinimumBillableTime() time.Time {
 }
 
 // Generate generates the lines for the phase so that all active subscription item's are generated up to the point
-// where either the item gets deactivated or the last item's invoice_at >= iterationEnd and it's period's end is equal to
-// or after iterationEnd.
+// where either the item gets deactivated, its service period starts at or after iterationEnd, or its invoice_at is
+// after iterationEnd.
 //
 // This ensures that we always have the upcoming lines stored on the gathering invoice.
 func (it *PhaseIterator) Generate(ctx context.Context, iterationEnd time.Time) ([]SubscriptionItemWithPeriods, error) {
 	span := tracex.Start[[]SubscriptionItemWithPeriods](ctx, it.tracer, "billing.worker.subscription.phaseiterator.Generate", trace.WithAttributes(
 		attribute.String("phase_key", it.phase.Spec.PhaseKey),
 	))
-
-	// Given we are truncating to 1s resolution, we need to make sure that iterationEnd contains the last second as a whole.
-	iterationEnd = iterationEnd.Truncate(streaming.MinimumWindowSizeDuration).Add(streaming.MinimumWindowSizeDuration - time.Nanosecond)
 
 	return span.Wrap(func(ctx context.Context) ([]SubscriptionItemWithPeriods, error) {
 		return it.generateAligned(ctx, iterationEnd)
@@ -263,6 +305,9 @@ func (it *PhaseIterator) generateForAlignedItemVersion(ctx context.Context, item
 			return false, nil
 		}
 
+		// Given we are truncating to 1s resolution, we need to make sure that the invoiceAt limit contains the last second as a whole.
+		invoiceAtLimit := iterationEnd.Truncate(streaming.MinimumWindowSizeDuration).Add(streaming.MinimumWindowSizeDuration - time.Nanosecond)
+
 		periodIdx := 0
 		at := item.SubscriptionItem.ActiveFrom
 
@@ -288,8 +333,15 @@ func (it *PhaseIterator) generateForAlignedItemVersion(ctx context.Context, item
 			periodIdx = periodIdx + 1
 			at = newItem.ServicePeriod.To
 
+			// Leave service starting at or after the iteration end to the next sync,
+			// even if its advance fee is already invoiceable at that boundary.
+			if !newItem.ServicePeriod.From.Before(iterationEnd) {
+				logger.DebugContext(ctx, "exiting loop due to service starting at iteration end", slog.Time("at", at), slog.Time("iterationEnd", iterationEnd), slog.Time("serviceFrom", newItem.ServicePeriod.From))
+				break
+			}
+
 			// Check if we have reached the iteration end based on invoiceAt
-			if newItem.GetInvoiceAt().After(iterationEnd) {
+			if newItem.GetInvoiceAt().After(invoiceAtLimit) {
 				logger.DebugContext(ctx, "exiting loop due to iteration end", slog.Time("at", at), slog.Time("iterationEnd", iterationEnd), slog.Time("invoiceAt", newItem.GetInvoiceAt()))
 				break
 			}
@@ -374,6 +426,12 @@ func (it *PhaseIterator) generateForAlignedItemVersionPeriod(ctx context.Context
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to get service period", slog.Any("error", err))
 			return empty, err
+		}
+
+		// Customer deletion can shorten the phase without changing the stored item dates.
+		// Cap the service end, but keep the full period for proration.
+		if phaseEnd := it.phaseCadence.ActiveTo; phaseEnd != nil && servicePeriod.To.After(*phaseEnd) {
+			servicePeriod.To = *phaseEnd
 		}
 
 		// Let's build the line

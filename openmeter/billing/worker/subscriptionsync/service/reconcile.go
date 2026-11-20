@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
@@ -23,11 +24,21 @@ type buildSyncPlanInput struct {
 }
 
 // buildSyncPlan builds a sync plan for a subscription. If the subscription is deleted, SubscriptionView should be nil.
+// Note: SubscriptionView should also be nil when the customer was deleted at or before
+// the subscription start, so reconciliation removes the subscription's billing artifacts.
 func (s *Service) buildSyncPlan(ctx context.Context, input buildSyncPlanInput) (*reconciler.Plan, error) {
 	span := tracex.Start[*reconciler.Plan](ctx, s.tracer, "billing.worker.subscription.sync.buildSyncPlan")
 
 	return span.Wrap(func(ctx context.Context) (*reconciler.Plan, error) {
-		persistedLoader := persistedstate.NewLoader(s.billingService, s.chargesService)
+		persistedLoader, err := persistedstate.NewLoader(persistedstate.Config{
+			BillingService:        s.billingService,
+			SplitLineGroupService: s.splitLineGroupService,
+			ChargesService:        s.chargesService,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("creating persisted state loader: %w", err)
+		}
+
 		persisted, err := persistedLoader.LoadForSubscription(ctx, input.Subscription)
 		if err != nil {
 			return nil, err

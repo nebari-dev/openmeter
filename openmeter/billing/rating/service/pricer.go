@@ -26,17 +26,11 @@ func getPricerFor(line rating.PriceAccessor, opts rating.GenerateDetailedLinesOp
 	}
 
 	if linePrice.Type() == productcatalog.FlatPriceType {
-		postCalculationMutators := []mutator.PostCalculationMutator{
-			&mutator.DiscountPercentage{},
-		}
-
-		if !opts.DisableCreditsMutator {
-			postCalculationMutators = append(postCalculationMutators, &mutator.Credits{})
-		}
-
 		return &priceMutator{
-			Pricer:          rate.Flat{},
-			PostCalculation: postCalculationMutators,
+			Pricer: rate.Flat{},
+			PostCalculation: []mutator.PostCalculationMutator{
+				&mutator.DiscountPercentage{},
+			},
 		}, nil
 	}
 
@@ -66,10 +60,6 @@ func getPricerFor(line rating.PriceAccessor, opts rating.GenerateDetailedLinesOp
 		postCalculationMutators = append(postCalculationMutators, &mutator.MinAmountCommitment{})
 	}
 
-	if !opts.DisableCreditsMutator {
-		postCalculationMutators = append(postCalculationMutators, &mutator.Credits{})
-	}
-
 	// UnitConfig converts the raw metered quantity into billed units and must run
 	// before DiscountUsage so the usage discount applies to the converted, rounded
 	// quantity (convert → round → discount). When the feature is disabled,
@@ -81,6 +71,7 @@ func getPricerFor(line rating.PriceAccessor, opts rating.GenerateDetailedLinesOp
 	} else {
 		preCalculationMutators = append(preCalculationMutators, &mutator.ForbidUnitConfig{})
 	}
+
 	preCalculationMutators = append(preCalculationMutators, &mutator.DiscountUsage{})
 
 	// This priceMutator captures the calculation flow for discounts and commitments:

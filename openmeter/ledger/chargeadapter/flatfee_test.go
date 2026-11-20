@@ -8,6 +8,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/require"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	chargeflatfee "github.com/openmeterio/openmeter/openmeter/billing/charges/flatfee"
@@ -537,6 +538,7 @@ func TestOnFlatFeePaymentAuthorized(t *testing.T) {
 			require.True(t, bookedAt.UTC().Equal(eventTime.UTC()))
 			require.False(t, bookedAt.UTC().Equal(charge.Intent.GetEffectiveInvoiceAt().UTC()))
 		}
+
 		for _, entry := range env.TransactionGroupEntries(t, ref.TransactionGroupID) {
 			require.Nil(t, entry.SourceChargeID)
 			require.NotNil(t, entry.SpendChargeID)
@@ -672,6 +674,7 @@ func TestOnFlatFeePaymentSettled(t *testing.T) {
 			require.True(t, bookedAt.UTC().Equal(eventTime.UTC()))
 			require.False(t, bookedAt.UTC().Equal(charge.Intent.GetEffectiveInvoiceAt().UTC()))
 		}
+
 		for _, entry := range env.TransactionGroupEntries(t, ref.TransactionGroupID) {
 			require.Nil(t, entry.SourceChargeID)
 			require.NotNil(t, entry.SpendChargeID)
@@ -719,6 +722,7 @@ func newFlatFeeHandlerTestEnv(t *testing.T) *flatFeeHandlerTestEnv {
 	advanceService := advancetestutils.NewService(t, base.Deps, breakageService)
 
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:              metricnoop.NewMeterProvider().Meter("test"),
 		Logger:             omtestutils.NewDiscardLogger(t),
 		Advance:            advanceService,
 		Ledger:             base.Deps.HistoricalLedger,
@@ -778,8 +782,8 @@ func (e *flatFeeHandlerTestEnv) newAllocateCreditsInputForCharge(charge chargefl
 func (e *flatFeeHandlerTestEnv) newAssignmentInputWithMode(amount alpacadecimal.Decimal, mode productcatalog.SettlementMode) chargeflatfee.OnAllocateCreditsInput {
 	now := e.Now()
 	servicePeriod := timeutil.ClosedPeriod{
-		From: now.Add(-time.Hour),
-		To:   now,
+		From: now,
+		To:   now.Add(time.Hour),
 	}
 
 	return chargeflatfee.OnAllocateCreditsInput{
@@ -811,7 +815,7 @@ func (e *flatFeeHandlerTestEnv) newAssignmentInputWithMode(amount alpacadecimal.
 							FullServicePeriod: servicePeriod,
 							BillingPeriod:     servicePeriod,
 						},
-						InvoiceAt:             now,
+						InvoiceAt:             now.Add(-time.Hour),
 						PaymentTerm:           productcatalog.InAdvancePaymentTerm,
 						ProRating:             productcatalog.ProRatingConfig{},
 						AmountBeforeProration: amount,
@@ -930,8 +934,8 @@ func (e *flatFeeHandlerTestEnv) newAccrualInput(total alpacadecimal.Decimal) cha
 func (e *flatFeeHandlerTestEnv) newCreditsOnlyCharge(amount alpacadecimal.Decimal) chargeflatfee.Charge {
 	now := e.Now()
 	servicePeriod := timeutil.ClosedPeriod{
-		From: now.Add(-time.Hour),
-		To:   now,
+		From: now,
+		To:   now.Add(time.Hour),
 	}
 
 	charge := e.newBaseCharge(servicePeriod, amount)
@@ -1039,7 +1043,7 @@ func (e *flatFeeHandlerTestEnv) newChargeWithAccruedUsage(total alpacadecimal.De
 	}
 	charge.Realizations.CurrentRun.AccruedUsage = &invoicedusage.AccruedUsage{
 		ServicePeriod: servicePeriod,
-		Totals: totals.Totals{
+		Totals: totals.DeltaTotals{
 			Amount: total,
 			Total:  total,
 		},
@@ -1081,7 +1085,7 @@ func (e *flatFeeHandlerTestEnv) newChargeWithCreditRealizationsAndAccruedUsage(r
 	}
 	charge.Realizations.CurrentRun.AccruedUsage = &invoicedusage.AccruedUsage{
 		ServicePeriod: servicePeriod,
-		Totals: totals.Totals{
+		Totals: totals.DeltaTotals{
 			Amount: accruedTotal,
 			Total:  accruedTotal,
 		},
@@ -1105,6 +1109,7 @@ func (e *flatFeeHandlerTestEnv) authorizedReceivableSubAccount(t *testing.T) led
 func (e *flatFeeHandlerTestEnv) creditAccruedSubAccount(t *testing.T) ledger.SubAccount {
 	zeroCostBasis := alpacadecimal.Zero
 	taxCodeID := testChargeTaxCodeID
+
 	return e.AccruedSubAccountWithCostBasisAndTaxCode(t, &zeroCostBasis, &taxCodeID)
 }
 
@@ -1135,6 +1140,7 @@ func (e *flatFeeHandlerTestEnv) invoiceAccruedSubAccount(t *testing.T) ledger.Su
 func (e *flatFeeHandlerTestEnv) creditEarningsSubAccount(t *testing.T) ledger.SubAccount {
 	zeroCostBasis := alpacadecimal.Zero
 	taxCodeID := testChargeTaxCodeID
+
 	return e.EarningsSubAccountWithCostBasisAndTaxCode(t, &zeroCostBasis, &taxCodeID)
 }
 

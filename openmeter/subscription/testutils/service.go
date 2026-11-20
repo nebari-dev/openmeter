@@ -19,6 +19,7 @@ import (
 	customerservicehooks "github.com/openmeterio/openmeter/openmeter/customer/service/hooks"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	meteradapter "github.com/openmeterio/openmeter/openmeter/meter/mockadapter"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	addonrepo "github.com/openmeterio/openmeter/openmeter/productcatalog/addon/adapter"
 	addonservice "github.com/openmeterio/openmeter/openmeter/productcatalog/addon/service"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/featureresolver"
@@ -28,6 +29,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon"
 	planaddonrepo "github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon/adapter"
 	planaddonservice "github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon/service"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	"github.com/openmeterio/openmeter/openmeter/registry"
 	registrybuilder "github.com/openmeterio/openmeter/openmeter/registry/builder"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
@@ -42,9 +44,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/subscription/service"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	subscriptionworkflowservice "github.com/openmeterio/openmeter/openmeter/subscription/workflow/service"
-	"github.com/openmeterio/openmeter/openmeter/taxcode"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
-	taxcodeservice "github.com/openmeterio/openmeter/openmeter/taxcode/service"
+	taxcodetestutils "github.com/openmeterio/openmeter/openmeter/taxcode/testutils"
 	"github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/datetime"
@@ -74,7 +74,8 @@ type SubscriptionDependencies struct {
 	SubscriptionAddonService subscriptionaddon.Service
 	AddonService             *testAddonService
 	PlanAddonService         planaddon.Service
-	TaxCodeService           taxcode.Service
+	TaxCodeEnv               *taxcodetestutils.TestEnv
+	TaxCodeResolver          productcatalog.TaxCodeResolver
 }
 
 func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
@@ -159,10 +160,10 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 
 	// customer hooks
 	customerSubjectHook, err := customerservicehooks.NewSubjectCustomerHook(customerservicehooks.SubjectCustomerHookConfig{
-		Customer:         customerService,
-		CustomerOverride: NoopCustomerOverrideService{},
-		Logger:           logger,
-		Tracer:           noop.NewTracerProvider().Tracer("test_env"),
+		Customer:               customerService,
+		CustomerBillingProfile: NoopCustomerOverrideService{},
+		Logger:                 logger,
+		Tracer:                 noop.NewTracerProvider().Tracer("test_env"),
 	})
 	require.NoError(t, err)
 	subjectService.RegisterHooks(customerSubjectHook)
@@ -179,16 +180,9 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 	})
 	require.NoError(t, err)
 
-	taxCodeAdapter, err := taxcodeadapter.New(taxcodeadapter.Config{
-		Client: dbDeps.DBClient,
-		Logger: logger,
-	})
-	require.NoError(t, err)
+	taxCodeEnv := taxcodetestutils.NewTestEnvFromClient(t, dbDeps.DBClient, logger)
 
-	taxCodeService, err := taxcodeservice.New(taxcodeservice.Config{
-		Adapter: taxCodeAdapter,
-		Logger:  logger,
-	})
+	taxCodeResolver, err := taxcoderesolver.New(taxCodeEnv.Service)
 	require.NoError(t, err)
 
 	featureResolver, err := featureresolver.New(entitlementRegistry.Feature)
@@ -209,7 +203,7 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 		Logger:           logger,
 		Adapter:          planRepo,
 		Publisher:        publisher,
-		TaxCode:          taxCodeService,
+		TaxCodeResolver:  taxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -217,6 +211,7 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 
 	ffService := ffx.NewTestContextService(ffx.AccessConfig{
 		subscription.MultiSubscriptionEnabledFF: false,
+		subscription.BillingStartsAtEnabledFF:   false,
 	})
 
 	svc, err := service.New(service.ServiceConfig{
@@ -231,7 +226,6 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 		Publisher:             publisher,
 		Lockr:                 lockr,
 		FeatureFlags:          ffService,
-		TaxCode:               taxCodeService,
 		CostBasisService:      currencyService,
 	})
 	require.NoError(t, err)
@@ -248,7 +242,7 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 		Publisher:        publisher,
 		FeatureResolver:  featureResolver,
 		CurrencyResolver: currencyResolver,
-		TaxCode:          taxCodeService,
+		TaxCodeResolver:  taxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -296,6 +290,7 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 		Logger:             logger.With("subsystem", "subscription.workflow.service"),
 		Lockr:              lockr,
 		FeatureFlags:       ffService,
+		TaxCodeResolver:    taxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -320,6 +315,7 @@ func NewService(t *testing.T, dbDeps *DBDeps) SubscriptionDependencies {
 		PlanAddonService:         planAddonService,
 		MeterService:             meterAdapter,
 		MockStreamingConnector:   mockStreaming,
-		TaxCodeService:           taxCodeService,
+		TaxCodeEnv:               taxCodeEnv,
+		TaxCodeResolver:          taxCodeResolver,
 	}
 }

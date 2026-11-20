@@ -6,13 +6,21 @@ import type { AcceptDateStrings } from '../../lib/wire.js'
 import type {
   CreateNotificationChannelRequestInput,
   ListNotificationChannelsParamsFilter,
+  ListNotificationEventsParamsFilter,
+  ListNotificationRulesParamsFilter,
   NotificationChannel,
   NotificationChannelPagePaginatedResponse,
+  NotificationEvent,
+  NotificationEventPagePaginatedResponse,
+  NotificationRule,
+  NotificationRulePagePaginatedResponse,
+  NotificationRuleRequestInput,
+  ResendBillingNotificationEventRequest as ResendBillingNotificationEventRequestBody,
   SortQueryInput,
-  UpdateNotificationChannelRequestInput,
+  UpdateBillingNotificationChannelRequestInput,
 } from '../types.js'
 
-export interface ListNotificationChannelsQuery {
+export interface ListBillingNotificationChannelsQuery {
   /** Determines which page of the collection to retrieve. */
   page?: { size?: number; number?: number }
   /**
@@ -37,27 +45,128 @@ export interface ListNotificationChannelsQuery {
   filter?: ListNotificationChannelsParamsFilter
 }
 
-export type ListNotificationChannelsRequest =
-  AcceptDateStrings<ListNotificationChannelsQuery>
-export type ListNotificationChannelsResponse =
+export type ListBillingNotificationChannelsRequest =
+  AcceptDateStrings<ListBillingNotificationChannelsQuery>
+export type ListBillingNotificationChannelsResponse =
   NotificationChannelPagePaginatedResponse
 
-export type CreateNotificationChannelRequest =
+export type CreateBillingNotificationChannelRequest =
   AcceptDateStrings<CreateNotificationChannelRequestInput>
-export type CreateNotificationChannelResponse = NotificationChannel
+export type CreateBillingNotificationChannelResponse = NotificationChannel
 
-export type GetNotificationChannelRequest = {
+export type GetBillingNotificationChannelRequest = {
   notificationChannelId: string
 }
-export type GetNotificationChannelResponse = NotificationChannel
+export type GetBillingNotificationChannelResponse = NotificationChannel
 
-export type UpdateNotificationChannelRequest = AcceptDateStrings<{
+export type UpdateBillingNotificationChannelRequest = AcceptDateStrings<{
   notificationChannelId: string
-  body: UpdateNotificationChannelRequestInput
+  body: UpdateBillingNotificationChannelRequestInput
 }>
-export type UpdateNotificationChannelResponse = NotificationChannel
+export type UpdateBillingNotificationChannelResponse = NotificationChannel
 
-export type DeleteNotificationChannelRequest = {
+export type DeleteBillingNotificationChannelRequest = {
   notificationChannelId: string
 }
-export type DeleteNotificationChannelResponse = void
+export type DeleteBillingNotificationChannelResponse = void
+
+export interface ListBillingNotificationRulesQuery {
+  /** Determines which page of the collection to retrieve. */
+  page?: { size?: number; number?: number }
+  /**
+   * Sort notification rules returned in the response. Supported sort attributes are:
+   *
+   * - `id` (default)
+   * - `type`
+   * - `created_at`
+   * - `updated_at`
+   *
+   * The `asc` suffix is optional as the default sort order is ascending. The `desc`
+   * suffix is used to specify a descending order.
+   */
+  sort?: SortQueryInput
+  /**
+   * Filter notification rules returned in the response.
+   *
+   * Examples:
+   *
+   * - `filter[type]=entitlements.balance.threshold`
+   * - `filter[disabled]=false`
+   * - `filter[channel_id]=01ARZ3NDEKTSV4RRFFQ69G5FAV`
+   */
+  filter?: ListNotificationRulesParamsFilter
+}
+
+export type ListBillingNotificationRulesRequest =
+  AcceptDateStrings<ListBillingNotificationRulesQuery>
+export type ListBillingNotificationRulesResponse =
+  NotificationRulePagePaginatedResponse
+
+export type CreateBillingNotificationRuleRequest =
+  AcceptDateStrings<NotificationRuleRequestInput>
+export type CreateBillingNotificationRuleResponse = NotificationRule
+
+export type GetBillingNotificationRuleRequest = {
+  notificationRuleId: string
+}
+export type GetBillingNotificationRuleResponse = NotificationRule
+
+export type UpdateBillingNotificationRuleRequest = AcceptDateStrings<{
+  notificationRuleId: string
+  body: NotificationRuleRequestInput
+}>
+export type UpdateBillingNotificationRuleResponse = NotificationRule
+
+export type DeleteBillingNotificationRuleRequest = {
+  notificationRuleId: string
+}
+export type DeleteBillingNotificationRuleResponse = void
+
+export type TestBillingNotificationRuleRequest = {
+  notificationRuleId: string
+}
+export type TestBillingNotificationRuleResponse = NotificationEvent
+
+export interface ListBillingNotificationEventsQuery {
+  /** Determines which page of the collection to retrieve. */
+  page?: { size?: number; number?: number }
+  /**
+   * Sort notification events returned in the response. Supported sort attributes
+   * are:
+   *
+   * - `created_at` (default)
+   * - `id`
+   * - `type`
+   *
+   * The `asc` suffix is optional as the default sort order is ascending. The `desc`
+   * suffix is used to specify a descending order. Without a `sort` parameter, events
+   * are returned newest first.
+   */
+  sort?: SortQueryInput
+  /**
+   * Filter notification events returned in the response.
+   *
+   * Examples:
+   *
+   * - `filter[type]=invoice.created`
+   * - `filter[delivery_status]=failed`
+   * - `filter[subject_key]=customer-1`
+   */
+  filter?: ListNotificationEventsParamsFilter
+}
+
+export type ListBillingNotificationEventsRequest =
+  AcceptDateStrings<ListBillingNotificationEventsQuery>
+export type ListBillingNotificationEventsResponse =
+  NotificationEventPagePaginatedResponse
+
+export type GetBillingNotificationEventRequest = {
+  notificationEventId: string
+}
+export type GetBillingNotificationEventResponse = NotificationEvent
+
+export type ResendBillingNotificationEventRequest = AcceptDateStrings<{
+  notificationEventId: string
+  body: ResendBillingNotificationEventRequestBody
+}>
+export type ResendBillingNotificationEventResponse = void

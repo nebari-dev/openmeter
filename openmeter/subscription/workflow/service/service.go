@@ -26,6 +26,7 @@ type WorkflowServiceConfig struct {
 	CustomerService  customer.Service
 	CurrencyResolver currencies.CurrencyResolver
 	FeatureResolver  productcatalog.FeatureResolver
+	TaxCodeResolver  productcatalog.TaxCodeResolver
 	// framework
 	TransactionManager transaction.Creator
 	Logger             *slog.Logger
@@ -43,6 +44,7 @@ func (c WorkflowServiceConfig) Validate() error {
 	if c.AddonService == nil {
 		errs = append(errs, errors.New("subscription add-on service is required"))
 	}
+
 	if c.PlanAddonService == nil {
 		errs = append(errs, errors.New("plan add-on service is required"))
 	}
@@ -57,6 +59,10 @@ func (c WorkflowServiceConfig) Validate() error {
 
 	if c.FeatureResolver == nil {
 		errs = append(errs, errors.New("feature resolver is required"))
+	}
+
+	if c.TaxCodeResolver == nil {
+		errs = append(errs, errors.New("tax code resolver is required"))
 	}
 
 	if c.TransactionManager == nil {

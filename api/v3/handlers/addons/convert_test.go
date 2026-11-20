@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	apiv3 "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
@@ -47,8 +47,8 @@ func TestBillingRateCardCurrencyRoundTrip(t *testing.T) {
 func roundTripStaticConfig(t *testing.T, config interface{}) interface{} {
 	t.Helper()
 
-	var apiEnt apiv3.BillingRateCardEntitlement
-	require.NoError(t, apiEnt.FromBillingRateCardStaticEntitlement(apiv3.BillingRateCardStaticEntitlement{
+	var apiEnt apiv3models.BillingRateCardEntitlement
+	require.NoError(t, apiEnt.FromBillingRateCardStaticEntitlement(apiv3models.BillingRateCardStaticEntitlement{
 		Type:   "static",
 		Config: config,
 	}))
@@ -98,8 +98,8 @@ func TestFromToAPIBillingRateCardEntitlement(t *testing.T) {
 		// Subscription materialization (subscriptionspec.go) unwraps the stored
 		// config as a JSON string token containing JSON text. Pin that convention
 		// so v3-created static entitlements stay materializable.
-		var apiEnt apiv3.BillingRateCardEntitlement
-		require.NoError(t, apiEnt.FromBillingRateCardStaticEntitlement(apiv3.BillingRateCardStaticEntitlement{
+		var apiEnt apiv3models.BillingRateCardEntitlement
+		require.NoError(t, apiEnt.FromBillingRateCardStaticEntitlement(apiv3models.BillingRateCardStaticEntitlement{
 			Type:   "static",
 			Config: map[string]interface{}{"integrations": []interface{}{"github"}},
 		}))
@@ -131,10 +131,10 @@ func TestFromToAPIBillingRateCardEntitlement(t *testing.T) {
 	})
 
 	t.Run("metered — limit, soft limit, usage period round-trip", func(t *testing.T) {
-		usagePeriod := apiv3.ISO8601Duration("P1M")
+		usagePeriod := apiv3models.ISO8601Duration("P1M")
 
-		var apiEnt apiv3.BillingRateCardEntitlement
-		require.NoError(t, apiEnt.FromBillingRateCardMeteredEntitlement(apiv3.BillingRateCardMeteredEntitlement{
+		var apiEnt apiv3models.BillingRateCardEntitlement
+		require.NoError(t, apiEnt.FromBillingRateCardMeteredEntitlement(apiv3models.BillingRateCardMeteredEntitlement{
 			Type:        "metered",
 			IsSoftLimit: lo.ToPtr(true),
 			UsagePeriod: &usagePeriod,
@@ -160,8 +160,8 @@ func TestFromToAPIBillingRateCardEntitlement(t *testing.T) {
 	})
 
 	t.Run("metered — usage period defaults to billing cadence when omitted", func(t *testing.T) {
-		var apiEnt apiv3.BillingRateCardEntitlement
-		require.NoError(t, apiEnt.FromBillingRateCardMeteredEntitlement(apiv3.BillingRateCardMeteredEntitlement{
+		var apiEnt apiv3models.BillingRateCardEntitlement
+		require.NoError(t, apiEnt.FromBillingRateCardMeteredEntitlement(apiv3models.BillingRateCardMeteredEntitlement{
 			Type:  "metered",
 			Limit: lo.ToPtr(float64(5)),
 		}))
@@ -178,9 +178,9 @@ func TestFromToAPIBillingRateCardEntitlement(t *testing.T) {
 	})
 
 	t.Run("metered — malformed usage period is a validation error", func(t *testing.T) {
-		bad := apiv3.ISO8601Duration("not-a-duration")
-		var apiEnt apiv3.BillingRateCardEntitlement
-		require.NoError(t, apiEnt.FromBillingRateCardMeteredEntitlement(apiv3.BillingRateCardMeteredEntitlement{
+		bad := apiv3models.ISO8601Duration("not-a-duration")
+		var apiEnt apiv3models.BillingRateCardEntitlement
+		require.NoError(t, apiEnt.FromBillingRateCardMeteredEntitlement(apiv3models.BillingRateCardMeteredEntitlement{
 			Type:        "metered",
 			UsagePeriod: &bad,
 		}))
@@ -193,7 +193,7 @@ func TestFromToAPIBillingRateCardEntitlement(t *testing.T) {
 	})
 
 	t.Run("unknown entitlement type is rejected", func(t *testing.T) {
-		var apiEnt apiv3.BillingRateCardEntitlement
+		var apiEnt apiv3models.BillingRateCardEntitlement
 		require.NoError(t, json.Unmarshal([]byte(`{"type":"unknown"}`), &apiEnt))
 
 		domain, err := FromAPIBillingRateCardEntitlement(apiEnt, nil)
@@ -203,8 +203,8 @@ func TestFromToAPIBillingRateCardEntitlement(t *testing.T) {
 	})
 
 	t.Run("boolean — round-trips", func(t *testing.T) {
-		var apiEnt apiv3.BillingRateCardEntitlement
-		require.NoError(t, apiEnt.FromBillingRateCardBooleanEntitlement(apiv3.BillingRateCardBooleanEntitlement{
+		var apiEnt apiv3models.BillingRateCardEntitlement
+		require.NoError(t, apiEnt.FromBillingRateCardBooleanEntitlement(apiv3models.BillingRateCardBooleanEntitlement{
 			Type: "boolean",
 		}))
 
@@ -251,8 +251,8 @@ func TestToAPIBillingRateCardUnitConfig(t *testing.T) {
 		result, err := ToAPIBillingRateCardUnitConfig(p)
 		require.NoError(t, err)
 		require.NotNil(t, result)
-		assert.Equal(t, apiv3.BillingUnitConfigOperationMultiply, result.Operation)
-		assert.Equal(t, apiv3.Numeric("1.2"), result.ConversionFactor)
+		assert.Equal(t, apiv3models.BillingUnitConfigOperationMultiply, result.Operation)
+		assert.Equal(t, apiv3models.Numeric("1.2"), result.ConversionFactor)
 		assert.Nil(t, result.Rounding)
 		assert.Nil(t, result.Precision)
 		assert.Nil(t, result.DisplayUnit)
@@ -267,10 +267,10 @@ func TestToAPIBillingRateCardUnitConfig(t *testing.T) {
 		result, err := ToAPIBillingRateCardUnitConfig(p)
 		require.NoError(t, err)
 		require.NotNil(t, result)
-		assert.Equal(t, apiv3.BillingUnitConfigOperationDivide, result.Operation)
-		assert.Equal(t, apiv3.Numeric("1000"), result.ConversionFactor)
+		assert.Equal(t, apiv3models.BillingUnitConfigOperationDivide, result.Operation)
+		assert.Equal(t, apiv3models.Numeric("1000"), result.ConversionFactor)
 		require.NotNil(t, result.Rounding)
-		assert.Equal(t, apiv3.BillingUnitConfigRoundingModeCeiling, *result.Rounding)
+		assert.Equal(t, apiv3models.BillingUnitConfigRoundingModeCeiling, *result.Rounding)
 	})
 }
 
@@ -307,16 +307,16 @@ func TestToAPIBillingRateCard_DynamicAndPackagePrices(t *testing.T) {
 
 		unit, err := result.Price.AsBillingPriceUnit()
 		require.NoError(t, err)
-		assert.Equal(t, apiv3.Numeric("1"), unit.Amount)
+		assert.Equal(t, apiv3models.Numeric("1"), unit.Amount)
 
 		require.NotNil(t, result.UnitConfig)
-		assert.Equal(t, apiv3.BillingUnitConfigOperationMultiply, result.UnitConfig.Operation)
-		assert.Equal(t, apiv3.Numeric("1.2"), result.UnitConfig.ConversionFactor)
+		assert.Equal(t, apiv3models.BillingUnitConfigOperationMultiply, result.UnitConfig.Operation)
+		assert.Equal(t, apiv3models.Numeric("1.2"), result.UnitConfig.ConversionFactor)
 		assert.Nil(t, result.UnitConfig.Rounding)
 
 		require.NotNil(t, result.Commitments)
-		assert.Equal(t, lo.ToPtr(apiv3.Numeric("10")), result.Commitments.MinimumAmount)
-		assert.Equal(t, lo.ToPtr(apiv3.Numeric("100")), result.Commitments.MaximumAmount)
+		assert.Equal(t, lo.ToPtr(apiv3models.Numeric("10")), result.Commitments.MinimumAmount)
+		assert.Equal(t, lo.ToPtr(apiv3models.Numeric("100")), result.Commitments.MaximumAmount)
 	})
 
 	t.Run("package price renders as unit price plus divide unit config and preserves commitments", func(t *testing.T) {
@@ -347,16 +347,16 @@ func TestToAPIBillingRateCard_DynamicAndPackagePrices(t *testing.T) {
 
 		unit, err := result.Price.AsBillingPriceUnit()
 		require.NoError(t, err)
-		assert.Equal(t, apiv3.Numeric("0.5"), unit.Amount)
+		assert.Equal(t, apiv3models.Numeric("0.5"), unit.Amount)
 
 		require.NotNil(t, result.UnitConfig)
-		assert.Equal(t, apiv3.BillingUnitConfigOperationDivide, result.UnitConfig.Operation)
-		assert.Equal(t, apiv3.Numeric("1000"), result.UnitConfig.ConversionFactor)
+		assert.Equal(t, apiv3models.BillingUnitConfigOperationDivide, result.UnitConfig.Operation)
+		assert.Equal(t, apiv3models.Numeric("1000"), result.UnitConfig.ConversionFactor)
 		require.NotNil(t, result.UnitConfig.Rounding)
-		assert.Equal(t, apiv3.BillingUnitConfigRoundingModeCeiling, *result.UnitConfig.Rounding)
+		assert.Equal(t, apiv3models.BillingUnitConfigRoundingModeCeiling, *result.UnitConfig.Rounding)
 
 		require.NotNil(t, result.Commitments)
-		assert.Equal(t, lo.ToPtr(apiv3.Numeric("5")), result.Commitments.MinimumAmount)
+		assert.Equal(t, lo.ToPtr(apiv3models.Numeric("5")), result.Commitments.MinimumAmount)
 		assert.Nil(t, result.Commitments.MaximumAmount)
 	})
 
@@ -382,10 +382,10 @@ func TestToAPIBillingRateCard_DynamicAndPackagePrices(t *testing.T) {
 
 func TestUnitConfigMapping(t *testing.T) {
 	t.Run("FromAPI maps all five fields", func(t *testing.T) {
-		uc, err := FromAPIBillingUnitConfig(apiv3.BillingUnitConfig{
-			Operation:        apiv3.BillingUnitConfigOperationDivide,
-			ConversionFactor: apiv3.Numeric("1000"),
-			Rounding:         lo.ToPtr(apiv3.BillingUnitConfigRoundingModeCeiling),
+		uc, err := FromAPIBillingUnitConfig(apiv3models.BillingUnitConfig{
+			Operation:        apiv3models.BillingUnitConfigOperationDivide,
+			ConversionFactor: apiv3models.Numeric("1000"),
+			Rounding:         lo.ToPtr(apiv3models.BillingUnitConfigRoundingModeCeiling),
 			Precision:        lo.ToPtr(2),
 			DisplayUnit:      lo.ToPtr("K"),
 		})
@@ -399,9 +399,9 @@ func TestUnitConfigMapping(t *testing.T) {
 	})
 
 	t.Run("FromAPI defaults rounding to none and precision to zero when omitted", func(t *testing.T) {
-		uc, err := FromAPIBillingUnitConfig(apiv3.BillingUnitConfig{
-			Operation:        apiv3.BillingUnitConfigOperationMultiply,
-			ConversionFactor: apiv3.Numeric("1.2"),
+		uc, err := FromAPIBillingUnitConfig(apiv3models.BillingUnitConfig{
+			Operation:        apiv3models.BillingUnitConfigOperationMultiply,
+			ConversionFactor: apiv3models.Numeric("1.2"),
 		})
 		require.NoError(t, err)
 		require.NotNil(t, uc)
@@ -413,9 +413,9 @@ func TestUnitConfigMapping(t *testing.T) {
 	t.Run("FromAPI drops precision when rounding is omitted, mirroring ToAPI", func(t *testing.T) {
 		// Precision is inert without rounding; carrying it would make From/To
 		// disagree about what is stored across a round-trip.
-		uc, err := FromAPIBillingUnitConfig(apiv3.BillingUnitConfig{
-			Operation:        apiv3.BillingUnitConfigOperationMultiply,
-			ConversionFactor: apiv3.Numeric("1.2"),
+		uc, err := FromAPIBillingUnitConfig(apiv3models.BillingUnitConfig{
+			Operation:        apiv3models.BillingUnitConfigOperationMultiply,
+			ConversionFactor: apiv3models.Numeric("1.2"),
 			Precision:        lo.ToPtr(3),
 		})
 		require.NoError(t, err)
@@ -425,9 +425,9 @@ func TestUnitConfigMapping(t *testing.T) {
 	})
 
 	t.Run("FromAPI rejects a non-numeric conversion factor", func(t *testing.T) {
-		_, err := FromAPIBillingUnitConfig(apiv3.BillingUnitConfig{
-			Operation:        apiv3.BillingUnitConfigOperationDivide,
-			ConversionFactor: apiv3.Numeric("not-a-number"),
+		_, err := FromAPIBillingUnitConfig(apiv3models.BillingUnitConfig{
+			Operation:        apiv3models.BillingUnitConfigOperationDivide,
+			ConversionFactor: apiv3models.Numeric("not-a-number"),
 		})
 		require.Error(t, err)
 	})
@@ -438,17 +438,17 @@ func TestUnitConfigMapping(t *testing.T) {
 			ConversionFactor: decimal.NewFromFloat(1.2),
 			Precision:        3, // inert without rounding, must not surface
 		})
-		assert.Equal(t, apiv3.BillingUnitConfigOperationMultiply, out.Operation)
-		assert.Equal(t, apiv3.Numeric("1.2"), out.ConversionFactor)
+		assert.Equal(t, apiv3models.BillingUnitConfigOperationMultiply, out.Operation)
+		assert.Equal(t, apiv3models.Numeric("1.2"), out.ConversionFactor)
 		assert.Nil(t, out.Rounding)
 		assert.Nil(t, out.Precision)
 	})
 
 	t.Run("round-trips through FromAPI and ToAPI", func(t *testing.T) {
-		in := apiv3.BillingUnitConfig{
-			Operation:        apiv3.BillingUnitConfigOperationDivide,
-			ConversionFactor: apiv3.Numeric("1000"),
-			Rounding:         lo.ToPtr(apiv3.BillingUnitConfigRoundingModeCeiling),
+		in := apiv3models.BillingUnitConfig{
+			Operation:        apiv3models.BillingUnitConfigOperationDivide,
+			ConversionFactor: apiv3models.Numeric("1000"),
+			Rounding:         lo.ToPtr(apiv3models.BillingUnitConfigRoundingModeCeiling),
 			Precision:        lo.ToPtr(0),
 			DisplayUnit:      lo.ToPtr("GB"),
 		}
@@ -481,30 +481,30 @@ func TestUnitConfigMapping(t *testing.T) {
 		result, err := ToAPIBillingRateCard(rc)
 		require.NoError(t, err)
 		require.NotNil(t, result.UnitConfig)
-		assert.Equal(t, apiv3.BillingUnitConfigOperationDivide, result.UnitConfig.Operation)
-		assert.Equal(t, apiv3.Numeric("1000000000"), result.UnitConfig.ConversionFactor)
+		assert.Equal(t, apiv3models.BillingUnitConfigOperationDivide, result.UnitConfig.Operation)
+		assert.Equal(t, apiv3models.Numeric("1000000000"), result.UnitConfig.ConversionFactor)
 		require.NotNil(t, result.UnitConfig.Rounding)
-		assert.Equal(t, apiv3.BillingUnitConfigRoundingModeCeiling, *result.UnitConfig.Rounding)
+		assert.Equal(t, apiv3models.BillingUnitConfigRoundingModeCeiling, *result.UnitConfig.Rounding)
 		assert.Equal(t, lo.ToPtr("GB"), result.UnitConfig.DisplayUnit)
 	})
 
 	t.Run("FromAPIBillingRateCard propagates unit_config into the rate card meta", func(t *testing.T) {
-		// Guards the authoring wiring directly: a unit_config on an apiv3.BillingRateCard
+		// Guards the authoring wiring directly: a unit_config on an apiv3models.BillingRateCard
 		// must survive into meta.UnitConfig. Without this, dropping the propagation in
 		// FromAPIBillingRateCard would still leave the helper round-trip tests green.
-		var price apiv3.BillingPrice
-		require.NoError(t, price.FromBillingPriceUnit(apiv3.BillingPriceUnit{Amount: "0.05", Type: "unit"}))
+		var price apiv3models.BillingPrice
+		require.NoError(t, price.FromBillingPriceUnit(apiv3models.BillingPriceUnit{Amount: "0.05", Type: "unit"}))
 
-		bc := apiv3.ISO8601Duration("P1M")
-		rc := apiv3.BillingRateCard{
+		bc := apiv3models.ISO8601Duration("P1M")
+		rc := apiv3models.BillingRateCard{
 			Key:            "storage",
 			Name:           "Storage",
 			Price:          price,
 			BillingCadence: &bc,
-			UnitConfig: &apiv3.BillingUnitConfig{
-				Operation:        apiv3.BillingUnitConfigOperationDivide,
-				ConversionFactor: apiv3.Numeric("1000000000"),
-				Rounding:         lo.ToPtr(apiv3.BillingUnitConfigRoundingModeCeiling),
+			UnitConfig: &apiv3models.BillingUnitConfig{
+				Operation:        apiv3models.BillingUnitConfigOperationDivide,
+				ConversionFactor: apiv3models.Numeric("1000000000"),
+				Rounding:         lo.ToPtr(apiv3models.BillingUnitConfigRoundingModeCeiling),
 				Precision:        lo.ToPtr(0),
 				DisplayUnit:      lo.ToPtr("GB"),
 			},
@@ -525,11 +525,11 @@ func TestUnitConfigMapping(t *testing.T) {
 
 func TestFromAPIBillingRateCardPriceTypeErrors(t *testing.T) {
 	t.Run("unknown price type is a validation error", func(t *testing.T) {
-		var price apiv3.BillingPrice
+		var price apiv3models.BillingPrice
 		require.NoError(t, json.Unmarshal([]byte(`{"type":"bogus"}`), &price))
 
-		bc := apiv3.ISO8601Duration("P1M")
-		_, err := FromAPIBillingRateCard(apiv3.BillingRateCard{
+		bc := apiv3models.ISO8601Duration("P1M")
+		_, err := FromAPIBillingRateCard(apiv3models.BillingRateCard{
 			Key:            "storage",
 			Name:           "Storage",
 			Price:          price,
@@ -577,107 +577,4 @@ func TestToAPIAddon_EmptyRateCards(t *testing.T) {
 	out, err := json.Marshal(result)
 	require.NoError(t, err)
 	assert.Contains(t, string(out), `"rate_cards":[]`)
-}
-
-func TestFromAPITaxCodeConfig(t *testing.T) {
-	t.Run("nil when tax config is nil", func(t *testing.T) {
-		result, err := FromAPITaxCodeConfig(nil)
-		require.NoError(t, err)
-		assert.Nil(t, result)
-	})
-
-	t.Run("maps code ID", func(t *testing.T) {
-		tc := &apiv3.TaxCodeConfig{
-			Code: &apiv3.TaxCodeReference{Id: "01TAXCODE000"},
-		}
-
-		result, err := FromAPITaxCodeConfig(tc)
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.NotNil(t, result.TaxCodeID)
-		assert.Equal(t, "01TAXCODE000", *result.TaxCodeID)
-		assert.Nil(t, result.Behavior)
-	})
-
-	t.Run("maps behavior", func(t *testing.T) {
-		tc := &apiv3.TaxCodeConfig{
-			Code:     &apiv3.TaxCodeReference{Id: "01TAXCODE000"},
-			Behavior: lo.ToPtr(apiv3.BillingTaxBehavior("inclusive")),
-		}
-
-		result, err := FromAPITaxCodeConfig(tc)
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.NotNil(t, result.Behavior)
-		assert.Equal(t, productcatalog.InclusiveTaxBehavior, *result.Behavior)
-	})
-
-	t.Run("maps behavior-only config", func(t *testing.T) {
-		result, err := FromAPITaxCodeConfig(&apiv3.TaxCodeConfig{
-			Behavior: lo.ToPtr(apiv3.BillingTaxBehavior("inclusive")),
-		})
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		assert.Nil(t, result.TaxCodeID)
-		require.NotNil(t, result.Behavior)
-		assert.Equal(t, productcatalog.InclusiveTaxBehavior, *result.Behavior)
-	})
-
-	t.Run("rejects empty code ID", func(t *testing.T) {
-		result, err := FromAPITaxCodeConfig(&apiv3.TaxCodeConfig{
-			Code: &apiv3.TaxCodeReference{Id: ""},
-		})
-		require.Error(t, err)
-		assert.Nil(t, result)
-		assert.True(t, models.IsGenericValidationError(err), "an explicit code reference without an id must surface as a validation error")
-	})
-
-	t.Run("rejects empty code ID even with behavior", func(t *testing.T) {
-		result, err := FromAPITaxCodeConfig(&apiv3.TaxCodeConfig{
-			Code:     &apiv3.TaxCodeReference{Id: ""},
-			Behavior: lo.ToPtr(apiv3.BillingTaxBehavior("inclusive")),
-		})
-		require.Error(t, err)
-		assert.Nil(t, result)
-		assert.True(t, models.IsGenericValidationError(err), "an explicit code reference without an id must surface as a validation error")
-	})
-
-	t.Run("rejects empty tax config", func(t *testing.T) {
-		result, err := FromAPITaxCodeConfig(&apiv3.TaxCodeConfig{})
-		require.Error(t, err)
-		assert.Nil(t, result)
-		assert.True(t, models.IsGenericValidationError(err), "tax config without code or behavior must surface as a validation error")
-	})
-}
-
-func TestToAPITaxCodeConfig(t *testing.T) {
-	t.Run("nil when tax config is nil", func(t *testing.T) {
-		assert.Nil(t, ToAPITaxCodeConfig(nil))
-	})
-
-	t.Run("nil when tax config has no shared fields", func(t *testing.T) {
-		assert.Nil(t, ToAPITaxCodeConfig(&productcatalog.TaxConfig{}))
-	})
-
-	t.Run("maps normalized tax code ID", func(t *testing.T) {
-		result := ToAPITaxCodeConfig(&productcatalog.TaxConfig{
-			TaxCodeID: lo.ToPtr("01TAXCODE000"),
-		})
-
-		require.NotNil(t, result)
-		require.NotNil(t, result.Code)
-		assert.Equal(t, "01TAXCODE000", result.Code.Id)
-		assert.Nil(t, result.Behavior)
-	})
-
-	t.Run("maps behavior-only config", func(t *testing.T) {
-		result := ToAPITaxCodeConfig(&productcatalog.TaxConfig{
-			Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
-		})
-
-		require.NotNil(t, result)
-		assert.Nil(t, result.Code)
-		require.NotNil(t, result.Behavior)
-		assert.Equal(t, apiv3.BillingTaxBehavior("exclusive"), *result.Behavior)
-	})
 }

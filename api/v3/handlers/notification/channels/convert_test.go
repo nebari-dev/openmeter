@@ -7,31 +7,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
 // TestFromAPICreateChannelRequest_TypeCasing covers the type casing mapping: the v3 wire enum value
-// ("webhook") must translate to the domain/DB value ("WEBHOOK") on create, and an
+// ("webhook") must translate to the domain/DB value ("webhook") on create, and an
 // unrecognized wire value must be rejected rather than silently stored — a bad
 // ChannelType would otherwise reach ChannelConfig.Validate()'s type switch and fail
 // deep inside domain validation with a confusing error instead of a clear one here.
 func TestFromAPICreateChannelRequest_TypeCasing(t *testing.T) {
-	baseBody := func(channelType api.NotificationChannelType) api.CreateNotificationChannelRequest {
-		return api.CreateNotificationChannelRequest{
+	baseBody := func(channelType apiv3models.BillingNotificationChannelType) apiv3models.CreateNotificationChannelRequest {
+		return apiv3models.CreateNotificationChannelRequest{
 			Name: "test channel",
 			Type: channelType,
 			Url:  "https://example.com/hook",
 		}
 	}
 
-	t.Run("lowercase wire value maps to uppercase domain value", func(t *testing.T) {
-		result, err := FromAPICreateChannelRequest("ns1", baseBody(api.NotificationChannelTypeWebhook))
+	t.Run("lowercase wire value maps to lowercase domain value", func(t *testing.T) {
+		result, err := FromAPICreateChannelRequest("ns1", baseBody(apiv3models.BillingNotificationChannelTypeWebhook))
 		require.NoError(t, err)
 		assert.Equal(t, notification.ChannelTypeWebhook, result.Type)
-		assert.Equal(t, notification.ChannelType("WEBHOOK"), result.Type)
+		assert.Equal(t, notification.ChannelType("webhook"), result.Type)
 		// The nested config's type meta must carry the same mapped value, since
 		// ChannelConfig.Validate() switches on it independently of Type above.
 		assert.Equal(t, notification.ChannelTypeWebhook, result.Config.ChannelConfigMeta.Type)
@@ -48,24 +48,22 @@ func TestFromAPICreateChannelRequest_TypeCasing(t *testing.T) {
 	})
 
 	t.Run("uppercase V1-style value is rejected under the v3 lowercase casing convention", func(t *testing.T) {
-		// v3 deliberately spells the wire value "webhook" (lowercase); the domain's
-		// own uppercase "WEBHOOK" spelling must not be silently accepted as-is on the
-		// v3 wire, or a client copying the V1 casing would get an inconsistent channel.
+		// V1 spelling must remain invalid on the V3 API.
 		_, err := FromAPICreateChannelRequest("ns1", baseBody("WEBHOOK"))
 		require.Error(t, err)
 	})
 }
 
 // TestFromAPIUpdateChannelRequest pins the update request's replace semantics as
-// documented on the UpdateNotificationChannelRequest spec model: type/name/url are
+// documented on the UpdateBillingNotificationChannelRequest spec model: type/name/url are
 // required on the wire, an omitted disabled resets to false, and an omitted
 // signing_secret maps to the empty string — which the service layer treats as "keep
 // the current secret", never as clearing the credential.
 func TestFromAPIUpdateChannelRequest(t *testing.T) {
-	baseBody := func() api.UpdateNotificationChannelRequest {
-		return api.UpdateNotificationChannelRequest{
+	baseBody := func() apiv3models.UpdateBillingNotificationChannelRequest {
+		return apiv3models.UpdateBillingNotificationChannelRequest{
 			Name: "updated channel",
-			Type: api.NotificationChannelTypeWebhook,
+			Type: apiv3models.BillingNotificationChannelTypeWebhook,
 			Url:  "https://example.com/hook",
 		}
 	}
@@ -121,8 +119,8 @@ func TestToAPIChannel_TypeCasing(t *testing.T) {
 
 		result, err := ToAPIChannel(channel)
 		require.NoError(t, err)
-		assert.Equal(t, api.NotificationChannelTypeWebhook, result.Type)
-		assert.Equal(t, api.NotificationChannelType("webhook"), result.Type)
+		assert.Equal(t, apiv3models.BillingNotificationChannelTypeWebhook, result.Type)
+		assert.Equal(t, apiv3models.BillingNotificationChannelType("webhook"), result.Type)
 	})
 
 	t.Run("unknown domain type errors instead of leaking the raw value", func(t *testing.T) {
@@ -137,10 +135,7 @@ func TestToAPIChannel_TypeCasing(t *testing.T) {
 	})
 }
 
-// TestMapAPIChannelTypeFilter covers the filter direction of the type casing: filter[type][...] wire
-// values must be translated to the domain/DB value before the predicate reaches the
-// adapter, or filter[type][eq]=webhook would silently match zero rows against a
-// column that stores "WEBHOOK".
+// TestMapAPIChannelTypeFilter checks exact lowercase types and rejects unsupported values.
 func TestMapAPIChannelTypeFilter(t *testing.T) {
 	testCases := []struct {
 		name    string
@@ -156,17 +151,17 @@ func TestMapAPIChannelTypeFilter(t *testing.T) {
 		{
 			name:  "eq translates the wire value to the domain value",
 			input: &filter.FilterString{Eq: lo.ToPtr("webhook")},
-			want:  &filter.FilterString{Eq: lo.ToPtr("WEBHOOK")},
+			want:  &filter.FilterString{Eq: lo.ToPtr("webhook")},
 		},
 		{
 			name:  "ne translates the wire value to the domain value",
 			input: &filter.FilterString{Ne: lo.ToPtr("webhook")},
-			want:  &filter.FilterString{Ne: lo.ToPtr("WEBHOOK")},
+			want:  &filter.FilterString{Ne: lo.ToPtr("webhook")},
 		},
 		{
 			name:  "in translates every wire value to its domain value",
 			input: &filter.FilterString{In: &[]string{"webhook"}},
-			want:  &filter.FilterString{In: &[]string{"WEBHOOK"}},
+			want:  &filter.FilterString{In: &[]string{"webhook"}},
 		},
 		{
 			name:    "unknown eq value is rejected rather than silently matching zero rows",
@@ -192,6 +187,7 @@ func TestMapAPIChannelTypeFilter(t *testing.T) {
 				require.Error(t, err)
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -223,12 +219,14 @@ func TestFromAPIChannelSortField(t *testing.T) {
 		if name == "" {
 			name = "empty"
 		}
+
 		t.Run(name, func(t *testing.T) {
 			got, err := FromAPIChannelSortField(t.Context(), tc.field)
 			if tc.wantErr {
 				require.Error(t, err)
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -258,10 +256,10 @@ func TestToAPIChannel_LabelsRoundTrip(t *testing.T) {
 
 	// Metadata-derived labels round-trip cleanly: resubmitting just the metadata
 	// portion of the API labels reconstructs the same domain Metadata.
-	metadataOnly := api.Labels{"env": (*apiChannel.Labels)["env"]}
-	created, err := FromAPICreateChannelRequest("ns1", api.CreateNotificationChannelRequest{
+	metadataOnly := apiv3models.Labels{"env": (*apiChannel.Labels)["env"]}
+	created, err := FromAPICreateChannelRequest("ns1", apiv3models.CreateNotificationChannelRequest{
 		Name:   "test",
-		Type:   api.NotificationChannelTypeWebhook,
+		Type:   apiv3models.BillingNotificationChannelTypeWebhook,
 		Url:    "https://example.com/hook",
 		Labels: &metadataOnly,
 	})
@@ -277,9 +275,9 @@ func TestToAPIChannel_LabelsRoundTrip(t *testing.T) {
 	// validation error, not a no-op update. This is pre-existing shared-package
 	// behavior (see api/v3/labels/convert_test.go), not specific to this handler, so
 	// it is documented here rather than treated as a defect of FromAPIUpdateChannelRequest.
-	_, err = FromAPICreateChannelRequest("ns1", api.CreateNotificationChannelRequest{
+	_, err = FromAPICreateChannelRequest("ns1", apiv3models.CreateNotificationChannelRequest{
 		Name:   "test",
-		Type:   api.NotificationChannelTypeWebhook,
+		Type:   apiv3models.BillingNotificationChannelTypeWebhook,
 		Url:    "https://example.com/hook",
 		Labels: apiChannel.Labels,
 	})

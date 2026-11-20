@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/creditrealization"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
@@ -16,6 +17,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ledger/advance"
 	"github.com/openmeterio/openmeter/openmeter/ledger/breakage"
 	"github.com/openmeterio/openmeter/openmeter/ledger/collector/correction"
+	"github.com/openmeterio/openmeter/openmeter/ledger/fbo"
 	"github.com/openmeterio/openmeter/openmeter/ledger/transactions"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/framework/transaction"
@@ -32,6 +34,7 @@ type Service interface {
 
 type Config struct {
 	Logger        *slog.Logger
+	Meter         metric.Meter
 	Advance       advance.Service
 	Ledger        ledger.Ledger
 	Dependencies  transactions.ResolverDependencies
@@ -49,6 +52,10 @@ func (c Config) Validate() error {
 		errs = append(errs, errors.New("logger is required"))
 	}
 
+	if c.Meter == nil {
+		errs = append(errs, errors.New("meter is required"))
+	}
+
 	if c.Advance == nil {
 		errs = append(errs, errors.New("advance service is required"))
 	}
@@ -60,18 +67,23 @@ func (c Config) Validate() error {
 	if c.Ledger == nil {
 		errs = append(errs, fmt.Errorf("ledger is required"))
 	}
+
 	if c.Dependencies.AccountService == nil {
 		errs = append(errs, fmt.Errorf("account service is required"))
 	}
+
 	if c.Dependencies.AccountCatalog == nil {
 		errs = append(errs, fmt.Errorf("account catalog is required"))
 	}
+
 	if c.Dependencies.BalanceQuerier == nil {
 		errs = append(errs, fmt.Errorf("balance querier is required"))
 	}
+
 	if c.AccountLocker == nil {
 		errs = append(errs, fmt.Errorf("account locker is required"))
 	}
+
 	if c.TransactionManager == nil {
 		errs = append(errs, fmt.Errorf("transaction manager is required"))
 	}
@@ -80,34 +92,32 @@ func (c Config) Validate() error {
 }
 
 type CollectToAccruedInput struct {
-	Namespace         string
-	ChargeID          string
-	CustomerID        string
-	Annotations       models.Annotations
-	BookedAt          time.Time
-	SourceBalanceAsOf time.Time
-	Currency          currencies.CurrencyReference
-	Filters           ledger.CreditFilters
-	SettlementMode    productcatalog.SettlementMode
-	ServicePeriod     timeutil.ClosedPeriod
-	Amount            alpacadecimal.Decimal
-	TaxCode           *string
-	TaxBehavior       *ledger.TaxBehavior
+	Namespace      string
+	ChargeID       string
+	CustomerID     string
+	Annotations    models.Annotations
+	BookedAt       time.Time
+	Currency       currencies.CurrencyReference
+	Filters        ledger.CreditFilters
+	SettlementMode productcatalog.SettlementMode
+	ServicePeriod  timeutil.ClosedPeriod
+	Amount         alpacadecimal.Decimal
+	TaxCode        *string
+	TaxBehavior    *ledger.TaxBehavior
 }
 
 type CorrectCollectedAccruedInput = correction.Input
 
 type CollectToReceivableInput struct {
-	Namespace         string
-	ChargeID          string
-	CustomerID        string
-	Annotations       models.Annotations
-	BookedAt          time.Time
-	SourceBalanceAsOf time.Time
-	Currency          currencies.CurrencyReference
-	Filters           ledger.CreditFilters
-	ServicePeriod     timeutil.ClosedPeriod
-	Amount            alpacadecimal.Decimal
+	Namespace     string
+	ChargeID      string
+	CustomerID    string
+	Annotations   models.Annotations
+	BookedAt      time.Time
+	Currency      currencies.CurrencyReference
+	Filters       ledger.CreditFilters
+	ServicePeriod timeutil.ClosedPeriod
+	Amount        alpacadecimal.Decimal
 }
 
 func (i CollectToReceivableInput) Validate() error {
@@ -119,23 +129,25 @@ func (i CollectToReceivableInput) Validate() error {
 	if err := (models.NamespacedID{Namespace: i.Namespace, ID: i.ChargeID}).Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("charge: %w", err))
 	}
+
 	if err := (customer.CustomerID{Namespace: i.Namespace, ID: i.CustomerID}).Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
+
 	if i.BookedAt.IsZero() {
 		errs = append(errs, errors.New("booked at is required"))
 	}
-	if i.SourceBalanceAsOf.IsZero() {
-		errs = append(errs, errors.New("source balance as of is required"))
-	}
+
 	if err := i.Currency.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("currency: %w", err))
 	} else if !i.Currency.IsFiat() {
 		errs = append(errs, errors.New("currency must be fiat"))
 	}
+
 	if err := i.ServicePeriod.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("service period: %w", err))
 	}
+
 	if i.Amount.IsNegative() {
 		errs = append(errs, errors.New("amount cannot be negative"))
 	} else if i.Amount.IsPositive() {
@@ -162,16 +174,20 @@ func (i CorrectCollectedReceivableInput) Validate() error {
 	if err := (models.NamespacedID{Namespace: i.Namespace, ID: i.ChargeID}).Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("charge: %w", err))
 	}
+
 	if err := (customer.CustomerID{Namespace: i.Namespace, ID: i.CustomerID}).Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
+
 	if i.AllocateAt.IsZero() {
 		errs = append(errs, errors.New("allocate at is required"))
 	}
+
 	for idx, correction := range i.Corrections {
 		if err := correction.Allocation.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("corrections[%d].allocation: %w", idx, err))
 		}
+
 		if correction.Amount.IsPositive() {
 			errs = append(errs, fmt.Errorf("corrections[%d].amount must not be positive", idx))
 		}
@@ -202,13 +218,22 @@ func NewService(config Config) (Service, error) {
 		return nil, fmt.Errorf("create correction service: %w", err)
 	}
 
+	fboService, err := fbo.NewService(fbo.Config{
+		Meter:         config.Meter,
+		Logger:        config.Logger,
+		Advance:       config.Advance,
+		Dependencies:  config.Dependencies,
+		Breakage:      config.Breakage,
+		AccountLocker: config.AccountLocker,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create FBO service: %w", err)
+	}
+
 	return &service{
 		collector: &accrualCollector{
 			ledger:             config.Ledger,
-			advance:            config.Advance,
-			deps:               config.Dependencies,
-			breakage:           config.Breakage,
-			accountLocker:      config.AccountLocker,
+			fbo:                fboService,
 			transactionManager: config.TransactionManager,
 		},
 		corrector: corrector,
@@ -218,9 +243,6 @@ func NewService(config Config) (Service, error) {
 func (s *service) CollectToAccrued(ctx context.Context, input CollectToAccruedInput) (creditrealization.CreateAllocationInputs, error) {
 	if input.BookedAt.IsZero() {
 		return nil, fmt.Errorf("booked at is required")
-	}
-	if input.SourceBalanceAsOf.IsZero() {
-		return nil, fmt.Errorf("source balance as of is required")
 	}
 
 	return s.collector.collectToAccrued(ctx, input)

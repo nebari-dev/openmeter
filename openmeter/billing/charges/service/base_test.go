@@ -9,6 +9,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/invopop/gobl/currency"
 	"github.com/samber/lo"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges"
@@ -187,6 +188,7 @@ func (s *BaseSuite) SetupSuite() {
 		advanceService := advancetestutils.NewService(s.T(), ledgerDeps, breakageService)
 
 		collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+			Meter:              metricnoop.NewMeterProvider().Meter("test"),
 			Logger:             omtestutils.NewDiscardLogger(s.T()),
 			Advance:            advanceService,
 			Ledger:             ledgerDeps.HistoricalLedger,
@@ -316,7 +318,7 @@ func (s *BaseSuite) SetupSuite() {
 		RecognizerService:     recognizerService,
 
 		BillingService:      s.BillingService,
-		TaxCodeService:      s.TaxCodeService,
+		TaxCodeService:      s.TaxCodeEnv.Service,
 		CurrencyResolver:    currencyResolver,
 		CustomerService:     s.CustomerService,
 		SubscriptionService: s.SubscriptionService,
@@ -407,6 +409,7 @@ func (s *BaseSuite) requireDeletedCustomCurrencyOverageLine(in requireDeletedCus
 	default:
 		s.Fail("overage reason annotation has an unexpected type")
 	}
+
 	s.Empty(in.line.DetailedLines)
 	s.RequireTotals(in.expectFiatTotals, in.line.Totals)
 }
@@ -499,6 +502,7 @@ func (s *BaseSuite) createMockChargeIntent(input createMockChargeIntentInput) ch
 			FeatureKey:     lo.EmptyableToPtr(input.featureKey),
 			SettlementMode: lo.CoalesceOrEmpty(input.settlementMode, productcatalog.CreditThenInvoiceSettlementMode),
 		}
+
 		return charges.NewChargeIntent(flatFeeIntent)
 	}
 
@@ -513,6 +517,7 @@ func (s *BaseSuite) createMockChargeIntent(input createMockChargeIntentInput) ch
 		},
 		SettlementMode: lo.CoalesceOrEmpty(input.settlementMode, productcatalog.CreditThenInvoiceSettlementMode),
 	}
+
 	return charges.NewChargeIntent(usageBasedIntent)
 }
 
@@ -629,6 +634,7 @@ func (s *BaseSuite) mustGetChargeByID(chargeID meta.ChargeID) charges.Charge {
 		},
 	})
 	s.NoError(err)
+
 	return charge
 }
 

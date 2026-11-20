@@ -8,7 +8,7 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
@@ -19,8 +19,8 @@ import (
 
 type (
 	ListEventsRequest  = notification.ListEventsInput
-	ListEventsResponse = api.NotificationEventPaginatedResponse
-	ListEventsParams   = api.ListNotificationEventsParams
+	ListEventsResponse = apiv1models.NotificationEventPaginatedResponse
+	ListEventsParams   = apiv1models.ListNotificationEventsParams
 	ListEventsHandler  httptransport.HandlerWithArgs[ListEventsRequest, ListEventsResponse, ListEventsParams]
 )
 
@@ -33,9 +33,10 @@ func (h *handler) ListEvents() ListEventsHandler {
 			}
 
 			req := ListEventsRequest{
+				Expand:     &notification.EventExpand{DeliveryStatus: true},
 				Namespaces: []string{ns},
-				Order:      sortx.Order(lo.FromPtrOr(params.Order, api.SortOrderDESC)),
-				OrderBy:    notification.OrderBy(lo.FromPtrOr(params.OrderBy, api.NotificationEventOrderByCreatedAt)),
+				Order:      sortx.Order(lo.FromPtrOr(params.Order, apiv1models.SortOrderDESC)),
+				OrderBy:    notification.OrderBy(lo.FromPtrOr(params.OrderBy, apiv1models.NotificationEventOrderByCreatedAt)),
 				Page: pagination.Page{
 					PageSize:   lo.FromPtrOr(params.PageSize, notification.DefaultPageSize),
 					PageNumber: lo.FromPtrOr(params.Page, notification.DefaultPageNumber),
@@ -56,10 +57,10 @@ func (h *handler) ListEvents() ListEventsHandler {
 				return ListEventsResponse{}, fmt.Errorf("failed to list events: %w", err)
 			}
 
-			items := make([]api.NotificationEvent, 0, len(resp.Items))
+			items := make([]apiv1models.NotificationEvent, 0, len(resp.Items))
 
 			for _, event := range resp.Items {
-				var item api.NotificationEvent
+				var item apiv1models.NotificationEvent
 
 				item, err = FromEvent(event)
 				if err != nil {
@@ -87,7 +88,7 @@ func (h *handler) ListEvents() ListEventsHandler {
 
 type (
 	GetEventRequest  = notification.GetEventInput
-	GetEventResponse = api.NotificationEvent
+	GetEventResponse = apiv1models.NotificationEvent
 	GetEventHandler  httptransport.HandlerWithArgs[GetEventRequest, GetEventResponse, string]
 )
 
@@ -100,6 +101,7 @@ func (h *handler) GetEvent() GetEventHandler {
 			}
 
 			req := GetEventRequest{
+				Expand:    &notification.EventExpand{DeliveryStatus: true},
 				Namespace: ns,
 				ID:        eventID,
 			}
@@ -136,7 +138,7 @@ type (
 func (h *handler) ResendEvent() ResendEventHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, eventID string) (ResendEventRequest, error) {
-			body := api.NotificationEventResendRequest{}
+			body := apiv1models.NotificationEventResendRequest{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return ResendEventRequest{}, fmt.Errorf("field to decode resend event request: %w", err)
 			}
@@ -161,6 +163,7 @@ func (h *handler) ResendEvent() ResendEventHandler {
 			if err != nil {
 				return nil, fmt.Errorf("failed to resend event: %w", err)
 			}
+
 			return nil, nil
 		},
 		commonhttp.EmptyResponseEncoder[ResendEventResponse](http.StatusAccepted),

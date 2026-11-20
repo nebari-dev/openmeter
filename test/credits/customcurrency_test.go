@@ -47,7 +47,7 @@ func (s *CustomCurrencyCreditsSuite) TestUsageBasedCreditOnlyAllocatesEligibleBu
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("custom-currency-credit-only-backfill")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customer := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(t, ns)
 	_ = s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID(),
@@ -342,7 +342,7 @@ func (s *CustomCurrencyCreditsSuite) TestFlatFeeCreditThenInvoiceUsesFiatCredits
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("custom-currency-credit-then-invoice-fiat-coverage")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	customer := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	_ = s.ProvisionBillingProfile(ctx, ns, customInvoicing.App.GetID(), billingtest.WithManualApproval())
@@ -511,7 +511,7 @@ func (s *CustomCurrencyCreditsSuite) TestUsageBasedCreditOnlyBackfillRespectsFea
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("custom-currency-credit-only-partial-feature-backfill")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customer := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(t, ns)
 	_ = s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID(),
@@ -728,11 +728,136 @@ func (s *CustomCurrencyCreditsSuite) TestUsageBasedCreditOnlyBackfillRespectsFea
 	s.Empty(lineages, "new collections must not create lineage state")
 }
 
+func (s *CustomCurrencyCreditsSuite) TestFlatFeeCreditThenInvoiceSelectsCreditsAtServiceStart() {
+	for _, tc := range []struct {
+		name              string
+		grantAmount       int64
+		grantOffset       time.Duration
+		previousSpend     int64
+		expectedAllocated float64
+		expectedFiatTotal float64
+	}{
+		{name: "mid-period credit covers the fee", grantAmount: 20, grantOffset: -24 * time.Hour, expectedAllocated: 10},
+		{name: "mid-period credit covers part of the fee", grantAmount: 4, grantOffset: -24 * time.Hour, expectedAllocated: 4, expectedFiatTotal: 3},
+		{name: "credit granted at booking time is eligible", grantAmount: 20, expectedAllocated: 10},
+		{name: "later collection keeps its credits", grantAmount: 10, grantOffset: -24 * time.Hour, previousSpend: 7, expectedAllocated: 3, expectedFiatTotal: 3.5},
+		{name: "later collection already exhausted the grant", grantAmount: 10, grantOffset: -24 * time.Hour, previousSpend: 10, expectedFiatTotal: 5},
+		{name: "later credit cannot fund earlier service", grantAmount: 20, grantOffset: 24 * time.Hour, expectedFiatTotal: 5},
+	} {
+		s.Run(tc.name, func() {
+			t := s.T()
+			ctx := t.Context()
+			billingStart := datetime.MustParseTimeInLocation(t, "2026-01-01T00:00:00Z", time.UTC).AsTime()
+			servicePeriod := timeutil.ClosedPeriod{
+				From: datetime.MustParseTimeInLocation(t, "2026-01-15T00:00:00Z", time.UTC).AsTime(),
+				To:   datetime.MustParseTimeInLocation(t, "2026-02-01T00:00:00Z", time.UTC).AsTime(),
+			}
+			grantAt := servicePeriod.From.Add(tc.grantOffset)
+			clock.FreezeTime(grantAt)
+			defer clock.UnFreeze()
+
+			// given:
+			// - custom credits are granted before collection
+			// - a mid-period fee retains the billing-period start as invoice_at, as for an addon change
+			ns := s.GetUniqueNamespace("flat-fee-credit-booking-time")
+			defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+			invoicing := s.SetupCustomInvoicing(ns)
+			customer := s.CreateLedgerBackedCustomer(ns, "test-subject")
+			_ = s.ProvisionBillingProfile(ctx, ns, invoicing.App.GetID(), billingtest.WithManualApproval())
+			tokens := s.createCustomCurrency(ns, "TOKENS")
+			s.createCustomCurrencyCreditPurchase(ctx, customCurrencyCreditPurchaseInput{
+				Namespace:  ns,
+				Customer:   customer.GetID(),
+				Currency:   tokens,
+				Amount:     alpacadecimal.NewFromInt(tc.grantAmount),
+				At:         grantAt,
+				Name:       "TOKENS grant",
+				Settlement: creditpurchase.NewSettlement(creditpurchase.PromotionalSettlement{}),
+				TaxConfig: productcatalog.TaxCodeConfig{
+					TaxCodeID: defaults.CreditGrantTaxCodeID,
+				},
+			})
+
+			costBasis := s.newManualCostBasis(alpacadecimal.NewFromFloat(0.5))
+			if tc.previousSpend > 0 {
+				// A later-effective fee gets collected first. Its allocation must survive
+				// when the delayed fee is subsequently booked at an earlier time.
+				laterStart := servicePeriod.From.Add(24 * time.Hour)
+				clock.FreezeTime(laterStart)
+				laterCharge := s.createCustomCurrencyFlatFeeCharge(ctx, customCurrencyFlatFeeChargeInput{
+					Namespace:      ns,
+					Customer:       customer.GetID(),
+					Currency:       tokens,
+					ServicePeriod:  timeutil.ClosedPeriod{From: laterStart, To: servicePeriod.To},
+					InvoiceAt:      laterStart,
+					Amount:         alpacadecimal.NewFromInt(tc.previousSpend),
+					PaymentTerm:    productcatalog.InAdvancePaymentTerm,
+					SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+					CostBasis:      &costBasis,
+					Name:           "Already collected TOKENS fee",
+					TaxConfig: productcatalog.TaxCodeConfig{
+						TaxCodeID: defaults.InvoicingTaxCodeID,
+					},
+				})
+				invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+					Customer: customer.GetID(),
+					AsOf:     &laterStart,
+				})
+				s.Require().NoError(err)
+				s.Require().Len(invoices, 1)
+
+				laterRealized, err := s.MustGetChargeByID(laterCharge.GetChargeID()).AsFlatFeeCharge()
+				s.Require().NoError(err)
+				s.Require().NotNil(laterRealized.Realizations.CurrentRun)
+				s.Equal(float64(tc.previousSpend), laterRealized.Realizations.CurrentRun.CreditRealizations.Sum().InexactFloat64())
+			}
+
+			collectionAt := servicePeriod.From.Add(48 * time.Hour)
+			clock.FreezeTime(collectionAt)
+			charge := s.createCustomCurrencyFlatFeeCharge(ctx, customCurrencyFlatFeeChargeInput{
+				Namespace:      ns,
+				Customer:       customer.GetID(),
+				Currency:       tokens,
+				ServicePeriod:  servicePeriod,
+				InvoiceAt:      billingStart,
+				Amount:         alpacadecimal.NewFromInt(10),
+				PaymentTerm:    productcatalog.InAdvancePaymentTerm,
+				SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+				CostBasis:      &costBasis,
+				Name:           "Mid-period TOKENS fee",
+				TaxConfig: productcatalog.TaxCodeConfig{
+					TaxCodeID: defaults.InvoicingTaxCodeID,
+				},
+			})
+
+			// when:
+			// - collection runs after both the service start and the grant
+			invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+				Customer: customer.GetID(),
+				AsOf:     lo.ToPtr(collectionAt),
+			})
+			s.Require().NoError(err)
+			s.Require().Len(invoices, 1)
+
+			// then:
+			// - only credit effective at service start and not already allocated is consumed
+			// - only uncovered custom currency becomes invoiceable fiat
+			realized, err := s.MustGetChargeByID(charge.GetChargeID()).AsFlatFeeCharge()
+			s.Require().NoError(err)
+			s.Require().NotNil(realized.Realizations.CurrentRun)
+			s.Equal(tc.expectedAllocated, realized.Realizations.CurrentRun.CreditRealizations.Sum().InexactFloat64())
+			s.requireCustomCurrencyInvoiceTotals(invoices[0], tc.expectedFiatTotal, 0, tc.expectedFiatTotal)
+			accounts := s.mustCustomerAccounts(customer.GetID())
+			s.requireAccountBalance(accounts.FBOAccount, ledger.RouteFilter{Currency: tokens.Reference()}, float64(tc.grantAmount-tc.previousSpend)-tc.expectedAllocated, "remaining TOKENS")
+		})
+	}
+}
+
 func (s *CustomCurrencyCreditsSuite) TestFlatFeeCreditThenInvoiceAllocatesNativeCreditsBeforeSelectiveFiatCoverage() {
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("custom-currency-credit-then-invoice-native-and-fiat")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	customer := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	_ = s.ProvisionBillingProfile(ctx, ns, customInvoicing.App.GetID(), billingtest.WithManualApproval())
@@ -988,33 +1113,43 @@ func (i customCurrencyUsageChargeInput) Validate() error {
 	if i.Namespace == "" {
 		errs = append(errs, errors.New("namespace is required"))
 	}
+
 	if err := i.Customer.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
+
 	if i.Customer.Namespace != i.Namespace {
 		errs = append(errs, errors.New("customer namespace must match input namespace"))
 	}
+
 	if err := i.Currency.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("currency: %w", err))
 	}
+
 	if !i.Currency.IsCustom() {
 		errs = append(errs, errors.New("currency must be custom"))
 	}
+
 	if err := i.ServicePeriod.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("service period: %w", err))
 	}
+
 	if i.FeatureKey == "" {
 		errs = append(errs, errors.New("feature key is required"))
 	}
+
 	if !i.UnitPrice.IsPositive() {
 		errs = append(errs, errors.New("unit price must be positive"))
 	}
+
 	if err := i.SettlementMode.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("settlement mode: %w", err))
 	}
+
 	if i.Name == "" {
 		errs = append(errs, errors.New("name is required"))
 	}
+
 	if err := i.TaxConfig.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("tax config: %w", err))
 	}
@@ -1082,36 +1217,47 @@ func (i customCurrencyFlatFeeChargeInput) Validate() error {
 	if i.Namespace == "" {
 		errs = append(errs, errors.New("namespace is required"))
 	}
+
 	if err := i.Customer.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
+
 	if i.Customer.Namespace != i.Namespace {
 		errs = append(errs, errors.New("customer namespace must match input namespace"))
 	}
+
 	if err := i.Currency.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("currency: %w", err))
 	}
+
 	if !i.Currency.IsCustom() {
 		errs = append(errs, errors.New("currency must be custom"))
 	}
+
 	if err := i.ServicePeriod.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("service period: %w", err))
 	}
+
 	if i.InvoiceAt.IsZero() {
 		errs = append(errs, errors.New("invoice at is required"))
 	}
+
 	if !i.Amount.IsPositive() {
 		errs = append(errs, errors.New("amount must be positive"))
 	}
+
 	if err := i.PaymentTerm.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("payment term: %w", err))
 	}
+
 	if err := i.SettlementMode.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("settlement mode: %w", err))
 	}
+
 	if i.Name == "" {
 		errs = append(errs, errors.New("name is required"))
 	}
+
 	if err := i.TaxConfig.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("tax config: %w", err))
 	}
@@ -1177,30 +1323,39 @@ func (i customCurrencyCreditPurchaseInput) Validate() error {
 	if i.Namespace == "" {
 		errs = append(errs, errors.New("namespace is required"))
 	}
+
 	if err := i.Customer.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
+
 	if i.Customer.Namespace != i.Namespace {
 		errs = append(errs, errors.New("customer namespace must match input namespace"))
 	}
+
 	if err := i.Currency.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("currency: %w", err))
 	}
+
 	if !i.Currency.IsCustom() {
 		errs = append(errs, errors.New("currency must be custom"))
 	}
+
 	if !i.Amount.IsPositive() {
 		errs = append(errs, errors.New("amount must be positive"))
 	}
+
 	if i.At.IsZero() {
 		errs = append(errs, errors.New("at is required"))
 	}
+
 	if i.Name == "" {
 		errs = append(errs, errors.New("name is required"))
 	}
+
 	if err := i.Settlement.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("settlement: %w", err))
 	}
+
 	if i.Filters.Version != 0 || !i.Filters.IsEmpty() {
 		if err := i.Filters.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("filters: %w", err))
@@ -1264,23 +1419,29 @@ func (i settledFiatCreditPurchaseInput) Validate() error {
 	if i.Namespace == "" {
 		errs = append(errs, errors.New("namespace is required"))
 	}
+
 	if err := i.Customer.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
+
 	if i.Customer.Namespace != i.Namespace {
 		errs = append(errs, errors.New("customer namespace must match input namespace"))
 	}
+
 	if !i.Amount.IsPositive() {
 		errs = append(errs, errors.New("amount must be positive"))
 	}
+
 	if i.At.IsZero() {
 		errs = append(errs, errors.New("at is required"))
 	}
+
 	if i.Filters.Version != 0 || !i.Filters.IsEmpty() {
 		if err := i.Filters.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("filters: %w", err))
 		}
 	}
+
 	if err := i.TaxConfig.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("tax config: %w", err))
 	}

@@ -2,11 +2,12 @@ package common
 
 import (
 	"log/slog"
+	"maps"
 	"net/http"
 
 	"github.com/google/wire"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1 "github.com/openmeterio/openmeter/api"
 	"github.com/openmeterio/openmeter/app/config"
 	"github.com/openmeterio/openmeter/openmeter/namespace/namespacedriver"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
@@ -17,7 +18,7 @@ var FFX = wire.NewSet(
 	ffx.NewContextService,
 )
 
-type FFXConfigContextMiddleware api.MiddlewareFunc
+type FFXConfigContextMiddleware apiv1.MiddlewareFunc
 
 // NewFFXConfigContextMiddleware creates a middleware hook that sets the feature flag access context on the request context.
 // This hook MUST register after any session authentication step so user namespaces are available.
@@ -27,16 +28,28 @@ func NewFFXConfigContextMiddleware(
 	logger *slog.Logger,
 ) FFXConfigContextMiddleware {
 	return func(next http.Handler) http.Handler {
-		accessMap := make(map[string]ffx.AccessConfig)
-		for _, ns := range subsConfig.MultiSubscriptionNamespaces {
-			acc := make(ffx.AccessConfig)
-			acc[subscription.MultiSubscriptionEnabledFF] = true
-
-			accessMap[ns] = acc
+		namespacesByFeature := map[ffx.Feature][]string{
+			subscription.MultiSubscriptionEnabledFF: subsConfig.MultiSubscriptionNamespaces,
+			subscription.BillingStartsAtEnabledFF:   subsConfig.BillingStartsAtNamespaces,
 		}
 
-		noAccess := make(ffx.AccessConfig)
-		noAccess[subscription.MultiSubscriptionEnabledFF] = false
+		// Looking up a feature that is missing from the access config is an error,
+		// so every namespace gets a value for every feature.
+		noAccess := make(ffx.AccessConfig, len(namespacesByFeature))
+		for feature := range namespacesByFeature {
+			noAccess[feature] = false
+		}
+
+		accessMap := make(map[string]ffx.AccessConfig)
+		for feature, namespaces := range namespacesByFeature {
+			for _, ns := range namespaces {
+				if _, ok := accessMap[ns]; !ok {
+					accessMap[ns] = maps.Clone(noAccess)
+				}
+
+				accessMap[ns][feature] = true
+			}
+		}
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()

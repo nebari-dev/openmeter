@@ -7,9 +7,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/app"
@@ -21,8 +21,8 @@ import (
 // ListAppsHandler is a handler for listing apps
 type (
 	ListAppsRequest  = app.ListAppInput
-	ListAppsResponse = api.AppPagePaginatedResponse
-	ListAppsParams   = api.ListAppsParams
+	ListAppsResponse = apiv3models.AppPagePaginatedResponse
+	ListAppsParams   = apiv3models.ListAppsParams
 	ListAppsHandler  httptransport.HandlerWithArgs[ListAppsRequest, ListAppsResponse, ListAppsParams]
 )
 
@@ -66,6 +66,7 @@ func (h *handler) ListApps() ListAppsHandler {
 						{Field: "filter[id]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.ID = id
 
 				name, err := filters.FromAPIFilterString(params.Filter.Name)
@@ -74,6 +75,7 @@ func (h *handler) ListApps() ListAppsHandler {
 						{Field: "filter[name]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Name = name
 
 				appType, err := filters.FromAPIFilterStringExact(params.Filter.Type)
@@ -82,6 +84,7 @@ func (h *handler) ListApps() ListAppsHandler {
 						{Field: "filter[type]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Type = appType
 
 				status, err := filters.FromAPIFilterStringExact(params.Filter.Status)
@@ -90,6 +93,7 @@ func (h *handler) ListApps() ListAppsHandler {
 						{Field: "filter[status]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Status = status
 			}
 
@@ -104,6 +108,7 @@ func (h *handler) ListApps() ListAppsHandler {
 						},
 					})
 				}
+
 				req.OrderBy = app.AppOrderBy(sort.Field)
 				req.Order = sort.Order.ToSortxOrder()
 			}

@@ -111,6 +111,7 @@ func (r RequireFlowDirectionRule) Validate(tx TxView) error {
 			if allEntriesPositive(fromEntries) && allEntriesNegative(toEntries) {
 				return nil
 			}
+
 			return ledger.ErrRoutingRuleViolated.WithAttrs(models.Attributes{
 				"reason":       "invalid_flow_direction",
 				"account_type": r.From,
@@ -125,6 +126,7 @@ func (r RequireFlowDirectionRule) Validate(tx TxView) error {
 			if allEntriesPositive(fromEntries) && allEntriesNegative(toEntries) {
 				return nil
 			}
+
 			return ledger.ErrRoutingRuleViolated.WithAttrs(models.Attributes{
 				"reason":       "invalid_flow_direction",
 				"account_type": r.To,
@@ -302,8 +304,12 @@ func (r RequireReceivableAuthorizationStageRule) Validate(tx TxView) error {
 		})
 	}
 
-	if allEntriesHaveAuthorizationStatus(negativeEntries, ledger.TransactionAuthorizationStatusAuthorized) &&
-		allEntriesHaveAuthorizationStatus(positiveEntries, ledger.TransactionAuthorizationStatusOpen) {
+	forward := allEntriesHaveAuthorizationStatus(negativeEntries, ledger.TransactionAuthorizationStatusAuthorized) &&
+		allEntriesHaveAuthorizationStatus(positiveEntries, ledger.TransactionAuthorizationStatusOpen)
+	reversal := allEntriesHaveAuthorizationStatus(negativeEntries, ledger.TransactionAuthorizationStatusOpen) &&
+		allEntriesHaveAuthorizationStatus(positiveEntries, ledger.TransactionAuthorizationStatusAuthorized) &&
+		allEntriesCorrectOriginals(tx.EntriesOf(ledger.AccountTypeCustomerReceivable))
+	if forward || reversal {
 		return requireMatchingRouteFields(
 			negativeEntries,
 			positiveEntries,
@@ -314,6 +320,7 @@ func (r RequireReceivableAuthorizationStageRule) Validate(tx TxView) error {
 				RouteFieldTaxCode,
 				RouteFieldFilters,
 				RouteFieldCostBasis,
+				RouteFieldCostBasisCurrency,
 				RouteFieldCreditPriority,
 			},
 		)
@@ -342,6 +349,17 @@ func (r RequireReceivableAuthorizationStageRule) Validate(tx TxView) error {
 		"reason":       "unsupported_receivable_same_account_transition",
 		"account_type": ledger.AccountTypeCustomerReceivable,
 	})
+}
+
+func allEntriesCorrectOriginals(entries []EntryView) bool {
+	for _, entry := range entries {
+		_, identity, err := ledger.EntryIdentityKeyText(entry.Entry().IdentityKey()).Parse()
+		if err != nil || identity.CorrectionSource == nil {
+			return false
+		}
+	}
+
+	return true
 }
 
 type RequireAccruedCostBasisTranslationRule struct{}
@@ -476,6 +494,7 @@ func requireMatchingRouteFields(leftEntries, rightEntries []EntryView, leftType,
 		if err != nil {
 			return err
 		}
+
 		if !matched {
 			return ledger.ErrRoutingRuleViolated.WithAttrs(models.Attributes{
 				"reason":     "route_field_mismatch",
@@ -491,6 +510,7 @@ func requireMatchingRouteFields(leftEntries, rightEntries []EntryView, leftType,
 		if err != nil {
 			return err
 		}
+
 		if !matched {
 			return ledger.ErrRoutingRuleViolated.WithAttrs(models.Attributes{
 				"reason":     "route_field_mismatch",
@@ -512,11 +532,13 @@ func hasMatchingRouteFields(entry EntryView, candidates []EntryView, fields []Ro
 			if err != nil {
 				return false, err
 			}
+
 			if !same {
 				matches = false
 				break
 			}
 		}
+
 		if matches {
 			return true, nil
 		}

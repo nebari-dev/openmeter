@@ -126,6 +126,8 @@ func appendOrSumDetailedLineByPerUnitAmount(lines usagebased.DetailedLines, line
 
 		lines[idx].Quantity = lines[idx].Quantity.Add(line.Quantity)
 		lines[idx].Totals = lines[idx].Totals.Add(line.Totals)
+		lines[idx].AmountDiscounts = lines[idx].AmountDiscounts.Add(line.AmountDiscounts)
+
 		return lines
 	}
 
@@ -213,8 +215,10 @@ func subtractDetailedLinesWithSameKey(
 		}
 
 		line := previousLine.Clone()
+		line.ID = ""
 		line.Quantity = line.Quantity.Neg()
 		line.Totals = line.Totals.Neg()
+		line.AmountDiscounts = line.AmountDiscounts.Neg()
 		childUniqueReferenceID, err := generator.PreviousOnlyReversal(previousLine)
 		if err != nil {
 			return nil, fmt.Errorf("previous only reversal child unique reference id: %w", err)
@@ -264,6 +268,7 @@ func subtractDetailedLine(current, previous usagebased.DetailedLine) (usagebased
 	line := current.Clone()
 	line.Quantity = line.Quantity.Sub(previous.Quantity)
 	line.Totals = line.Totals.Sub(previous.Totals)
+	line.AmountDiscounts = line.AmountDiscounts.Sub(previous.AmountDiscounts)
 
 	return line, !isZeroDetailedLine(line)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/samber/lo"
 	"github.com/stripe/stripe-go/v80"
@@ -56,10 +57,14 @@ func (c *stripeAppClient) CreateInvoice(ctx context.Context, input CreateInvoice
 	// See: https://docs.stripe.com/api/idempotent_requests
 	// Stripe’s idempotency works by saving the resulting status code and body of the first request made for any given idempotency key,
 	// regardless of whether it succeeds or fails. Subsequent requests with the same key return the same result, including 500 errors.
-	params.SetIdempotencyKey(fmt.Sprintf("invoice-create-%s", input.InvoiceID))
+	params.SetIdempotencyKey(input.IdempotencyKey())
 
 	invoice, err := c.client.Invoices.New(params)
 	if err != nil {
+		if _, ok := err.(*stripe.Error); ok {
+			return nil, NewStripeInvoiceCreateRejectedError(c.providerError(err))
+		}
+
 		return nil, c.providerError(err)
 	}
 
@@ -96,6 +101,16 @@ func (c *stripeAppClient) DeleteInvoice(ctx context.Context, input DeleteInvoice
 
 	_, err := c.client.Invoices.Del(input.StripeInvoiceID, nil)
 	if err != nil {
+		// Already gone in Stripe, e.g. a retry after the first delete succeeded but our transaction rolled back.
+		if stripeErr, ok := err.(*stripe.Error); ok && stripeErr.HTTPStatusCode == http.StatusNotFound {
+			c.logger.WarnContext(ctx, "stripe invoice not found on delete, treating it as deleted",
+				"stripe_invoice_id", input.StripeInvoiceID,
+				"app_id", c.appID.ID,
+			)
+
+			return nil
+		}
+
 		return c.providerError(err)
 	}
 
@@ -131,6 +146,10 @@ func (c *stripeAppClient) GetInvoice(ctx context.Context, input GetInvoiceInput)
 
 	invoice, err := c.client.Invoices.Get(input.StripeInvoiceID, nil)
 	if err != nil {
+		if stripeErr, ok := err.(*stripe.Error); ok && stripeErr.HTTPStatusCode == http.StatusNotFound {
+			return nil, NewStripeInvoiceNotFoundError(c.providerError(err))
+		}
+
 		return nil, c.providerError(err)
 	}
 
@@ -139,9 +158,11 @@ func (c *stripeAppClient) GetInvoice(ctx context.Context, input GetInvoiceInput)
 
 // CreateInvoiceInput is the input for creating a new invoice in Stripe.
 type CreateInvoiceInput struct {
-	AppID                        app.AppID
-	CustomerID                   customer.CustomerID
-	InvoiceID                    string
+	AppID      app.AppID
+	CustomerID customer.CustomerID
+	InvoiceID  string
+	// Generation counts how many times the Stripe invoice of the invoice had to be given up.
+	Generation                   int
 	AutomaticTaxEnabled          bool
 	CollectionMethod             billing.CollectionMethod
 	Currency                     currencyx.FiatCode
@@ -149,6 +170,18 @@ type CreateInvoiceInput struct {
 	StatementDescriptor          *string
 	StripeCustomerID             string
 	StripeDefaultPaymentMethodID *string
+}
+
+// IdempotencyKey identifies the create request towards Stripe, which replays the first response
+// it stored for a key on every later request with the same key. A new generation gives a new key.
+func (i CreateInvoiceInput) IdempotencyKey() string {
+	// Generation 0 keeps the key used before generations existed, so create requests in flight
+	// during a deploy are still recognized by Stripe.
+	if i.Generation == 0 {
+		return fmt.Sprintf("invoice-create-%s", i.InvoiceID)
+	}
+
+	return fmt.Sprintf("invoice-create-%s-%d", i.InvoiceID, i.Generation)
 }
 
 func (i CreateInvoiceInput) Validate() error {
@@ -164,6 +197,10 @@ func (i CreateInvoiceInput) Validate() error {
 
 	if i.InvoiceID == "" {
 		errs = append(errs, errors.New("invoice id is required"))
+	}
+
+	if i.Generation < 0 {
+		errs = append(errs, errors.New("generation cannot be negative"))
 	}
 
 	if i.CollectionMethod == "" {

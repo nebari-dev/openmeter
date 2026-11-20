@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.23@sha256:d9e2f2f07b10cc922da3e80e035c3058810b328d5aef82d2c63680967c5e2ec9 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.23@sha256:146e3b9c7c1e2ec3d3f5348c8a686151a75e1976e50efac9fc022ebe446a9a82 AS builder
 
 RUN apk add --update --no-cache ca-certificates make git curl
 
@@ -29,15 +29,17 @@ ARG VERSION
 
 COPY --link . .
 
-RUN chmod +x entrypoint.sh
-
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/go/cache \
     go build -C ./collector -ldflags "-X main.version=${VERSION}" -o /usr/local/bin/benthos ./cmd
 
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
-RUN apk add --update --no-cache ca-certificates tzdata bash
+RUN apk add --update --no-cache ca-certificates tzdata bash \
+    && addgroup -S -g 10001 openmeter \
+    && adduser -S -D -H -u 10001 -G openmeter openmeter \
+    && mkdir -p /var/run/openmeter-ca /var/lib/collector \
+    && chown openmeter:openmeter /var/run/openmeter-ca /var/lib/collector
 
 SHELL ["/bin/bash", "-c"]
 
@@ -49,6 +51,8 @@ COPY cloudevents.spec.json /etc/benthos/
 COPY collector/benthos/presets /etc/benthos/presets
 
 COPY --link --from=builder /usr/local/bin/benthos /usr/local/bin/
-COPY --link --from=builder /src/entrypoint.sh /entrypoint.sh
+COPY --link --chmod=755 prepare-ca-bundle.sh /usr/local/bin/prepare-ca-bundle
 
-ENTRYPOINT ["/entrypoint.sh", "/usr/local/bin/benthos"]
+USER 10001:10001
+
+ENTRYPOINT ["/usr/local/bin/benthos"]

@@ -2,28 +2,37 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/invopop/gobl/currency"
+	"github.com/lib/pq"
+	"github.com/oklog/ulid/v2"
 	"github.com/samber/lo"
 	"github.com/samber/mo"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/openmeterio/openmeter/openmeter/app"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
+	periodicreconciler "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/reconciler"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
+	dbsubscription "github.com/openmeterio/openmeter/openmeter/ent/db/subscription"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
 	productcatalogsubscription "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription"
 	"github.com/openmeterio/openmeter/openmeter/streaming"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	"github.com/openmeterio/openmeter/openmeter/subscription/patch"
+	subscriptionrepo "github.com/openmeterio/openmeter/openmeter/subscription/repo"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
+	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
@@ -41,6 +50,771 @@ func TestSubscriptionHandlerScenarios(t *testing.T) {
 	suite.Run(t, new(SubscriptionHandlerTestSuite))
 }
 
+type pendingLinesErrorBillingService struct {
+	billing.Service
+	err error
+}
+
+func (s pendingLinesErrorBillingService) InvoicePendingLines(context.Context, billing.InvoicePendingLinesInput, ...billing.InvoicePendingLinesOption) ([]billing.StandardInvoice, error) {
+	return nil, s.err
+}
+
+type failingDeletionSyncStateAdapter struct {
+	subscriptionsync.Adapter
+	err error
+}
+
+func (a failingDeletionSyncStateAdapter) RecordSyncResult(context.Context, subscriptionsync.RecordSyncResultInput) error {
+	return a.err
+}
+
+func (s *SubscriptionHandlerTestSuite) createScheduledSubscriptionWithBillingLines() (models.NamespacedID, billing.GatheringInvoice) {
+	s.T().Helper()
+	ctx := s.T().Context()
+	start := clock.Now().Add(24 * time.Hour)
+
+	view := s.createSubscriptionFromPlanAt(plan.CreatePlanInput{
+		NamespacedModel: models.NamespacedModel{Namespace: s.Namespace},
+		Plan: productcatalog.Plan{
+			PlanMeta: productcatalog.PlanMeta{
+				Name:           "Deletion cleanup",
+				Key:            "deletion-cleanup",
+				Version:        1,
+				Currency:       currencies.NewCurrencyReference(currencyx.Code(currency.USD)),
+				BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+			},
+			Phases: []productcatalog.Phase{
+				{
+					PhaseMeta: s.phaseMeta("default", ""),
+					RateCards: productcatalog.RateCards{
+						&productcatalog.UsageBasedRateCard{
+							RateCardMeta: productcatalog.RateCardMeta{
+								Key:     s.APIRequestsTotalFeature.Key,
+								Name:    s.APIRequestsTotalFeature.Key,
+								Feature: productcatalog.NewFeatureReference(nil, lo.ToPtr(s.APIRequestsTotalFeature.Key)),
+								Price: productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+									Amount: alpacadecimal.NewFromInt(1),
+								}),
+							},
+							BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+						},
+					},
+				},
+			},
+		},
+	}, start)
+	subscriptionID := view.Subscription.NamespacedID
+	s.Require().NoError(s.Service.SyncByID(ctx, subscriptionID, start.Add(time.Minute)))
+	invoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+	s.Require().NotEmpty(invoice.Lines.OrEmpty())
+
+	return subscriptionID, invoice
+}
+
+func (s *SubscriptionHandlerTestSuite) createSubscriptionForRevisionChange(activeFrom time.Time) subscription.SubscriptionView {
+	s.T().Helper()
+	// Each command case owns its customer so its subscription cannot overlap another case.
+	s.Customer = s.CreateTestCustomer(s.Namespace, ulid.Make().String())
+	if activeFrom.IsZero() {
+		activeFrom = clock.Now().Add(24 * time.Hour)
+	}
+
+	return s.createSubscriptionFromPlanAt(plan.CreatePlanInput{
+		NamespacedModel: models.NamespacedModel{Namespace: s.Namespace},
+		Plan: productcatalog.Plan{
+			PlanMeta: productcatalog.PlanMeta{
+				Name:           "Subscription revision hooks",
+				Key:            ulid.Make().String(),
+				Version:        1,
+				Currency:       currencies.NewCurrencyReference(currencyx.Code(currency.USD)),
+				BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+				SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+			},
+			Phases: []productcatalog.Phase{{
+				PhaseMeta: productcatalog.PhaseMeta{Key: "default", Name: "Default phase"},
+				RateCards: productcatalog.RateCards{
+					&productcatalog.FlatFeeRateCard{
+						RateCardMeta: productcatalog.RateCardMeta{
+							Key:  "flat-fee",
+							Name: "Flat fee",
+							Price: productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+								Amount:      alpacadecimal.NewFromInt(1),
+								PaymentTerm: productcatalog.InAdvancePaymentTerm,
+							}),
+						},
+						BillingCadence: lo.ToPtr(datetime.MustParseDuration(s.T(), "P1M")),
+					},
+					&productcatalog.UsageBasedRateCard{
+						RateCardMeta: productcatalog.RateCardMeta{
+							Key:     s.APIRequestsTotalFeature.Key,
+							Name:    "Usage",
+							Feature: productcatalog.NewFeatureReference(nil, lo.ToPtr(s.APIRequestsTotalFeature.Key)),
+							Price:   productcatalog.NewPriceFrom(productcatalog.UnitPrice{Amount: alpacadecimal.NewFromInt(1)}),
+						},
+						BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+					},
+				},
+			}},
+		},
+	}, activeFrom)
+}
+
+type subscriptionRevisionChangeCase struct {
+	name       string
+	activeFrom time.Time
+	prepare    func(subscription.SubscriptionView)
+	mutate     func(subscription.SubscriptionView) error
+}
+
+// Exercise the public commands so the tests cover both hook registration and
+// the transaction that owns each subscription change.
+func (s *SubscriptionHandlerTestSuite) subscriptionRevisionChanges() []subscriptionRevisionChangeCase {
+	return []subscriptionRevisionChangeCase{
+		{
+			name:       "update",
+			activeFrom: clock.Now(),
+			mutate: func(view subscription.SubscriptionView) error {
+				// Load a separate spec so changing the fixture cannot alter before assertions.
+				currentView, err := s.SubscriptionService.GetView(s.T().Context(), view.Subscription.NamespacedID)
+				if err != nil {
+					return err
+				}
+
+				spec := currentView.AsSpec()
+				spec.Name = "Updated subscription"
+				_, err = s.SubscriptionService.Update(s.T().Context(), view.Subscription.NamespacedID, spec)
+
+				return err
+			},
+		},
+		{
+			name:       "cancel",
+			activeFrom: clock.Now(),
+			mutate: func(view subscription.SubscriptionView) error {
+				_, err := s.SubscriptionService.Cancel(s.T().Context(), view.Subscription.NamespacedID, subscription.Timing{
+					Enum: lo.ToPtr(subscription.TimingNextBillingCycle),
+				})
+
+				return err
+			},
+		},
+		{
+			name:       "continue",
+			activeFrom: clock.Now(),
+			prepare: func(view subscription.SubscriptionView) {
+				_, err := s.SubscriptionService.Cancel(s.T().Context(), view.Subscription.NamespacedID, subscription.Timing{
+					Enum: lo.ToPtr(subscription.TimingNextBillingCycle),
+				})
+				s.Require().NoError(err)
+			},
+			mutate: func(view subscription.SubscriptionView) error {
+				_, err := s.SubscriptionService.Continue(s.T().Context(), view.Subscription.NamespacedID)
+				return err
+			},
+		},
+		{
+			name: "delete scheduled subscription",
+			mutate: func(view subscription.SubscriptionView) error {
+				return s.SubscriptionService.Delete(s.T().Context(), view.Subscription.NamespacedID)
+			},
+		},
+	}
+}
+
+func (s *SubscriptionHandlerTestSuite) TestSubscriptionCreationInitializesRevision() {
+	// Given a customer and plan, when the workflow creates a subscription.
+	view := s.createSubscriptionForRevisionChange(time.Time{})
+
+	// Then the subscription transaction also creates a marker, without claiming a sync result.
+	state := s.getSyncState(view.Subscription.NamespacedID)
+	s.Equal(subscriptionsync.SyncStateStateNew, state.LastSuccessState)
+	s.Nil(state.LastSuccessAt)
+	s.NotEmpty(state.CurrentSubsRevision)
+	s.Equal(state.CurrentSubsRevision, state.LastSyncedSubsRevision)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestSubscriptionChangesAdvanceRevision() {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	for _, tc := range s.subscriptionRevisionChanges() {
+		s.Run(tc.name, func() {
+			// Given an existing subscription and its last recorded sync result.
+			view := s.createSubscriptionForRevisionChange(tc.activeFrom)
+			if tc.prepare != nil {
+				tc.prepare(view)
+			}
+
+			s.Require().NoError(s.DBClient.SubscriptionSyncState.Update().
+				Where(subscriptionsyncstate.SubscriptionID(view.Subscription.ID)).
+				SetLastSuccessState(subscriptionsync.SyncStateStateTooOld).
+				SetLastSuccessAt(now.Add(-time.Hour)).Exec(s.T().Context()))
+			before := s.getSyncState(view.Subscription.NamespacedID)
+
+			// When the command commits, the old result remains and current advances.
+			s.Require().NoError(tc.mutate(view))
+			after := s.getSyncState(view.Subscription.NamespacedID)
+			s.NotEqual(before.CurrentSubsRevision, after.CurrentSubsRevision)
+			s.Equal(before.LastSyncedSubsRevision, after.LastSyncedSubsRevision)
+			s.Equal(before.LastSuccessState, after.LastSuccessState)
+			s.Equal(before.LastSuccessAt, after.LastSuccessAt)
+			s.Equal(before.ID, after.ID)
+			s.Equal(before.CreatedAt, after.CreatedAt)
+		})
+	}
+}
+
+func (s *SubscriptionHandlerTestSuite) TestSubscriptionChangesInitializeMissingRevisionState() {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	for _, tc := range s.subscriptionRevisionChanges() {
+		s.Run(tc.name, func() {
+			// Given a subscription created before hooks initialized sync state.
+			view := s.createSubscriptionForRevisionChange(tc.activeFrom)
+			if tc.prepare != nil {
+				tc.prepare(view)
+			}
+
+			_, err := s.DBClient.SubscriptionSyncState.Delete().
+				Where(subscriptionsyncstate.SubscriptionID(view.Subscription.ID)).Exec(s.T().Context())
+			s.Require().NoError(err)
+
+			// When any command commits, it initializes state in the same transaction.
+			s.Require().NoError(tc.mutate(view))
+			state := s.getSyncState(view.Subscription.NamespacedID)
+			s.Equal(subscriptionsync.SyncStateStateNew, state.LastSuccessState)
+			s.Nil(state.LastSuccessAt)
+			s.NotEmpty(state.CurrentSubsRevision)
+			s.Equal(state.CurrentSubsRevision, state.LastSyncedSubsRevision)
+		})
+	}
+}
+
+func (s *SubscriptionHandlerTestSuite) TestSubscriptionRevisionFailureRollsBackCommand() {
+	cleanupCtx := s.T().Context()
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	for _, tc := range s.subscriptionRevisionChanges() {
+		s.Run(tc.name, func() {
+			// Given a real command whose revision write will fail in PostgreSQL.
+			ctx := s.T().Context()
+			view := s.createSubscriptionForRevisionChange(tc.activeFrom)
+			if tc.prepare != nil {
+				tc.prepare(view)
+			}
+
+			beforeView, err := s.SubscriptionService.GetView(ctx, view.Subscription.NamespacedID)
+			s.Require().NoError(err)
+			before := s.getSyncState(view.Subscription.NamespacedID)
+			const constraintName = "test_subscription_revision_change_failure"
+			_, err = s.TestDB.PGDriver.DB().ExecContext(ctx, fmt.Sprintf(
+				"ALTER TABLE subscription_sync_states_v2 ADD CONSTRAINT %s CHECK (subscription_id <> %s OR current_subs_revision = %s)",
+				pq.QuoteIdentifier(constraintName), pq.QuoteLiteral(view.Subscription.ID), pq.QuoteLiteral(before.CurrentSubsRevision)))
+			s.Require().NoError(err)
+			dropConstraint := fmt.Sprintf("ALTER TABLE subscription_sync_states_v2 DROP CONSTRAINT IF EXISTS %s", pq.QuoteIdentifier(constraintName))
+			s.T().Cleanup(func() {
+				_, cleanupErr := s.TestDB.PGDriver.DB().ExecContext(cleanupCtx, dropConstraint)
+				s.NoError(cleanupErr)
+			})
+
+			// When the hook fails, neither subscription nor revision may commit.
+			s.Require().ErrorContains(tc.mutate(view), constraintName)
+			afterView, err := s.SubscriptionService.GetView(ctx, view.Subscription.NamespacedID)
+			s.Require().NoError(err)
+			s.Equal(beforeView, afterView)
+			s.Equal(before, s.getSyncState(view.Subscription.NamespacedID))
+		})
+	}
+}
+
+func (s *SubscriptionHandlerTestSuite) TestSubscriptionCreationRevisionFailureRollsBack() {
+	ctx := s.T().Context()
+	// Given a valid spec and a customer with no subscription.
+	view := s.createSubscriptionForRevisionChange(time.Time{})
+	newCustomer, err := s.CustomerService.CreateCustomer(ctx, customer.CreateCustomerInput{
+		Namespace: s.Namespace,
+		CustomerMutate: customer.CustomerMutate{
+			Key:            lo.ToPtr("revision-rollback-" + view.Subscription.ID),
+			Name:           "Subscription creation rollback",
+			PrimaryEmail:   lo.ToPtr("test@example.com"),
+			BillingAddress: &models.Address{Country: lo.ToPtr(models.CountryCode("US"))},
+		},
+	})
+	s.Require().NoError(err)
+	currentView, err := s.SubscriptionService.GetView(ctx, view.Subscription.NamespacedID)
+	s.Require().NoError(err)
+	spec := currentView.AsSpec()
+	spec.CustomerId = newCustomer.ID
+
+	// Keep the template valid while rejecting new rows in this test's namespace.
+	s.Require().NoError(s.DBClient.SubscriptionSyncState.Update().
+		Where(subscriptionsyncstate.SubscriptionID(view.Subscription.ID)).
+		SetLastSuccessState(subscriptionsync.SyncStateStateTooOld).
+		SetLastSuccessAt(clock.Now()).Exec(ctx))
+	before := s.getSyncState(view.Subscription.NamespacedID)
+	const constraintName = "test_subscription_revision_creation_failure"
+	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx, fmt.Sprintf(
+		"ALTER TABLE subscription_sync_states_v2 ADD CONSTRAINT %s CHECK (namespace <> %s OR last_success_state <> 'new')",
+		pq.QuoteIdentifier(constraintName), pq.QuoteLiteral(s.Namespace)))
+	s.Require().NoError(err)
+	defer func() {
+		_, cleanupErr := s.TestDB.PGDriver.DB().ExecContext(ctx, fmt.Sprintf(
+			"ALTER TABLE subscription_sync_states_v2 DROP CONSTRAINT IF EXISTS %s", pq.QuoteIdentifier(constraintName)))
+		s.NoError(cleanupErr)
+	}()
+
+	// When the hook cannot initialize state, creation rolls back the whole subscription.
+	_, err = s.SubscriptionService.Create(ctx, s.Namespace, spec)
+	s.Require().ErrorContains(err, constraintName)
+	count, err := s.DBClient.Subscription.Query().Where(dbsubscription.CustomerID(newCustomer.ID)).Count(ctx)
+	s.Require().NoError(err)
+	s.Zero(count)
+	s.Equal(before, s.getSyncState(view.Subscription.NamespacedID))
+}
+
+func (s *SubscriptionHandlerTestSuite) TestDeletedSubscriptionCleanupDryRun() {
+	ctx := s.T().Context()
+	now := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	// given: a deleted subscription with generated billing lines
+	subscriptionID, invoice := s.createScheduledSubscriptionWithBillingLines()
+	s.Require().NoError(s.SubscriptionService.Delete(ctx, subscriptionID))
+	statesBefore := s.getSyncState(subscriptionID)
+
+	// when: deletion cleanup is planned as a dry run
+	s.Require().NoError(s.Service.SyncByID(ctx, subscriptionID, now, subscriptionsync.EnableDryRun()))
+
+	// then: the lines remain unchanged, with no completion record
+	s.Equal(invoice.Lines.OrEmpty(), s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID).Lines.OrEmpty())
+	states, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{subscriptionID})
+	s.Require().NoError(err)
+	s.Require().Len(states, 1)
+	s.Equal(statesBefore, states[0])
+}
+
+func (s *SubscriptionHandlerTestSuite) TestDeletedSubscriptionCleanupRollback() {
+	ctx := s.T().Context()
+	now := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	// given: a deleted subscription whose billing lines still need cleanup
+	subscriptionID, invoice := s.createScheduledSubscriptionWithBillingLines()
+	s.Require().NoError(s.SubscriptionService.Delete(ctx, subscriptionID))
+	statesBefore := s.getSyncState(subscriptionID)
+	persistErr := errors.New("cannot record deletion cleanup")
+	failingService := *s.Service
+	failingService.subscriptionSyncAdapter = failingDeletionSyncStateAdapter{Adapter: s.Adapter, err: persistErr}
+
+	// when: billing cleanup runs but its completion record cannot be saved
+	s.Require().ErrorIs(failingService.SyncByID(ctx, subscriptionID, now), persistErr)
+
+	// then: billing changes roll back, and cleanup remains eligible
+	s.Equal(invoice.Lines.OrEmpty(), s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID).Lines.OrEmpty())
+	states, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{subscriptionID})
+	s.Require().NoError(err)
+	s.Require().Len(states, 1)
+	s.Equal(statesBefore, states[0])
+	candidates, err := s.Service.ListDeletedSubscriptionsToReconcile(ctx, subscriptionsync.ListDeletedSubscriptionsToReconcileInput{
+		Namespaces: []string{s.Namespace},
+		Limit:      10,
+	})
+	s.Require().NoError(err)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, candidates.Items)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestDeletedSubscriptionCleanupRecordsSuccess() {
+	ctx := s.T().Context()
+	now := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	// given: a deleted subscription with generated billing lines
+	subscriptionID, _ := s.createScheduledSubscriptionWithBillingLines()
+	s.Require().NoError(s.SubscriptionService.Delete(ctx, subscriptionID))
+
+	// when: deletion cleanup successfully reconciles the empty target
+	s.Require().NoError(s.Service.SyncByID(ctx, subscriptionID, now))
+
+	// then: its lines are removed and the completion record excludes it from periodic cleanup
+	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+	states, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{subscriptionID})
+	s.Require().NoError(err)
+	s.Require().Len(states, 1)
+	s.Equal(subscriptionID, states[0].SubscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateSubscriptionDeleted, states[0].LastSuccessState)
+	s.Equal(lo.ToPtr(now), states[0].LastSuccessAt)
+	s.NotEmpty(states[0].CurrentSubsRevision)
+	s.Equal(states[0].CurrentSubsRevision, states[0].LastSyncedSubsRevision)
+	s.NoError(states[0].Validate())
+	candidates, err := s.Service.ListDeletedSubscriptionsToReconcile(ctx, subscriptionsync.ListDeletedSubscriptionsToReconcileInput{
+		Namespaces: []string{s.Namespace},
+		Limit:      10,
+	})
+	s.Require().NoError(err)
+	s.Empty(candidates.Items)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestDeletedSubscriptionCleanupByPeriodicReconciliation() {
+	ctx := s.T().Context()
+	now := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	// given: a subscription deleted before it started, whose deletion event was never handled
+	subscriptionID, _ := s.createScheduledSubscriptionWithBillingLines()
+	s.Require().NoError(s.SubscriptionService.Delete(ctx, subscriptionID))
+	periodic, err := periodicreconciler.NewReconciler(periodicreconciler.ReconcilerConfig{
+		SubscriptionSync: s.Service,
+		Logger:           s.Service.logger,
+	})
+	s.Require().NoError(err)
+	listInput := periodicreconciler.ReconcilerListSubscriptionsInput{
+		Namespaces: []string{s.Namespace},
+		Lookback:   24 * time.Hour,
+	}
+	pending, err := periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+	// It has not started yet, so the lookback of the regular list does not cover
+	// it, and its billing deadline is still ahead. Only the cleanup query finds it.
+	state := s.getSyncState(subscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateActive, state.LastSuccessState)
+	s.Equal(lo.ToPtr(now), state.LastSuccessAt)
+	s.Require().NotNil(state.NextReconciliationAt)
+	s.True(state.NextReconciliationAt.After(now))
+
+	// when: periodic reconciliation processes the pending cleanup
+	s.Require().NoError(periodic.All(ctx, periodicreconciler.ReconcilerAllInput{
+		ReconcilerListSubscriptionsInput: listInput,
+	}))
+
+	// then: cleanup removes the lines and the subscription is no longer listed
+	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestPeriodicReconciliationFollowsSyncState() {
+	ctx := s.T().Context()
+	createdAt := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(createdAt)
+	defer clock.UnFreeze()
+
+	// given: a synced, running subscription whose service period overlaps the lookback
+	subscriptionID, _ := s.createScheduledSubscriptionWithBillingLines()
+	now := createdAt.Add(25 * time.Hour)
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+	periodic, err := periodicreconciler.NewReconciler(periodicreconciler.ReconcilerConfig{
+		SubscriptionSync: s.Service,
+		Logger:           s.Service.logger,
+	})
+	s.Require().NoError(err)
+	listInput := periodicreconciler.ReconcilerListSubscriptionsInput{
+		Namespaces: []string{s.Namespace},
+		Lookback:   24 * time.Hour,
+	}
+	allInput := periodicreconciler.ReconcilerAllInput{ReconcilerListSubscriptionsInput: listInput}
+
+	// then: it is not listed while its billing deadline is ahead, unless everything is requested
+	pending, err := periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+	s.Require().NoError(periodic.All(ctx, allInput))
+	s.Equal(lo.ToPtr(createdAt), s.getSyncState(subscriptionID).LastSuccessAt, "a subscription that is not due must not be synced")
+	forcedInput := listInput
+	forcedInput.ForceSync = true
+	pending, err = periodic.ListSubscriptions(ctx, forcedInput)
+	s.Require().NoError(err)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+
+	// when: the subscription is canceled and the cancellation event is never handled
+	canceled, err := s.SubscriptionService.Cancel(ctx, subscriptionID, subscription.Timing{
+		Enum: lo.ToPtr(subscription.TimingNextBillingCycle),
+	})
+	s.Require().NoError(err)
+	s.Require().NotNil(canceled.ActiveTo)
+
+	// then: the changed revision makes it due before its deadline
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+
+	// when: periodic reconciliation repairs the missed cancellation
+	s.Require().NoError(periodic.All(ctx, allInput))
+
+	// then: the subscription waits for its end
+	state := s.getSyncState(subscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateActive, state.LastSuccessState)
+	s.Equal(canceled.ActiveTo, state.NextReconciliationAt)
+	s.Equal(state.CurrentSubsRevision, state.LastSyncedSubsRevision)
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+
+	// when: the subscription has ended
+	afterEnd := canceled.ActiveTo.Add(time.Hour)
+	clock.FreezeTime(afterEnd)
+	defer clock.UnFreeze()
+
+	// then: the regular list includes its final billing work
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Require().Len(pending, 1)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+
+	// when: the final sync runs
+	s.Require().NoError(periodic.All(ctx, allInput))
+
+	// then: the ended subscription drops out, although the lookback still covers it
+	s.Equal(subscriptionsync.SyncStateStateEnded, s.getSyncState(subscriptionID).LastSuccessState)
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+	pending, err = periodic.ListSubscriptions(ctx, forcedInput)
+	s.Require().NoError(err)
+	s.Len(pending, 1)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestPeriodicReconciliationPicksUpSubscriptionWithoutSyncState() {
+	ctx := s.T().Context()
+	createdAt := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(createdAt)
+	defer clock.UnFreeze()
+
+	// given: a running subscription that predates sync state
+	subscriptionID, invoice := s.createScheduledSubscriptionWithBillingLines()
+	_, err := s.DBClient.SubscriptionSyncState.Delete().
+		Where(subscriptionsyncstate.SubscriptionID(subscriptionID.ID)).Exec(ctx)
+	s.Require().NoError(err)
+	now := createdAt.Add(25 * time.Hour)
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+	periodic, err := periodicreconciler.NewReconciler(periodicreconciler.ReconcilerConfig{
+		SubscriptionSync: s.Service,
+		Logger:           s.Service.logger,
+	})
+	s.Require().NoError(err)
+	listInput := periodicreconciler.ReconcilerListSubscriptionsInput{
+		Namespaces: []string{s.Namespace},
+		Lookback:   24 * time.Hour,
+	}
+	allInput := periodicreconciler.ReconcilerAllInput{ReconcilerListSubscriptionsInput: listInput}
+
+	// then: it is due without any recorded state
+	pending, err := periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+
+	// when: periodic reconciliation syncs it once
+	s.Require().NoError(periodic.All(ctx, allInput))
+
+	// then: the recorded deadline takes over and the existing lines are kept
+	state := s.getSyncState(subscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateActive, state.LastSuccessState)
+	s.Equal(lo.ToPtr(now), state.LastSuccessAt)
+	s.Require().NotNil(state.NextReconciliationAt)
+	s.True(state.NextReconciliationAt.After(now))
+	s.ElementsMatch(
+		lo.Map(invoice.Lines.OrEmpty(), func(line billing.GatheringLine, _ int) string { return line.ID }),
+		lo.Map(s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID).Lines.OrEmpty(), func(line billing.GatheringLine, _ int) string { return line.ID }),
+	)
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+
+	// and: it becomes due again exactly at that deadline
+	clock.FreezeTime(state.NextReconciliationAt.Add(-time.Second))
+	defer clock.UnFreeze()
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+	clock.FreezeTime(*state.NextReconciliationAt)
+	defer clock.UnFreeze()
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestDeletedSubscriptionCleanupAheadOfWorkerClock() {
+	ctx := s.T().Context()
+	createdAt := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(createdAt)
+	defer clock.UnFreeze()
+
+	// given: a subscription deleted while scheduled still has generated gathering lines
+	subscriptionID, _ := s.createScheduledSubscriptionWithBillingLines()
+	s.Require().NoError(s.SubscriptionService.Delete(ctx, subscriptionID))
+	// Exercise an existing record whose service period overlaps the regular list,
+	// but whose deletion timestamp is ahead of the worker clock. The API has no
+	// delayed-delete operation, so seed that timestamp directly.
+	now := createdAt.Add(25 * time.Hour)
+	deletedAt := now.Add(2 * time.Second)
+	s.Require().NoError(s.DBClient.Subscription.UpdateOneID(subscriptionID.ID).SetDeletedAt(deletedAt).Exec(ctx))
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+	periodic, err := periodicreconciler.NewReconciler(periodicreconciler.ReconcilerConfig{
+		SubscriptionSync: s.Service,
+		Logger:           s.Service.logger,
+	})
+	s.Require().NoError(err)
+	listInput := periodicreconciler.ReconcilerListSubscriptionsInput{
+		Namespaces: []string{s.Namespace},
+		Lookback:   24 * time.Hour,
+	}
+
+	// when: periodic reconciliation lists work before the deletion timestamp
+	pending, err := periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+
+	// then: only the cleanup query selects it, although the regular list's lookback covers it too
+	s.Equal([]subscriptionsync.SubscriptionToReconcile{{NamespacedID: subscriptionID, CustomerID: s.Customer.ID}}, pending)
+	stateBefore := s.getSyncState(subscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateActive, stateBefore.LastSuccessState)
+	s.Equal(lo.ToPtr(createdAt), stateBefore.LastSuccessAt)
+	s.NotNil(stateBefore.NextReconciliationAt)
+	s.Require().NoError(periodic.All(ctx, periodicreconciler.ReconcilerAllInput{
+		ReconcilerListSubscriptionsInput: listInput,
+	}))
+	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+	states, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{subscriptionID})
+	s.Require().NoError(err)
+	s.Require().Len(states, 1)
+	s.Equal(subscriptionID, states[0].SubscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateSubscriptionDeleted, states[0].LastSuccessState)
+	s.Equal(lo.ToPtr(now), states[0].LastSuccessAt)
+	s.NotEmpty(states[0].CurrentSubsRevision)
+	s.Equal(states[0].CurrentSubsRevision, states[0].LastSyncedSubsRevision)
+	s.NoError(states[0].Validate())
+	// Completion excludes it from both lists even while DeletedAt is still in the future.
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+
+	// A later poll must not requeue it when the worker clock passes DeletedAt either.
+	clock.FreezeTime(deletedAt.Add(time.Second))
+	defer clock.UnFreeze()
+	pending, err = periodic.ListSubscriptions(ctx, listInput)
+	s.Require().NoError(err)
+	s.Empty(pending)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestDeletedSubscriptionCleanupRepeated() {
+	ctx := s.T().Context()
+	now := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	// given: deletion cleanup already removed the subscription's billing lines
+	subscriptionID, _ := s.createScheduledSubscriptionWithBillingLines()
+	s.Require().NoError(s.SubscriptionService.Delete(ctx, subscriptionID))
+	s.Require().NoError(s.Service.SyncByID(ctx, subscriptionID, now))
+	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+
+	// when: another sync reconciles the now-empty plan
+	later := now.Add(time.Minute)
+	clock.FreezeTime(later)
+	defer clock.UnFreeze()
+	s.Require().NoError(s.Service.SyncByID(ctx, subscriptionID, later))
+
+	// then: the repeated cleanup records its successful completion without recreating lines
+	states, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{subscriptionID})
+	s.Require().NoError(err)
+	s.Require().Len(states, 1)
+	s.Equal(lo.ToPtr(later), states[0].LastSuccessAt)
+	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+}
+
+func (s *SubscriptionHandlerTestSuite) TestInvoicePendingLinesDeferredOutcomes() {
+	unexpectedErr := errors.New("unexpected collection failure")
+	tests := []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "all lines gated", err: fmt.Errorf("wrapped: %w", billing.ValidationError{Err: billing.ErrInvoiceCreateAllLinesGated})},
+		{name: "no billable lines", err: billing.ValidationError{Err: billing.ErrInvoiceCreateNoLines}},
+		{name: "operational failure", err: unexpectedErr, wantErr: unexpectedErr},
+	}
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			billingService := s.Service.billingService
+			s.Service.billingService = pendingLinesErrorBillingService{err: test.err}
+			defer func() {
+				s.Service.billingService = billingService
+			}()
+
+			err := s.Service.invoicePendingLines(s.T().Context(), s.Customer.GetID())
+			s.Require().ErrorIs(err, test.wantErr)
+		})
+	}
+}
+
+func (s *SubscriptionHandlerTestSuite) TestSyncByIDWithLegacyItemCadence() {
+	ctx := s.T().Context()
+	start := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(start)
+	defer clock.UnFreeze()
+	itemKey := s.APIRequestsTotalFeature.Key
+
+	// given: a persisted weekly subscription with a legacy hourly usage item
+	view := s.createSubscriptionFromPlanPhases([]productcatalog.Phase{
+		{
+			PhaseMeta: s.phaseMeta("default", ""),
+			RateCards: productcatalog.RateCards{
+				&productcatalog.UsageBasedRateCard{
+					RateCardMeta: productcatalog.RateCardMeta{
+						Key: itemKey, Name: itemKey,
+						Feature: productcatalog.NewFeatureReference(nil, lo.ToPtr(itemKey)),
+						Price: productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+							Amount: alpacadecimal.NewFromInt(1),
+						}),
+					},
+					BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+				},
+			},
+		},
+	})
+	itemID := view.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem.ID
+	_, err := s.DBClient.SubscriptionItem.UpdateOneID(itemID).SetBillingCadence(datetime.ISODurationString("PT1H")).Save(ctx)
+	s.Require().NoError(err)
+	_, err = s.DBClient.Subscription.UpdateOneID(view.Subscription.ID).SetBillingCadence(datetime.ISODurationString("P1W")).Save(ctx)
+	s.Require().NoError(err)
+
+	// when: billing sync loads the view by ID and resolves its feature
+	asOf := start.Add(time.Minute)
+	s.Require().NoError(s.Service.SyncByID(ctx, view.Subscription.NamespacedID, asOf))
+
+	// then: it generates the hourly periods of the current and the next week and advances sync state
+	invoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+	lines := invoice.Lines.OrEmpty()
+	s.Require().Len(lines, 2*7*24)
+	for _, line := range lines {
+		s.Equal(itemKey, line.FeatureKey)
+		s.Equal(time.Hour, line.ServicePeriod.To.Sub(line.ServicePeriod.From))
+	}
+
+	s.requireActiveDeadline(view.Subscription.NamespacedID, timeutil.ClosedPeriod{
+		From: start.AddDate(0, 0, 7),
+		To:   start.AddDate(0, 0, 14),
+	})
+
+	// and: repeating the sync preserves the generated line identities
+	s.Require().NoError(s.Service.SyncByID(ctx, view.Subscription.NamespacedID, asOf))
+	repeated := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+	s.ElementsMatch(lo.Map(lines, func(line billing.GatheringLine, _ int) string { return line.ID }),
+		lo.Map(repeated.Lines.OrEmpty(), func(line billing.GatheringLine, _ int) string { return line.ID }))
+}
+
 func (s *SubscriptionHandlerTestSuite) TestLegacyBackendCreatesGatheringLineBeforeSurfacingMissingFeature() {
 	ctx := s.testContext()
 	start := s.mustParseTime("2024-01-01T00:00:00Z")
@@ -50,7 +824,7 @@ func (s *SubscriptionHandlerTestSuite) TestLegacyBackendCreatesGatheringLineBefo
 	const missingFeatureKey = "missing-feature"
 	itemKey := s.APIRequestsTotalFeature.Key
 
-	// Given a valid subscription and a stale event view whose usage item references a feature that no longer resolves.
+	// Given a persisted subscription whose usage item references a feature that no longer resolves.
 	subsView := s.createSubscriptionFromPlanPhases([]productcatalog.Phase{
 		{
 			PhaseMeta: s.phaseMeta("first-phase", ""),
@@ -70,30 +844,40 @@ func (s *SubscriptionHandlerTestSuite) TestLegacyBackendCreatesGatheringLineBefo
 		},
 	})
 
-	item := subsView.Phases[0].ItemsByKey[itemKey][0]
-	for _, rateCard := range []productcatalog.RateCard{item.Spec.RateCard, item.SubscriptionItem.RateCard} {
-		s.Require().NoError(rateCard.ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
-			meta.Key = missingFeatureKey
-			meta.Feature = productcatalog.NewFeatureReference(nil, lo.ToPtr(missingFeatureKey))
+	// Persist the unresolved reference so reloading the subscription exercises the
+	// same missing-feature behavior as a previously stored subscription.
+	item := subsView.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem
+	replacement := item.AsEntityInput()
+	replacement.Key = missingFeatureKey
+	replacement.RateCard = item.RateCard.Clone()
+	s.Require().NoError(replacement.RateCard.ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
+		meta.Key = missingFeatureKey
+		meta.Feature = productcatalog.NewFeatureReference(nil, lo.ToPtr(missingFeatureKey))
 
-			return meta, nil
-		}))
-	}
-	item.Feature = nil
-	subsView.Phases[0].ItemsByKey[itemKey][0] = item
+		return meta, nil
+	}))
+	itemRepo := subscriptionrepo.NewSubscriptionItemRepo(s.DBClient)
+	s.Require().NoError(itemRepo.Delete(ctx, item.NamespacedID))
+	_, err := itemRepo.Create(ctx, replacement)
+	s.Require().NoError(err)
 
-	// When the legacy billing backend synchronizes the event view.
-	err := s.Service.SyncByView(ctx, subsView, start.Add(time.Minute))
+	// When the legacy billing backend reloads and synchronizes the subscription.
+	err = s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, start.Add(time.Minute))
 
-	// Then synchronization succeeds and preserves the unresolved feature on a legacy gathering line.
+	// Then synchronization succeeds and preserves the unresolved feature on the legacy
+	// gathering lines of the current and the next month.
 	s.Require().NoError(err)
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	lines := gatheringInvoice.Lines.OrEmpty()
-	s.Require().Len(lines, 1)
-	s.Equal(billing.LineEngineTypeInvoice, lines[0].Engine)
-	s.Equal(missingFeatureKey, lines[0].FeatureKey)
+	s.Require().Len(lines, 2)
+	for _, line := range lines {
+		s.Equal(billing.LineEngineTypeInvoice, line.Engine)
+		s.Equal(missingFeatureKey, line.FeatureKey)
+	}
 
-	// And the unresolved feature is surfaced when the line reaches its first invoice.
+	firstLine := s.mustGetGatheringLineByServicePeriodFrom(lines, start)
+
+	// And the unresolved feature is surfaced when the first month's line reaches its invoice.
 	clock.FreezeTime(start.AddDate(0, 1, 0))
 	invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
 		Customer: s.Customer.GetID(),
@@ -108,7 +892,7 @@ func (s *SubscriptionHandlerTestSuite) TestLegacyBackendCreatesGatheringLineBefo
 	s.Require().True(found)
 	s.Equal(billing.ValidationIssueSeverityCritical, issue.Severity)
 	s.Equal(billing.LineEngineValidationComponent(billing.LineEngineTypeInvoice), issue.Component)
-	s.Equal(fmt.Sprintf("/lines/%s", lines[0].ID), issue.Path)
+	s.Equal(fmt.Sprintf("/lines/%s", firstLine.ID), issue.Path)
 	s.Equal(billing.ErrInvoiceLineFeatureNotFound.Message, issue.Message)
 	s.Equal(missingFeatureKey, issue.Attributes["feature_key"])
 }
@@ -237,7 +1021,7 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 
 	// let's provision the first set of items
 	s.Run("provision first set of items", func() {
-		s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now().AddDate(0, 1, 0)))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now().AddDate(0, 1, 0)))
 
 		invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
 			Namespace:  namespace,
@@ -255,9 +1039,10 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		invoice := s.gatheringInvoice(ctx, namespace, s.Customer.ID)
 		invoiceUpdatedAt := invoice.UpdatedAt
 
-		s.Len(invoice.Lines.OrEmpty(), 1)
+		// the sync covers the first two months of the discounted phase
+		s.Len(invoice.Lines.OrEmpty(), 2)
 
-		line := invoice.Lines.OrEmpty()[0]
+		line := s.mustGetGatheringLineByServicePeriodFrom(invoice.Lines.NonDeletedLines(), s.mustParseTime("2024-02-01T00:00:00Z"))
 		s.Equal(line.Subscription.SubscriptionID, subsView.Subscription.ID)
 		s.Equal(line.Subscription.PhaseID, discountedPhase.SubscriptionPhase.ID)
 		s.Equal(line.Subscription.ItemID, discountedPhase.ItemsByKey[s.APIRequestsTotalFeature.Key][0].SubscriptionItem.ID)
@@ -269,9 +1054,18 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		// 1 month free tier + in arrears billing with 1 month cadence
 		s.Equal(line.InvoiceAt, s.mustParseTime("2024-03-01T00:00:00Z"))
 
+		nextLine := s.mustGetGatheringLineByServicePeriodFrom(invoice.Lines.NonDeletedLines(), s.mustParseTime("2024-03-01T00:00:00Z"))
+		s.Equal(nextLine.Subscription.PhaseID, discountedPhase.SubscriptionPhase.ID)
+		s.Equal(nextLine.Subscription.ItemID, discountedPhase.ItemsByKey[s.APIRequestsTotalFeature.Key][0].SubscriptionItem.ID)
+		s.Equal(timeutil.ClosedPeriod{
+			From: s.mustParseTime("2024-03-01T00:00:00Z"),
+			To:   s.mustParseTime("2024-04-01T00:00:00Z"),
+		}, nextLine.Subscription.BillingPeriod)
+		s.Equal(nextLine.InvoiceAt, s.mustParseTime("2024-04-01T00:00:00Z"))
+
 		// When we advance the clock the invoice doesn't get changed
 		clock.FreezeTime(s.mustParseTime("2024-02-01T00:00:00Z"))
-		s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now().AddDate(0, 1, 0)))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now().AddDate(0, 1, 0)))
 
 		gatheringInvoice := s.gatheringInvoice(ctx, namespace, s.Customer.ID)
 		s.NoError(err)
@@ -279,10 +1073,12 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 
 		s.DebugDumpInvoice("gathering invoice - 2nd update", gatheringInvoice)
 
-		gatheringLine := gatheringInvoice.Lines.OrEmpty()[0]
+		s.Len(gatheringInvoice.Lines.OrEmpty(), 2)
+		gatheringLine := s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-02-01T00:00:00Z"))
 
 		s.Equal(invoiceUpdatedAt, gatheringInvoice.GetUpdatedAt())
 		s.Equal(line.GetUpdatedAt(), gatheringLine.GetUpdatedAt())
+		s.Equal(nextLine.GetUpdatedAt(), s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-03-01T00:00:00Z")).GetUpdatedAt())
 	})
 
 	s.NoError(gatheringInvoiceID.Validate())
@@ -306,6 +1102,7 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		if err != nil {
 			fmt.Printf("current time: %s\n", clock.Now().Format(time.RFC3339))
 		}
+
 		s.NoError(err)
 		s.Len(invoices, 1)
 		invoice := invoices[0]
@@ -331,8 +1128,9 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		})
 		s.NoError(err)
 
-		s.Len(gatheringInvoice.Lines.OrEmpty(), 1)
-		gatheringLine := gatheringInvoice.Lines.OrEmpty()[0]
+		// the rest of February and the untouched March line stay on the gathering invoice
+		s.Len(gatheringInvoice.Lines.OrEmpty(), 2)
+		gatheringLine := s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-02-15T00:00:00Z"))
 		s.Equal(gatheringLine.Subscription.SubscriptionID, subsView.Subscription.ID)
 		s.Equal(gatheringLine.Subscription.PhaseID, discountedPhase.SubscriptionPhase.ID)
 		s.Equal(gatheringLine.Subscription.ItemID, discountedPhase.ItemsByKey[s.APIRequestsTotalFeature.Key][0].SubscriptionItem.ID)
@@ -340,6 +1138,13 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		s.Equal(gatheringLine.ServicePeriod, timeutil.ClosedPeriod{
 			From: s.mustParseTime("2024-02-15T00:00:00Z"),
 			To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+		})
+
+		nextGatheringLine := s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-03-01T00:00:00Z"))
+		s.Equal(nextGatheringLine.InvoiceAt, s.mustParseTime("2024-04-01T00:00:00Z"))
+		s.Equal(nextGatheringLine.ServicePeriod, timeutil.ClosedPeriod{
+			From: s.mustParseTime("2024-03-01T00:00:00Z"),
+			To:   s.mustParseTime("2024-04-01T00:00:00Z"),
 		})
 
 		// TODO[OM-1037]: let's add/change some items of the subscription then expect that the new item appears on the gathering
@@ -369,7 +1174,7 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 
 		// If we are now resyncing the subscription, the gathering invoice should be updated to reflect the new cadence.
 
-		s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 		gatheringInvoice, err := s.BillingService.GetGatheringInvoiceById(ctx, billing.GetGatheringInvoiceByIdInput{
 			Invoice: gatheringInvoiceID,
@@ -377,8 +1182,11 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		})
 		s.NoError(err)
 
-		s.Len(gatheringInvoice.Lines.OrEmpty(), 1)
-		gatheringLine := gatheringInvoice.Lines.OrEmpty()[0]
+		// The subscription now ends where March starts, so the March line is deleted
+		// (the expand also returns deleted lines).
+		s.Len(gatheringInvoice.Lines.OrEmpty(), 2)
+		s.Len(gatheringInvoice.Lines.NonDeletedLines(), 1)
+		gatheringLine := s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-02-15T00:00:00Z"))
 
 		s.Equal(gatheringLine.Subscription.SubscriptionID, subsView.Subscription.ID)
 		s.Equal(gatheringLine.Subscription.PhaseID, discountedPhase.SubscriptionPhase.ID)
@@ -391,8 +1199,13 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		s.Equal(gatheringLine.InvoiceAt, cancelAt.Truncate(streaming.MinimumWindowSizeDuration))
 
 		// split group
-		s.NotNil(gatheringLine.SplitLineHierarchy)
-		splitLineGroup := gatheringLine.SplitLineHierarchy.Group
+		s.Require().NotNil(gatheringLine.SplitLineGroupID)
+		hierarchy, err := s.SplitLineGroupService.GetSplitLineGroup(ctx, models.NamespacedID{
+			Namespace: gatheringLine.Namespace,
+			ID:        *gatheringLine.SplitLineGroupID,
+		})
+		s.Require().NoError(err)
+		splitLineGroup := hierarchy.Group
 
 		s.Equal(splitLineGroup.Subscription.SubscriptionID, subsView.Subscription.ID)
 		s.Equal(splitLineGroup.ServicePeriod, timeutil.ClosedPeriod{
@@ -418,7 +1231,7 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 
 		// If we are now resyncing the subscription, the gathering invoice should be updated to reflect the original cadence
 
-		s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 		gatheringInvoice, err := s.BillingService.GetGatheringInvoiceById(ctx, billing.GetGatheringInvoiceByIdInput{
 			Invoice: gatheringInvoiceID,
@@ -426,8 +1239,10 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		})
 		s.NoError(err)
 
-		s.Len(gatheringInvoice.Lines.OrEmpty(), 1)
-		gatheringLine := gatheringInvoice.Lines.OrEmpty()[0]
+		// March is provisioned again as a new line next to the one deleted by the cancellation.
+		s.Len(gatheringInvoice.Lines.OrEmpty(), 3)
+		s.Len(gatheringInvoice.Lines.NonDeletedLines(), 2)
+		gatheringLine := s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-02-15T00:00:00Z"))
 
 		s.Equal(gatheringLine.Subscription.SubscriptionID, subsView.Subscription.ID)
 		s.Equal(gatheringLine.Subscription.PhaseID, discountedPhase.SubscriptionPhase.ID)
@@ -439,9 +1254,22 @@ func (s *SubscriptionHandlerTestSuite) TestSubscriptionHappyPath() {
 		})
 		s.Equal(gatheringLine.InvoiceAt, s.mustParseTime("2024-03-01T00:00:00Z"))
 
+		nextGatheringLine := s.mustGetGatheringLineByServicePeriodFrom(gatheringInvoice.Lines.NonDeletedLines(), s.mustParseTime("2024-03-01T00:00:00Z"))
+		s.Equal(nextGatheringLine.Subscription.PhaseID, discountedPhase.SubscriptionPhase.ID)
+		s.Equal(nextGatheringLine.ServicePeriod, timeutil.ClosedPeriod{
+			From: s.mustParseTime("2024-03-01T00:00:00Z"),
+			To:   s.mustParseTime("2024-04-01T00:00:00Z"),
+		})
+		s.Equal(nextGatheringLine.InvoiceAt, s.mustParseTime("2024-04-01T00:00:00Z"))
+
 		// split group
-		s.NotNil(gatheringLine.SplitLineHierarchy)
-		splitLineGroup := gatheringLine.SplitLineHierarchy.Group
+		s.Require().NotNil(gatheringLine.SplitLineGroupID)
+		hierarchy, err := s.SplitLineGroupService.GetSplitLineGroup(ctx, models.NamespacedID{
+			Namespace: gatheringLine.Namespace,
+			ID:        *gatheringLine.SplitLineGroupID,
+		})
+		s.Require().NoError(err)
+		splitLineGroup := hierarchy.Group
 
 		s.Equal(splitLineGroup.Subscription.SubscriptionID, subsView.Subscription.ID)
 		s.Equal(splitLineGroup.ServicePeriod, timeutil.ClosedPeriod{
@@ -545,7 +1373,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsProratingGathering() {
 
 	// let's provision the first set of items
 	s.Run("provision first set of items", func() {
-		s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 		// then there should be a gathering invoice
 		invoices, err := s.BillingService.ListGatheringInvoices(ctx, billing.ListGatheringInvoicesInput{
@@ -560,16 +1388,23 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsProratingGathering() {
 		oneDayLines := lo.Filter(lines, func(line billing.GatheringLine, _ int) bool {
 			return line.ServicePeriod.Duration() == time.Hour*24
 		})
-		s.Len(oneDayLines, 31) // january is 31 days long, and we generate lines for each daily for in arrears price
+		// we generate a daily line for the in arrears price for the current billing period (january, 31 days)
+		// and for the next one (february 2024, 29 days)
+		s.Equal(map[time.Month]int{time.January: 31, time.February: 29}, lo.CountValuesBy(oneDayLines, func(line billing.GatheringLine) time.Month {
+			return line.ServicePeriod.From.Month()
+		}))
 
 		for _, line := range oneDayLines {
+			monthStart := time.Date(2024, line.ServicePeriod.From.Month(), 1, 0, 0, 0, 0, time.UTC)
+
 			s.Equal(line.Subscription.SubscriptionID, subsView.Subscription.ID, "failed for line %v", line.ID)
 			s.Equal(line.Subscription.PhaseID, subsView.Phases[0].SubscriptionPhase.ID, "failed for line %v", line.ID)
 			s.Equal(line.Subscription.ItemID, subsView.Phases[0].ItemsByKey["in-arrears"][0].SubscriptionItem.ID, "failed for line %v", line.ID)
-			s.Equal(line.InvoiceAt, s.mustParseTime("2024-02-01T00:00:00Z"), "failed for line %v", line.ID)
+			// daily lines are invoiced at the end of their billing month
+			s.Equal(line.InvoiceAt, monthStart.AddDate(0, 1, 0), "failed for line %v", line.ID)
 			s.Equal(line.ServicePeriod, timeutil.ClosedPeriod{
-				From: s.mustParseTime("2024-01-01T00:00:00Z").AddDate(0, 0, line.ServicePeriod.From.Day()-1),
-				To:   s.mustParseTime("2024-01-01T00:00:00Z").AddDate(0, 0, line.ServicePeriod.From.Day()),
+				From: monthStart.AddDate(0, 0, line.ServicePeriod.From.Day()-1),
+				To:   monthStart.AddDate(0, 0, line.ServicePeriod.From.Day()),
 			}, "failed for line %v", line.ID)
 			price, err := line.Price.AsFlat()
 			s.NoError(err)
@@ -597,7 +1432,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsProratingGathering() {
 		})
 		s.NoError(err)
 
-		s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 		// then there should be a gathering invoice
 		invoices, err := s.BillingService.ListGatheringInvoices(ctx, billing.ListGatheringInvoicesInput{
@@ -660,7 +1495,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncNonBillableAmou
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-01T00:00:40Z"))
@@ -683,7 +1518,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncNonBillableAmou
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - 2nd sync", gatheringInvoice)
@@ -845,7 +1680,7 @@ func (s *SubscriptionHandlerTestSuite) testInAdvanceFlatFeeCancelAtFirstBillingB
 	if syncBeforeCancel {
 		// The first sync generates the initial shortened service-period line before
 		// the subscription has a terminal end date, so it is prorated in both modes.
-		s.NoError(s.Service.SyncByView(ctx, subsView, firstBillingBoundary))
+		s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, firstBillingBoundary))
 
 		gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 		s.expectLines(gatheringInvoice, subsView.Subscription.ID, []expectedLine{
@@ -877,7 +1712,7 @@ func (s *SubscriptionHandlerTestSuite) testInAdvanceFlatFeeCancelAtFirstBillingB
 					ItemKey:   "in-advance",
 					Version:   0,
 					PeriodMin: 1,
-					PeriodMax: 1,
+					PeriodMax: 2,
 				},
 				Price: mo.Some(expectedFullPrice),
 				Periods: []timeutil.ClosedPeriod{
@@ -885,8 +1720,12 @@ func (s *SubscriptionHandlerTestSuite) testInAdvanceFlatFeeCancelAtFirstBillingB
 						From: firstBillingBoundary,
 						To:   s.mustParseTime("2024-03-01T00:00:00Z"),
 					},
+					{
+						From: s.mustParseTime("2024-03-01T00:00:00Z"),
+						To:   s.mustParseTime("2024-04-01T00:00:00Z"),
+					},
 				},
-				InvoiceAt: mo.Some([]time.Time{firstBillingBoundary}),
+				InvoiceAt: mo.Some([]time.Time{firstBillingBoundary, s.mustParseTime("2024-03-01T00:00:00Z")}),
 			},
 		})
 	}
@@ -900,7 +1739,7 @@ func (s *SubscriptionHandlerTestSuite) testInAdvanceFlatFeeCancelAtFirstBillingB
 	subsView, err = s.SubscriptionService.GetView(ctx, subscriptionModel.NamespacedID)
 	s.NoError(err)
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, firstBillingBoundary))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, firstBillingBoundary))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.expectLines(gatheringInvoice, subsView.Subscription.ID, []expectedLine{
@@ -975,7 +1814,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncNonBillableAmou
 
 	subsView := s.createSubscriptionFromPlan(planInput)
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-01T00:00:40Z"))
@@ -998,7 +1837,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncNonBillableAmou
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - 2nd sync", gatheringInvoice)
@@ -1109,7 +1948,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsGatheringSyncNonBillableAmou
 
 	subsView := s.createSubscriptionFromPlan(planInput)
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-01T00:00:40Z"))
@@ -1132,7 +1971,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsGatheringSyncNonBillableAmou
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - 2nd sync", gatheringInvoice)
@@ -1166,7 +2005,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsGatheringSyncNonBillableAmou
 				ItemKey:   "in-arrears",
 				Version:   1,
 				PeriodMin: 0,
-				PeriodMax: 0,
+				PeriodMax: 2, // the sync at 2024-02-01 also provisions february and the month after it
 			},
 
 			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.FlatPrice{
@@ -1178,9 +2017,21 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsGatheringSyncNonBillableAmou
 					From: s.mustParseTime("2024-01-01T00:00:40Z"),
 					To:   s.mustParseTime("2024-02-01T00:00:00Z"),
 				},
+				{
+					From: s.mustParseTime("2024-02-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+				},
+				{
+					From: s.mustParseTime("2024-03-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-04-01T00:00:00Z"),
+				},
 			},
 			// We'll wait till the end of the billing cadence of the item
-			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-02-01T00:00:00Z")}),
+			InvoiceAt: mo.Some([]time.Time{
+				s.mustParseTime("2024-02-01T00:00:00Z"),
+				s.mustParseTime("2024-03-01T00:00:00Z"),
+				s.mustParseTime("2024-04-01T00:00:00Z"),
+			}),
 		},
 	})
 }
@@ -1216,7 +2067,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncBillableAmountP
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-02T00:00:00Z"))
@@ -1239,7 +2090,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncBillableAmountP
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - 2nd sync", gatheringInvoice)
@@ -1351,7 +2202,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncDraftInvoicePro
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-02T00:00:00Z"))
@@ -1406,7 +2257,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncDraftInvoicePro
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	// gathering invoice
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -1520,7 +2371,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncIssuedInvoicePr
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-02T00:00:00Z"))
@@ -1579,7 +2430,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceGatheringSyncIssuedInvoicePr
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	// gathering invoice
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -1716,7 +2567,7 @@ func (s *SubscriptionHandlerTestSuite) TestDefactoZeroPrices() {
 	// Now let's synchronize the subscription
 
 	asOf := s.mustParseTime("2024-01-03T12:00:00Z")
-	s.NoError(s.Service.SyncByView(ctx, subView, asOf))
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, asOf))
 
 	invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
 		Namespace:  s.Namespace,
@@ -1863,7 +2714,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionInvoicing() {
 	// Now let's synchronize the subscription
 
 	asOf := s.mustParseTime("2024-01-03T12:00:00Z")
-	s.NoError(s.Service.SyncByView(ctx, subView, asOf))
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, asOf))
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
@@ -1919,7 +2770,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionInvoicing() {
 					From: s.mustParseTime("2024-01-22T00:00:00Z"),
 					To:   s.mustParseTime("2024-01-29T00:00:00Z"),
 				},
-				// As these are in advance items, we also generate them for the next Billing Period (from 2024-01-29 to 2024-02-26)
+				// The sync also generates the items of the next Billing Period (from 2024-01-29 to 2024-02-26)
 				{
 					From: s.mustParseTime("2024-01-29T00:00:00Z"),
 					To:   s.mustParseTime("2024-02-05T00:00:00Z"),
@@ -1977,7 +2828,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionInvoicing() {
 				ItemKey:   "in-arrears",
 				Version:   1,
 				PeriodMin: 0,
-				PeriodMax: 3,
+				PeriodMax: 7,
 			},
 
 			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.FlatPrice{
@@ -2001,12 +2852,34 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionInvoicing() {
 					From: s.mustParseTime("2024-01-22T00:00:00Z"),
 					To:   s.mustParseTime("2024-01-29T00:00:00Z"),
 				},
+				// The in arrears items of the next Billing Period (from 2024-01-29 to 2024-02-26) are generated too
+				{
+					From: s.mustParseTime("2024-01-29T00:00:00Z"),
+					To:   s.mustParseTime("2024-02-05T00:00:00Z"),
+				},
+				{
+					From: s.mustParseTime("2024-02-05T00:00:00Z"),
+					To:   s.mustParseTime("2024-02-12T00:00:00Z"),
+				},
+				{
+					From: s.mustParseTime("2024-02-12T00:00:00Z"),
+					To:   s.mustParseTime("2024-02-19T00:00:00Z"),
+				},
+				{
+					From: s.mustParseTime("2024-02-19T00:00:00Z"),
+					To:   s.mustParseTime("2024-02-26T00:00:00Z"),
+				},
 			},
+			// in arrears items are invoiced at the end of their Billing Period
 			InvoiceAt: mo.Some([]time.Time{
 				s.mustParseTime("2024-01-29T00:00:00Z"),
 				s.mustParseTime("2024-01-29T00:00:00Z"),
 				s.mustParseTime("2024-01-29T00:00:00Z"),
 				s.mustParseTime("2024-01-29T00:00:00Z"),
+				s.mustParseTime("2024-02-26T00:00:00Z"),
+				s.mustParseTime("2024-02-26T00:00:00Z"),
+				s.mustParseTime("2024-02-26T00:00:00Z"),
+				s.mustParseTime("2024-02-26T00:00:00Z"),
 			}),
 		},
 	})
@@ -2089,9 +2962,10 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionCancellation() {
 	// Let's advane the clock a minute
 	clock.FreezeTime(clock.Now().Add(time.Minute))
 
-	// Let's synchronize the subscription until well into the second phase
-	syncUntil := startTime.AddDate(0, 3, 0) // 3 months should suffice
-	s.NoError(s.Service.SyncByView(ctx, subView, syncUntil))
+	// Let's synchronize the subscription as of the middle of the second phase's first month:
+	// that month (february) and the one after it (march) get generated
+	syncUntil := s.mustParseTime("2024-02-15T00:00:00Z")
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, syncUntil))
 
 	// Let's check the invoice
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -2139,7 +3013,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionCancellation() {
 	s.NoError(err)
 
 	// Let's synchronize the subscription
-	s.NoError(s.Service.SyncByView(ctx, subView, syncUntil))
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, syncUntil))
 
 	// Let's validate that every line was canceled
 	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -2231,7 +3105,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProgressiveBilling
 	})
 
 	// Let's synchronize the subscription
-	s.NoError(s.Service.SyncByView(ctx, subView, clock.Now().Add(time.Minute))) // time is frozen to start time (syncing in arrears upto which would sync nothing)
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, clock.Now().Add(time.Minute))) // time is frozen to start time (syncing in arrears upto which would sync nothing)
 
 	// Let's check the invoice
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -2242,8 +3116,10 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProgressiveBilling
 	s.expectLines(gatheringInvoice, subView.Subscription.ID, []expectedLine{
 		{
 			Matcher: recurringLineMatcher{
-				PhaseKey: "default",
-				ItemKey:  s.APIRequestsTotalFeature.Key,
+				PhaseKey:  "default",
+				ItemKey:   s.APIRequestsTotalFeature.Key,
+				PeriodMin: 0,
+				PeriodMax: 1, // the next billing period is generated too
 			},
 			Price: mo.Some(testPrice),
 			Periods: []timeutil.ClosedPeriod{
@@ -2251,9 +3127,14 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProgressiveBilling
 					From: startTime,
 					To:   startTime.AddDate(0, 1, 0),
 				},
+				{
+					From: startTime.AddDate(0, 1, 0),
+					To:   startTime.AddDate(0, 2, 0),
+				},
 			},
 			InvoiceAt: mo.Some([]time.Time{
 				startTime.AddDate(0, 1, 0),
+				startTime.AddDate(0, 2, 0),
 			}),
 		},
 	})
@@ -2302,8 +3183,10 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProgressiveBilling
 	s.expectLines(gatheringInvoice, subView.Subscription.ID, []expectedLine{
 		{
 			Matcher: recurringLineMatcher{
-				PhaseKey: "default",
-				ItemKey:  s.APIRequestsTotalFeature.Key,
+				PhaseKey:  "default",
+				ItemKey:   s.APIRequestsTotalFeature.Key,
+				PeriodMin: 0,
+				PeriodMax: 1,
 			},
 			Price: mo.Some(testPrice),
 			Periods: []timeutil.ClosedPeriod{
@@ -2311,9 +3194,15 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProgressiveBilling
 					From: startTime.AddDate(0, 0, 1),
 					To:   startTime.AddDate(0, 1, 0),
 				},
+				// the next billing period's line is not part of the progressive invoice
+				{
+					From: startTime.AddDate(0, 1, 0),
+					To:   startTime.AddDate(0, 2, 0),
+				},
 			},
 			InvoiceAt: mo.Some([]time.Time{
 				startTime.AddDate(0, 1, 0),
+				startTime.AddDate(0, 2, 0),
 			}),
 		},
 	})
@@ -2335,7 +3224,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProgressiveBilling
 	// Event delivery is async, so we need to advance the clock a bit
 	clock.FreezeTime(clock.Now().Add(time.Second))
 	// Let's synchronize the subscription
-	s.NoError(s.Service.SyncByView(ctx, subView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, clock.Now()))
 
 	// Let's validate that the gathering invoice is gone too
 	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -2370,7 +3259,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceOneTimeFeeSyncing() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
@@ -2473,7 +3362,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsOneTimeFeeSyncing() {
 	s.NoError(err)
 	s.NotNil(subsView)
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 
 	// let's cancel the subscription
@@ -2487,7 +3376,7 @@ func (s *SubscriptionHandlerTestSuite) TestInArrearsOneTimeFeeSyncing() {
 	subsView, err = s.SubscriptionService.GetView(ctx, subs.NamespacedID)
 	s.NoError(err)
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
@@ -2545,7 +3434,7 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdate() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
@@ -2556,18 +3445,17 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdate() {
 				ItemKey:   s.APIRequestsTotalFeature.Key,
 				Version:   0,
 				PeriodMin: 0,
-				PeriodMax: 0,
+				PeriodMax: 2, // the sync at 2024-02-01 also provisions february and the month after it
 			},
 			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.UnitPrice{
 				Amount: alpacadecimal.NewFromFloat(10),
 			})),
-			Periods: []timeutil.ClosedPeriod{
-				{
-					From: s.mustParseTime("2024-01-01T00:00:00Z"),
-					To:   s.mustParseTime("2024-02-01T00:00:00Z"),
-				},
-			},
-			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-02-01T00:00:00Z")}),
+			Periods: s.generatePeriods("2024-01-01T00:00:00Z", "2024-02-01T00:00:00Z", "P1M", 3),
+			InvoiceAt: mo.Some([]time.Time{
+				s.mustParseTime("2024-02-01T00:00:00Z"),
+				s.mustParseTime("2024-03-01T00:00:00Z"),
+				s.mustParseTime("2024-04-01T00:00:00Z"),
+			}),
 		},
 	})
 
@@ -2595,7 +3483,7 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdate() {
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 
 	// gathering invoice
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -2623,14 +3511,15 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdate() {
 			},
 			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-01-03T00:00:00Z")}),
 		},
-		// We'll have one line for the second phase that gets aligned to the billing anchor
+		// The second phase's first line gets aligned to the billing anchor, and it is followed by
+		// february and the month after it
 		{
 			Matcher: recurringLineMatcher{
 				PhaseKey:  "second-phase",
 				ItemKey:   s.APIRequestsTotalFeature.Key,
 				Version:   0,
 				PeriodMin: 0,
-				PeriodMax: 0,
+				PeriodMax: 2,
 			},
 
 			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.UnitPrice{
@@ -2641,8 +3530,20 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdate() {
 					From: s.mustParseTime("2024-01-03T00:00:00Z"),
 					To:   s.mustParseTime("2024-02-01T00:00:00Z"),
 				},
+				{
+					From: s.mustParseTime("2024-02-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+				},
+				{
+					From: s.mustParseTime("2024-03-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-04-01T00:00:00Z"),
+				},
 			},
-			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-02-01T00:00:00Z")}),
+			InvoiceAt: mo.Some([]time.Time{
+				s.mustParseTime("2024-02-01T00:00:00Z"),
+				s.mustParseTime("2024-03-01T00:00:00Z"),
+				s.mustParseTime("2024-04-01T00:00:00Z"),
+			}),
 		},
 	})
 }
@@ -2688,7 +3589,8 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdateDraftInvoice
 	})
 
 	// we sync two months so we have lines on gathering
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	// (as of 2024-01-31, the start of the phase added later, so the resync still covers february)
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-31T00:00:00Z")))
 
 	// Some time has passed, we're syncing the draft invoice
 	clock.FreezeTime(s.mustParseTime("2024-02-01T00:00:00Z"))
@@ -2776,7 +3678,7 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdateDraftInvoice
 
 	// Now the time-travel is over, let's reset back to the "present"
 	clock.FreezeTime(s.mustParseTime("2024-02-01T00:00:00Z"))
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-31T00:00:00Z")))
 
 	// gathering invoice
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -2896,7 +3798,8 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdateIssuedInvoic
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	// we sync as of 2024-01-31, the start of the phase added later, so the resync still covers february
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-31T00:00:00Z")))
 
 	clock.FreezeTime(s.mustParseTime("2024-02-01T00:00:00Z"))
 	draftInvoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
@@ -2964,7 +3867,7 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedGatheringUpdateIssuedInvoic
 
 	// Let's reset back the clock to the last sync's time
 	clock.FreezeTime(s.mustParseTime("2024-02-01T00:00:00Z"))
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-31T00:00:00Z")))
 
 	// gathering invoice
 	s.DebugDumpInvoice("gathering invoice - 2nd sync", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
@@ -3048,7 +3951,7 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedUpdateWithLineSplits() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	// invoice 1: issued invoice creation
 	clock.FreezeTime(s.mustParseTime("2024-01-15T00:00:00Z"))
@@ -3182,7 +4085,7 @@ func (s *SubscriptionHandlerTestSuite) TestUsageBasedUpdateWithLineSplits() {
 	// THEN
 	// Let's reset back the clock to the last sync's time
 	clock.FreezeTime(s.mustParseTime("2024-01-18T00:00:00Z"))
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-15T00:00:00Z")))
 
 	// gathering invoice
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -3294,7 +4197,7 @@ func (s *SubscriptionHandlerTestSuite) TestGatheringManualEditSync() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
@@ -3320,6 +4223,7 @@ func (s *SubscriptionHandlerTestSuite) TestGatheringManualEditSync() {
 
 			updatedLine, err = line.Clone()
 			s.NoError(err)
+
 			return nil
 		},
 	})
@@ -3338,7 +4242,7 @@ func (s *SubscriptionHandlerTestSuite) TestGatheringManualEditSync() {
 	updatedLine = *s.getGatheringLineByChildID(editedInvoice, *updatedLine.ChildUniqueReferenceID)
 
 	// When resyncing the subscription
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - after sync", gatheringInvoice)
 
@@ -3383,7 +4287,7 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualEditSync() {
 	})
 
 	// lets sync for 2 months so we have lines on gathering
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-03-01T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice - pre invoicing", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-15T00:00:00Z"))
@@ -3410,6 +4314,7 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualEditSync() {
 
 			updatedLine, err = line.Clone()
 			s.NoError(err)
+
 			return nil
 		},
 	})
@@ -3429,7 +4334,7 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualEditSync() {
 	s.NoError(err)
 
 	// When resyncing the subscription
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-03-01T00:00:00Z")))
 	s.T().Log("-> Subscription canceled")
 
 	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -3483,7 +4388,7 @@ func (s *SubscriptionHandlerTestSuite) TestGatheringManualDeleteSync() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
@@ -3500,6 +4405,7 @@ func (s *SubscriptionHandlerTestSuite) TestGatheringManualDeleteSync() {
 			line.DeletedAt = lo.ToPtr(clock.Now())
 
 			updatedLine = lo.Must(line.Clone())
+
 			return nil
 		},
 		IncludeDeletedLines: true,
@@ -3522,7 +4428,7 @@ func (s *SubscriptionHandlerTestSuite) TestGatheringManualDeleteSync() {
 	s.DebugDumpInvoice("edited invoice", editedInvoice)
 
 	// When resyncing the subscription
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - after sync", gatheringInvoice)
 
@@ -3563,8 +4469,8 @@ func (s *SubscriptionHandlerTestSuite) TestManualIgnoringOfSyncedLines() {
 		},
 	})
 
-	// Let's sync for 2 months so we have lines on gathering and draft
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	// Let's sync as of the second month so we have lines on gathering and draft
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-15T00:00:00Z")))
 
 	// Let's assert we have one line on the draft invoice
 	draftInvoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
@@ -3649,7 +4555,7 @@ func (s *SubscriptionHandlerTestSuite) TestManualIgnoringOfSyncedLines() {
 	s.NoError(err)
 
 	// Now let's resync the subscription
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-15T00:00:00Z")))
 
 	// Then the lines should not be updated
 	draftInvoiceAfterSync, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
@@ -3668,19 +4574,6 @@ func (s *SubscriptionHandlerTestSuite) TestManualIgnoringOfSyncedLines() {
 			}
 		}
 
-		line.DetailedLines = lo.Map(line.DetailedLines, func(child billing.DetailedLine, _ int) billing.DetailedLine {
-			child.FeeLineConfigID = ""
-			return child
-		})
-
-		return line
-	})
-
-	draftInvoiceAfterSync.Lines = draftInvoiceAfterSync.Lines.Map(func(line *billing.StandardLine) *billing.StandardLine {
-		line.DetailedLines = lo.Map(line.DetailedLines, func(child billing.DetailedLine, _ int) billing.DetailedLine {
-			child.FeeLineConfigID = ""
-			return child
-		})
 		return line
 	})
 
@@ -3760,7 +4653,7 @@ func (s *SubscriptionHandlerTestSuite) TestManualIgnoringOfSyncedLinesWhenPeriod
 	})
 
 	// Let's just sync for the current month
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-04-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-04-01T00:00:00Z")))
 
 	// Let's assert we have two lines on the gathering invoice
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -3799,7 +4692,7 @@ func (s *SubscriptionHandlerTestSuite) TestManualIgnoringOfSyncedLinesWhenPeriod
 	s.NoError(err)
 
 	// Now let's resync the subscription
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-04-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-04-01T00:00:00Z")))
 
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - after sync", gatheringInvoice)
@@ -3855,7 +4748,7 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualDeleteSync() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 	s.DebugDumpInvoice("gathering invoice - pre invoicing", s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID))
 
 	clock.FreezeTime(s.mustParseTime("2024-01-15T00:00:00Z"))
@@ -3882,6 +4775,7 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualDeleteSync() {
 			line.DeletedAt = lo.ToPtr(clock.Now())
 
 			updatedLine = lo.Must(line.Clone())
+
 			return nil
 		},
 	})
@@ -3901,7 +4795,7 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualDeleteSync() {
 	s.NoError(err)
 
 	// When resyncing the subscription
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-02-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-02-01T00:00:00Z")))
 	s.T().Log("-> Subscription canceled")
 
 	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -3924,8 +4818,13 @@ func (s *SubscriptionHandlerTestSuite) TestSplitLineManualDeleteSync() {
 		To:   s.mustParseTime("2024-01-10T00:00:00Z"),
 	}, line.Period)
 
-	s.NotNil(line.SplitLineHierarchy)
-	parentGroup := line.SplitLineHierarchy.Group
+	s.Require().NotNil(line.SplitLineGroupID)
+	hierarchy, err := s.SplitLineGroupService.GetSplitLineGroup(ctx, models.NamespacedID{
+		Namespace: line.Namespace,
+		ID:        *line.SplitLineGroupID,
+	})
+	s.Require().NoError(err)
+	parentGroup := hierarchy.Group
 	// Parent's period is in sync with the child
 	s.Equal(timeutil.ClosedPeriod{
 		From: s.mustParseTime("2024-01-01T00:00:00Z"),
@@ -3945,11 +4844,23 @@ func (s *SubscriptionHandlerTestSuite) TestRateCardTaxSync() {
 	// Then
 	//  the gathering invoice will contain the tax details
 
-	taxConfig := &productcatalog.TaxConfig{
-		Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
-		Stripe: &productcatalog.StripeTaxConfig{
-			Code: "txcd_10000000",
-		},
+	tc, err := s.TaxCodeEnv.Service.GetOrCreateByAppMapping(ctx, taxcode.GetOrCreateByAppMappingInput{
+		Namespace: s.Namespace,
+		AppType:   app.AppTypeStripe,
+		TaxCode:   "txcd_10000000",
+	})
+	s.Require().NoError(err)
+
+	taxConfig := &productcatalog.TaxCodeConfig{
+		Behavior:  lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
+		TaxCodeID: tc.ID,
+	}
+
+	// Lines carry the legacy shape, with the Stripe code filled in from the Tax Code's mapping.
+	expectedLineTaxConfig := &productcatalog.TaxConfig{
+		Behavior:  lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
+		Stripe:    &productcatalog.StripeTaxConfig{Code: "txcd_10000000"},
+		TaxCodeID: lo.ToPtr(tc.ID),
 	}
 
 	subsView := s.createSubscriptionFromPlanPhases([]productcatalog.Phase{
@@ -3972,14 +4883,14 @@ func (s *SubscriptionHandlerTestSuite) TestRateCardTaxSync() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
 	lines := gatheringInvoice.Lines.OrEmpty()
 	for _, line := range lines {
-		s.Equal(taxConfig, line.TaxConfig)
+		s.Equal(expectedLineTaxConfig, line.TaxConfig)
 	}
 
 	// Given we edit the subscription the tax config is carried over to the lines
@@ -4003,14 +4914,14 @@ func (s *SubscriptionHandlerTestSuite) TestRateCardTaxSync() {
 	s.NoError(err)
 	s.NotNil(updatedSubsView)
 
-	s.NoError(s.Service.SyncByView(ctx, updatedSubsView, s.mustParseTime("2024-01-05T12:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, updatedSubsView.Subscription.NamespacedID, s.mustParseTime("2024-01-05T12:00:00Z")))
 
 	gatheringInvoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - after edit", gatheringInvoice)
 
 	lines = gatheringInvoice.Lines.OrEmpty()
 	for _, line := range lines {
-		s.Equal(taxConfig, line.TaxConfig)
+		s.Equal(expectedLineTaxConfig, line.TaxConfig)
 	}
 }
 
@@ -4025,7 +4936,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceInstantBillingOnSubscription
 	// Then
 	//  the gathering invoice will automatically be invoiced so that the in advance fee is billed (those are always flat fees)
 	//
-	// Note that the UBP line is not synced because the subscription is not active yet
+	// Note that the UBP lines and the next billing period's in advance fee stay on the gathering invoice, as they are not due yet
 
 	subsView := s.createSubscriptionFromPlanPhases([]productcatalog.Phase{
 		{
@@ -4057,21 +4968,77 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceInstantBillingOnSubscription
 		},
 	})
 
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, s.mustParseTime("2024-01-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, s.mustParseTime("2024-01-01T00:00:00Z"), subscriptionsync.
 
-	// in-arrears lines wont get synced with this deadline so we'll only have the in advance line on the draft invoice
+		// in-arrears lines are not due with this deadline so we'll only have the in advance line on the draft invoice
+		WithInvoicePendingLines()))
+
 	invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
 		Namespace:  s.Namespace,
 		CustomerID: &filter.FilterULID{FilterString: filter.FilterString{Eq: &s.Customer.ID}},
 		Expand:     billing.InvoiceExpandAll,
 	})
 	s.NoError(err)
-	s.Len(invoices.Items, 1)
+	// the instant invoice and the gathering invoice holding the lines that are not due yet
+	s.Len(invoices.Items, 2)
 
-	instantInvoice, err := invoices.Items[0].AsStandardInvoice()
+	standardInvoices := lo.Filter(invoices.Items, func(invoice billing.Invoice, _ int) bool {
+		return invoice.Type() == billing.InvoiceTypeStandard
+	})
+	s.Require().Len(standardInvoices, 1)
+
+	instantInvoice, err := standardInvoices[0].AsStandardInvoice()
 	s.NoError(err)
 
 	s.DebugDumpInvoice("instant invoice", instantInvoice)
+
+	// Gathering invoice should have the UBP lines and the next Billing Period's in advance line
+	s.expectLines(s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID), subsView.Subscription.ID, []expectedLine{
+		{
+			Matcher: recurringLineMatcher{
+				PhaseKey:  "first-phase",
+				ItemKey:   s.APIRequestsTotalFeature.Key,
+				PeriodMin: 0,
+				PeriodMax: 1,
+			},
+			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+				Amount: alpacadecimal.NewFromFloat(10),
+			})),
+			Periods: []timeutil.ClosedPeriod{
+				{
+					From: s.mustParseTime("2024-01-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-02-01T00:00:00Z"),
+				},
+				{
+					From: s.mustParseTime("2024-02-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+				},
+			},
+			InvoiceAt: mo.Some([]time.Time{
+				s.mustParseTime("2024-02-01T00:00:00Z"),
+				s.mustParseTime("2024-03-01T00:00:00Z"),
+			}),
+		},
+		{
+			Matcher: recurringLineMatcher{
+				PhaseKey:  "first-phase",
+				ItemKey:   "in-advance",
+				PeriodMin: 1,
+				PeriodMax: 1,
+			},
+			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+				Amount:      alpacadecimal.NewFromFloat(6),
+				PaymentTerm: productcatalog.InAdvancePaymentTerm,
+			})),
+			Periods: []timeutil.ClosedPeriod{
+				{
+					From: s.mustParseTime("2024-02-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+				},
+			},
+			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-02-01T00:00:00Z")}),
+		},
+	})
 
 	// Instant invoice should have the in advance fee
 	s.expectLines(instantInvoice, subsView.Subscription.ID, []expectedLine{
@@ -4103,9 +5070,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceInstantBillingOnSubscription
 	// When
 	//  we start the subscription in the future
 	// Then
-	//  we'll have the lines on the gathering invoice
-	//
-	// Note that the UBP line is not synced because the subscription is not active yet
+	//  we'll have the first billing period's lines on the gathering invoice
 
 	subsView := s.createSubscriptionFromPlanPhases([]productcatalog.Phase{
 		{
@@ -4139,7 +5104,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceInstantBillingOnSubscription
 
 	clock.FreezeTime(s.mustParseTime("2024-01-20T00:00:00Z")) // This will be the present
 
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now(), subscriptionsync.WithInvoicePendingLines()))
 
 	invoices, err := s.BillingService.ListGatheringInvoices(ctx, billing.ListGatheringInvoicesInput{
 		Namespace: s.Namespace,
@@ -4156,7 +5121,7 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceInstantBillingOnSubscription
 
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
 
-	// Gathering invoice should have the UBP line
+	// Gathering invoice should have the in advance fee and the UBP line of the first billing period
 	s.expectLines(gatheringInvoice, subsView.Subscription.ID, []expectedLine{
 		{
 			Matcher: recurringLineMatcher{
@@ -4174,6 +5139,22 @@ func (s *SubscriptionHandlerTestSuite) TestInAdvanceInstantBillingOnSubscription
 				},
 			},
 			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-02-01T00:00:00Z")}),
+		},
+		{
+			Matcher: recurringLineMatcher{
+				PhaseKey: "first-phase",
+				ItemKey:  s.APIRequestsTotalFeature.Key,
+			},
+			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+				Amount: alpacadecimal.NewFromFloat(10),
+			})),
+			Periods: []timeutil.ClosedPeriod{
+				{
+					From: s.mustParseTime("2024-02-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+				},
+			},
+			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-03-01T00:00:00Z")}),
 		},
 	})
 }
@@ -4224,7 +5205,8 @@ func (s *SubscriptionHandlerTestSuite) TestDiscountSynchronization() {
 		},
 	})
 
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, clock.Now().Add(time.Minute))) // time is frozen to start time (syncing in arrears upto which would sync nothing, and we want both the instant invoice for in advance as well as the gathering for UBP)
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now().Add(time.Minute), subscriptionsync. // time is frozen to start time (syncing in arrears upto which would sync nothing, and we want both the instant invoice for in advance as well as the gathering for UBP)
+																WithInvoicePendingLines()))
 
 	invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
 		Namespace:  s.Namespace,
@@ -4242,6 +5224,7 @@ func (s *SubscriptionHandlerTestSuite) TestDiscountSynchronization() {
 			invoiceAsGathering, err := invoice.AsGatheringInvoice()
 			s.NoError(err)
 			gatheringInvoice = &invoiceAsGathering
+
 			continue
 		}
 
@@ -4257,11 +5240,13 @@ func (s *SubscriptionHandlerTestSuite) TestDiscountSynchronization() {
 	s.DebugDumpInvoice("instant invoice", *instantInvoice)
 
 	s.expectLines(*gatheringInvoice, subsView.Subscription.ID, []expectedLine{
-		// Gathering invoice should have the UBP line
+		// Gathering invoice should have the UBP lines of the current and the next Billing Period
 		{
 			Matcher: recurringLineMatcher{
-				PhaseKey: "first-phase",
-				ItemKey:  s.APIRequestsTotalFeature.Key,
+				PhaseKey:  "first-phase",
+				ItemKey:   s.APIRequestsTotalFeature.Key,
+				PeriodMin: 0,
+				PeriodMax: 1,
 			},
 			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.UnitPrice{
 				Amount: alpacadecimal.NewFromFloat(10),
@@ -4271,8 +5256,15 @@ func (s *SubscriptionHandlerTestSuite) TestDiscountSynchronization() {
 					From: s.mustParseTime("2024-01-01T00:00:00Z"),
 					To:   s.mustParseTime("2024-02-01T00:00:00Z"),
 				},
+				{
+					From: s.mustParseTime("2024-02-01T00:00:00Z"),
+					To:   s.mustParseTime("2024-03-01T00:00:00Z"),
+				},
 			},
-			InvoiceAt: mo.Some([]time.Time{s.mustParseTime("2024-02-01T00:00:00Z")}),
+			InvoiceAt: mo.Some([]time.Time{
+				s.mustParseTime("2024-02-01T00:00:00Z"),
+				s.mustParseTime("2024-03-01T00:00:00Z"),
+			}),
 		},
 		// And next Billing Period's in advance line
 		{
@@ -4423,7 +5415,7 @@ func (s *SubscriptionHandlerTestSuite) TestAlignedSubscriptionProratingBehavior(
 	s.NoError(err)
 
 	// Let's syncrhonize subscription data for 1 month
-	s.NoError(s.Service.SyncByView(ctx, subView, s.mustParseTime("2024-03-01T00:00:00Z")))
+	s.NoError(s.Service.SyncByID(ctx, subView.Subscription.NamespacedID, s.mustParseTime("2024-03-01T00:00:00Z")))
 
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", gatheringInvoice)
@@ -4590,7 +5582,7 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 
 	// Given
 	//	a subscription started with a monthly in advance flat fee
-	//  the first month is already synced
+	//  the first two months are already synced
 	// When we change the algorithm we use to calculate the period (emulated by an invoice change)
 	// Then
 	//  The next line will be automatically adjusted to start at the end of the previous period's end
@@ -4614,7 +5606,7 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 	invoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", invoice)
@@ -4623,7 +5615,7 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 		Invoice:      invoice.GetInvoiceID(),
 		ChangeSource: billing.ChangeSourceSystem,
 		EditFn: func(invoice *billing.GatheringInvoice) error {
-			line := invoice.Lines.OrEmpty()[0]
+			line := *s.getGatheringLineByChildID(*invoice, fmt.Sprintf("%s/first-phase/in-advance/v[0]/period[0]", subsView.Subscription.ID))
 			// simulate some faulty behavior (the old algo would have set the end to 03-03, but this way we can test this with both the old and new alog)
 			line.ServicePeriod.From = s.mustParseTime("2025-01-31T00:00:00Z")
 			line.ServicePeriod.To = s.mustParseTime("2025-03-02T00:00:00Z")
@@ -4635,6 +5627,7 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 			invoice.Lines = billing.NewGatheringInvoiceLines([]billing.GatheringLine{
 				line,
 			})
+
 			return nil
 		},
 	})
@@ -4667,12 +5660,34 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 				},
 			},
 		},
+		// the edit does not touch the second month's line, so it still starts at the original boundary
+		{
+			Matcher: recurringLineMatcher{
+				PhaseKey:  "first-phase",
+				ItemKey:   "in-advance",
+				PeriodMin: 1,
+				PeriodMax: 1,
+			},
+			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+				Amount:      alpacadecimal.NewFromFloat(6),
+				PaymentTerm: productcatalog.InAdvancePaymentTerm,
+			})),
+			Periods: []timeutil.ClosedPeriod{
+				{
+					From: s.mustParseTime("2025-02-28T00:00:00Z"),
+					To:   s.mustParseTime("2025-03-31T00:00:00Z"),
+				},
+			},
+			AdditionalChecks: func(line billing.GenericInvoiceLine) {
+				s.False(line.IsDeleted())
+			},
+		},
 	})
 
 	// Let's generate the next set of items
 	clock.FreezeTime(s.mustParseTime("2025-02-28T00:00:00Z"))
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 	invoice = s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice - updated", invoice)
@@ -4683,7 +5698,7 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 				PhaseKey:  "first-phase",
 				ItemKey:   "in-advance",
 				PeriodMin: 0,
-				PeriodMax: 1,
+				PeriodMax: 2,
 			},
 			Price: mo.Some(productcatalog.NewPriceFrom(productcatalog.FlatPrice{
 				Amount:      alpacadecimal.NewFromFloat(6),
@@ -4698,11 +5713,17 @@ func (s *SubscriptionHandlerTestSuite) TestSynchronizeSubscriptionPeriodAlgorith
 					From: s.mustParseTime("2025-03-02T00:00:00Z"),
 					To:   s.mustParseTime("2025-03-31T00:00:00Z"),
 				},
+				// the month after the adjusted one keeps its regular period
+				{
+					From: s.mustParseTime("2025-03-31T00:00:00Z"),
+					To:   s.mustParseTime("2025-04-30T00:00:00Z"),
+				},
 			},
 
 			InvoiceAt: mo.Some([]time.Time{
 				s.mustParseTime("2025-01-31T00:00:00Z"),
 				s.mustParseTime("2025-03-02T00:00:00Z"),
+				s.mustParseTime("2025-03-31T00:00:00Z"),
 			}),
 		},
 	})
@@ -4718,7 +5739,6 @@ func (s *SubscriptionHandlerTestSuite) TestDeletedCustomerHandling() {
 	// Then
 	//  we can still sync the subscription
 	//  and the deleted customer is billed for the outstanding amount
-
 	ctx := s.T().Context()
 	clock.FreezeTime(s.mustParseTime("2025-01-01T00:00:00Z"))
 	defer clock.UnFreeze()
@@ -4764,7 +5784,7 @@ func (s *SubscriptionHandlerTestSuite) TestDeletedCustomerHandling() {
 	subsView, err = s.SubscriptionService.GetView(ctx, subs.NamespacedID)
 	s.NoError(err)
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 	// Then the gathering invoice should be available
 	gatheringInvoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
@@ -4904,7 +5924,7 @@ func (s *SubscriptionHandlerTestSuite) TestFirstDayOfMonthBillingForSubPeriodLen
 
 	clock.FreezeTime(s.mustParseTime("2024-01-20T00:00:00Z")) // This will be the present
 
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now(), subscriptionsync.WithInvoicePendingLines()))
 
 	invoices, err := s.BillingService.ListGatheringInvoices(ctx, billing.ListGatheringInvoicesInput{
 		Customers: []string{s.Customer.ID},
@@ -4937,7 +5957,7 @@ func (s *SubscriptionHandlerTestSuite) TestFirstDayOfMonthBillingForSubPeriodLen
 		},
 	})
 
-	s.NoError(s.Service.SyncByView(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now()))
 
 	invoice := s.gatheringInvoice(ctx, s.Namespace, s.Customer.ID)
 	s.DebugDumpInvoice("gathering invoice", invoice)
@@ -5013,31 +6033,13 @@ func (s *SubscriptionHandlerTestSuite) TestSyncStateUpdateNoBillables() {
 
 	clock.FreezeTime(s.mustParseTime("2024-01-20T00:00:00Z")) // This will be the present
 
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now(), subscriptionsync.WithInvoicePendingLines()))
 
-	syncStates, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{
-		{
-			Namespace: subsView.Subscription.Namespace,
-			ID:        subsView.Subscription.ID,
-		},
-	})
-
-	require.NoError(s.T(), err)
-	require.Len(s.T(), syncStates, 1)
-
-	s.Equal(subscriptionsync.SyncState{
-		SubscriptionID: models.NamespacedID{
-			Namespace: subsView.Subscription.Namespace,
-			ID:        subsView.Subscription.ID,
-		},
-		HasBillables:  false,
-		SyncedAt:      clock.Now().UTC(),
-		NextSyncAfter: nil,
-	}, syncStates[0])
+	s.requireUnscheduled(subsView.Subscription.NamespacedID, subscriptionsync.SyncStateStateNoBillables)
 
 	// The optimized lookup fetches by globally unique subscription ID, but must
 	// still conceal sync states from callers requesting that ID in another namespace.
-	syncStates, err = s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{
+	syncStates, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{
 		{
 			Namespace: "another-namespace",
 			ID:        subsView.Subscription.ID,
@@ -5134,49 +6136,20 @@ func (s *SubscriptionHandlerTestSuite) TestSyncStateUpdateWithFreePhaseActiveInT
 
 	clock.FreezeTime(s.mustParseTime("2024-01-20T00:00:00Z")) // This will be the present
 
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now(), subscriptionsync.WithInvoicePendingLines()))
 
-	syncStates, err := s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{
-		{
-			Namespace: subsView.Subscription.Namespace,
-			ID:        subsView.Subscription.ID,
-		},
+	// Only the first paid billing period is provisioned, so the next sync falls into it.
+	s.requireActiveDeadline(subsView.Subscription.NamespacedID, timeutil.ClosedPeriod{
+		From: s.mustParseTime("2025-12-15T00:00:00Z"),
+		To:   s.mustParseTime("2026-01-15T00:00:00Z"),
 	})
-
-	require.NoError(s.T(), err)
-	require.Len(s.T(), syncStates, 1)
-
-	s.Equal(subscriptionsync.SyncState{
-		SubscriptionID: models.NamespacedID{
-			Namespace: subsView.Subscription.Namespace,
-			ID:        subsView.Subscription.ID,
-		},
-		HasBillables:  true,
-		SyncedAt:      clock.Now().UTC(),
-		NextSyncAfter: lo.ToPtr(s.mustParseTime("2025-12-15T00:00:00Z")),
-	}, syncStates[0])
 
 	// Let's advance the clock to simulate the next sync happening
 	clock.FreezeTime(s.mustParseTime("2025-12-15T01:00:00Z"))
-	s.NoError(s.Service.SyncByViewAndInvoiceCustomer(ctx, subsView, clock.Now()))
+	s.NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, clock.Now(), subscriptionsync.WithInvoicePendingLines()))
 
-	syncStates, err = s.Adapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{
-		{
-			Namespace: subsView.Subscription.Namespace,
-			ID:        subsView.Subscription.ID,
-		},
+	s.requireActiveDeadline(subsView.Subscription.NamespacedID, timeutil.ClosedPeriod{
+		From: s.mustParseTime("2026-01-15T00:00:00Z"),
+		To:   s.mustParseTime("2026-02-15T00:00:00Z"),
 	})
-
-	require.NoError(s.T(), err)
-	require.Len(s.T(), syncStates, 1)
-
-	s.Equal(subscriptionsync.SyncState{
-		SubscriptionID: models.NamespacedID{
-			Namespace: subsView.Subscription.Namespace,
-			ID:        subsView.Subscription.ID,
-		},
-		HasBillables:  true,
-		SyncedAt:      clock.Now().UTC(),
-		NextSyncAfter: lo.ToPtr(s.mustParseTime("2026-01-15T00:00:00Z")),
-	}, syncStates[0])
 }

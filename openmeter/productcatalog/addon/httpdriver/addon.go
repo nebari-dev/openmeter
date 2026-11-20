@@ -7,7 +7,7 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
@@ -25,29 +25,35 @@ import (
 
 type (
 	ListAddonsRequest  = addon.ListAddonsInput
-	ListAddonsResponse = api.AddonPaginatedResponse
-	ListAddonsParams   = api.ListAddonsParams
-	ListAddonsHandler  httptransport.HandlerWithArgs[ListAddonsRequest, ListAddonsResponse, ListAddonsParams]
+	ListAddonsResponse = apiv1models.AddonPaginatedResponse
+	ListAddonsParams   = apiv1models.ListAddonsParams
+
+	ListAddonsHandlerRequest struct {
+		Namespace string
+		ListAddonsRequest
+	}
+
+	ListAddonsHandler httptransport.HandlerWithArgs[ListAddonsHandlerRequest, ListAddonsResponse, ListAddonsParams]
 )
 
 func (h *handler) ListAddons() ListAddonsHandler {
 	return httptransport.NewHandlerWithArgs(
-		func(ctx context.Context, r *http.Request, params ListAddonsParams) (ListAddonsRequest, error) {
+		func(ctx context.Context, r *http.Request, params ListAddonsParams) (ListAddonsHandlerRequest, error) {
 			ns, err := h.resolveNamespace(ctx)
 			if err != nil {
-				return ListAddonsRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
+				return ListAddonsHandlerRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
 			}
 
 			var statusFilter []productcatalog.AddonStatus
 			if params.Status != nil {
-				statusFilter = lo.Map(*params.Status, func(status api.AddonStatus, _ int) productcatalog.AddonStatus {
+				statusFilter = lo.Map(*params.Status, func(status apiv1models.AddonStatus, _ int) productcatalog.AddonStatus {
 					return productcatalog.AddonStatus(status)
 				})
 			}
 
 			req := ListAddonsRequest{
-				OrderBy: addon.OrderBy(lo.FromPtrOr(params.OrderBy, api.AddonOrderById)),
-				Order:   sortx.Order(defaultx.WithDefault(params.Order, api.SortOrderDESC)),
+				OrderBy: addon.OrderBy(lo.FromPtrOr(params.OrderBy, apiv1models.AddonOrderById)),
+				Order:   sortx.Order(defaultx.WithDefault(params.Order, apiv1models.SortOrderDESC)),
 				Page: pagination.Page{
 					PageSize:   defaultx.WithDefault(params.PageSize, notification.DefaultPageSize),
 					PageNumber: defaultx.WithDefault(params.Page, notification.DefaultPageNumber),
@@ -65,27 +71,37 @@ func (h *handler) ListAddons() ListAddonsHandler {
 			if params.Id != nil {
 				req.ID = &filter.FilterULID{FilterString: filter.FilterString{In: params.Id}}
 			}
+
 			if params.Key != nil {
 				req.Key = &filter.FilterString{In: params.Key}
 			}
+
 			if params.Currency != nil {
 				req.Currency = &filter.FilterString{In: params.Currency}
 			}
 
-			return req, nil
+			return ListAddonsHandlerRequest{
+				Namespace:         ns,
+				ListAddonsRequest: req,
+			}, nil
 		},
-		func(ctx context.Context, request ListAddonsRequest) (ListAddonsResponse, error) {
-			resp, err := h.service.ListAddons(ctx, request)
+		func(ctx context.Context, request ListAddonsHandlerRequest) (ListAddonsResponse, error) {
+			resp, err := h.service.ListAddons(ctx, request.ListAddonsRequest)
 			if err != nil {
 				return ListAddonsResponse{}, fmt.Errorf("failed to list add-ons: %w", err)
 			}
 
-			items := make([]api.Addon, 0, len(resp.Items))
+			taxCodes, err := h.taxCodesForAddons(ctx, request.Namespace, resp.Items...)
+			if err != nil {
+				return ListAddonsResponse{}, err
+			}
+
+			items := make([]apiv1models.Addon, 0, len(resp.Items))
 
 			for _, a := range resp.Items {
-				var item api.Addon
+				var item apiv1models.Addon
 
-				item, err = FromAddon(a)
+				item, err = FromAddon(a, taxCodes)
 				if err != nil {
 					return ListAddonsResponse{}, fmt.Errorf("failed to cast add-on [namespace=%s key=%s]: %w", a.Namespace, a.Key, err)
 				}
@@ -110,44 +126,67 @@ func (h *handler) ListAddons() ListAddonsHandler {
 }
 
 type (
-	CreateAddonRequest  = addon.CreateAddonInput
-	CreateAddonResponse = api.Addon
-	CreateAddonHandler  httptransport.Handler[CreateAddonRequest, CreateAddonResponse]
+	CreateAddonRequest = addon.CreateAddonInput
+	// CreateAddonHandlerRequest holds the undecoded body: mapping it may create Tax Codes for
+	// legacy stripe.code values, which has to happen in the same transaction as the create.
+	CreateAddonHandlerRequest struct {
+		Namespace string
+		Body      apiv1models.AddonCreate
+	}
+	CreateAddonResponse = apiv1models.Addon
+	CreateAddonHandler  httptransport.Handler[CreateAddonHandlerRequest, CreateAddonResponse]
 )
 
 func (h *handler) CreateAddon() CreateAddonHandler {
 	return httptransport.NewHandler(
-		func(ctx context.Context, r *http.Request) (CreateAddonRequest, error) {
-			body := api.AddonCreate{}
+		func(ctx context.Context, r *http.Request) (CreateAddonHandlerRequest, error) {
+			body := apiv1models.AddonCreate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
-				return CreateAddonRequest{}, fmt.Errorf("failed to decode create add-on request: %w", err)
+				return CreateAddonHandlerRequest{}, fmt.Errorf("failed to decode create add-on request: %w", err)
 			}
 
 			ns, err := h.resolveNamespace(ctx)
 			if err != nil {
-				return CreateAddonRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
+				return CreateAddonHandlerRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
 			}
 
-			req, err := AsCreateAddonRequest(body, ns)
-			if err != nil {
-				return CreateAddonRequest{}, fmt.Errorf("failed to parse add-on request [namespace=%s key=%s]: %w", ns, body.Key, err)
-			}
-
-			req.NamespacedModel = models.NamespacedModel{
+			return CreateAddonHandlerRequest{
 				Namespace: ns,
-			}
-
-			req.IgnoreNonCriticalIssues = true
-
-			return req, nil
+				Body:      body,
+			}, nil
 		},
-		func(ctx context.Context, request CreateAddonRequest) (CreateAddonResponse, error) {
-			a, err := h.service.CreateAddon(ctx, request)
-			if err != nil {
-				return CreateAddonResponse{}, fmt.Errorf("failed to create add-on [namespace=%s key=%s]: %w", request.Namespace, request.Key, err)
-			}
+		func(ctx context.Context, request CreateAddonHandlerRequest) (CreateAddonResponse, error) {
+			var resp CreateAddonResponse
 
-			return FromAddon(*a)
+			err := h.taxCodeResolver.WithResolver(ctx, func(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver) error {
+				req, err := AsCreateAddonRequest(ctx, resolver, request.Body, request.Namespace)
+				if err != nil {
+					return fmt.Errorf("failed to parse add-on request [namespace=%s key=%s]: %w", request.Namespace, request.Body.Key, err)
+				}
+
+				req.NamespacedModel = models.NamespacedModel{
+					Namespace: request.Namespace,
+				}
+
+				req.IgnoreNonCriticalIssues = true
+
+				a, err := h.service.CreateAddon(ctx, req)
+				if err != nil {
+					return fmt.Errorf("failed to create add-on [namespace=%s key=%s]: %w", req.Namespace, req.Key, err)
+				}
+
+				// Inside the transaction so Tax Codes created for this request are visible.
+				taxCodes, err := h.taxCodesForAddons(ctx, a.Namespace, *a)
+				if err != nil {
+					return err
+				}
+
+				resp, err = FromAddon(*a, taxCodes)
+
+				return err
+			})
+
+			return resp, err
 		},
 		commonhttp.JSONResponseEncoderWithStatus[CreateAddonResponse](http.StatusCreated),
 		httptransport.AppendOptions(
@@ -159,48 +198,71 @@ func (h *handler) CreateAddon() CreateAddonHandler {
 }
 
 type (
-	UpdateAddonRequest  = addon.UpdateAddonInput
-	UpdateAddonResponse = api.Addon
-	UpdateAddonHandler  httptransport.HandlerWithArgs[UpdateAddonRequest, UpdateAddonResponse, string]
+	UpdateAddonRequest = addon.UpdateAddonInput
+	// UpdateAddonHandlerRequest holds the undecoded body for the same reason as
+	// CreateAddonHandlerRequest.
+	UpdateAddonHandlerRequest struct {
+		models.NamespacedID
+		Body apiv1models.AddonReplaceUpdate
+	}
+	UpdateAddonResponse = apiv1models.Addon
+	UpdateAddonHandler  httptransport.HandlerWithArgs[UpdateAddonHandlerRequest, UpdateAddonResponse, string]
 )
 
 func (h *handler) UpdateAddon() UpdateAddonHandler {
 	return httptransport.NewHandlerWithArgs(
-		func(ctx context.Context, r *http.Request, addonID string) (UpdateAddonRequest, error) {
-			body := api.AddonReplaceUpdate{}
+		func(ctx context.Context, r *http.Request, addonID string) (UpdateAddonHandlerRequest, error) {
+			body := apiv1models.AddonReplaceUpdate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
-				return UpdateAddonRequest{}, fmt.Errorf("failed to decode update add-on request: %w", err)
+				return UpdateAddonHandlerRequest{}, fmt.Errorf("failed to decode update add-on request: %w", err)
 			}
 
 			ns, err := h.resolveNamespace(ctx)
 			if err != nil {
-				return UpdateAddonRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
+				return UpdateAddonHandlerRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
 			}
 
-			req, err := AsUpdateAddonRequest(body, ns, addonID)
-			if err != nil {
-				return UpdateAddonRequest{}, fmt.Errorf("failed to parse update add-on request [namespace=%s id=%s]: %w", ns, addonID, err)
-			}
-
-			req.NamespacedID = models.NamespacedID{
-				Namespace: ns,
-				ID:        addonID,
-			}
-
-			req.IgnoreNonCriticalIssues = true
-
-			req.RejectUnitConfig = true
-			req.RejectUnrepresentableCurrencies = true
-
-			return req, nil
+			return UpdateAddonHandlerRequest{
+				NamespacedID: models.NamespacedID{
+					Namespace: ns,
+					ID:        addonID,
+				},
+				Body: body,
+			}, nil
 		},
-		func(ctx context.Context, request UpdateAddonRequest) (UpdateAddonResponse, error) {
-			a, err := h.service.UpdateAddon(ctx, request)
-			if err != nil {
-				return UpdateAddonResponse{}, fmt.Errorf("failed to update add-on [namespace=%s id=%s]: %w", request.Namespace, request.ID, err)
-			}
+		func(ctx context.Context, request UpdateAddonHandlerRequest) (UpdateAddonResponse, error) {
+			var resp UpdateAddonResponse
 
-			return FromAddon(*a)
+			err := h.taxCodeResolver.WithResolver(ctx, func(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver) error {
+				req, err := AsUpdateAddonRequest(ctx, resolver, request.Body, request.Namespace, request.ID)
+				if err != nil {
+					return fmt.Errorf("failed to parse update add-on request [namespace=%s id=%s]: %w", request.Namespace, request.ID, err)
+				}
+
+				req.NamespacedID = request.NamespacedID
+
+				req.IgnoreNonCriticalIssues = true
+
+				req.RejectUnitConfig = true
+				req.RejectUnrepresentableCurrencies = true
+
+				a, err := h.service.UpdateAddon(ctx, req)
+				if err != nil {
+					return fmt.Errorf("failed to update add-on [namespace=%s id=%s]: %w", req.Namespace, req.ID, err)
+				}
+
+				// Inside the transaction so Tax Codes created for this request are visible.
+				taxCodes, err := h.taxCodesForAddons(ctx, a.Namespace, *a)
+				if err != nil {
+					return err
+				}
+
+				resp, err = FromAddon(*a, taxCodes)
+
+				return err
+			})
+
+			return resp, err
 		},
 		commonhttp.JSONResponseEncoderWithStatus[UpdateAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -263,7 +325,7 @@ type (
 		// Version is not set.
 		IncludeLatest bool
 	}
-	GetAddonResponse = api.Addon
+	GetAddonResponse = apiv1models.Addon
 	GetAddonHandler  httptransport.HandlerWithArgs[GetAddonRequest, GetAddonResponse, GetAddonRequestParams]
 )
 
@@ -297,14 +359,21 @@ func (h *handler) GetAddon() GetAddonHandler {
 			if a.AsProductCatalogAddon().HasUnitConfig() {
 				return GetAddonResponse{}, productcatalog.ErrUnitConfigNotRepresentable
 			}
+
 			if a.Currency.IsCustom() {
 				return GetAddonResponse{}, productcatalog.ErrCurrencyNotRepresentable
 			}
+
 			if a.AsProductCatalogAddon().HasCurrencyOverrides() {
 				return GetAddonResponse{}, productcatalog.ErrRateCardCurrencyNotRepresentable
 			}
 
-			return FromAddon(*a)
+			taxCodes, err := h.taxCodesForAddons(ctx, a.Namespace, *a)
+			if err != nil {
+				return GetAddonResponse{}, err
+			}
+
+			return FromAddon(*a, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[GetAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -317,7 +386,7 @@ func (h *handler) GetAddon() GetAddonHandler {
 
 type (
 	PublishAddonRequest  = addon.PublishAddonInput
-	PublishAddonResponse = api.Addon
+	PublishAddonResponse = apiv1models.Addon
 	PublishAddonHandler  httptransport.HandlerWithArgs[PublishAddonRequest, PublishAddonResponse, string]
 )
 
@@ -351,7 +420,12 @@ func (h *handler) PublishAddon() PublishAddonHandler {
 				return PublishAddonResponse{}, fmt.Errorf("failed to punlish add-on [namespace=%s id=%s]: %w", request.Namespace, request.ID, err)
 			}
 
-			return FromAddon(*a)
+			taxCodes, err := h.taxCodesForAddons(ctx, a.Namespace, *a)
+			if err != nil {
+				return PublishAddonResponse{}, err
+			}
+
+			return FromAddon(*a, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[PublishAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -364,7 +438,7 @@ func (h *handler) PublishAddon() PublishAddonHandler {
 
 type (
 	ArchiveAddonRequest  = addon.ArchiveAddonInput
-	ArchiveAddonResponse = api.Addon
+	ArchiveAddonResponse = apiv1models.Addon
 	ArchiveAddonHandler  httptransport.HandlerWithArgs[ArchiveAddonRequest, ArchiveAddonResponse, string]
 )
 
@@ -397,7 +471,12 @@ func (h *handler) ArchiveAddon() ArchiveAddonHandler {
 				return ArchiveAddonResponse{}, fmt.Errorf("failed to archive add-on [namespace=%s id=%s]: %w", request.Namespace, request.ID, err)
 			}
 
-			return FromAddon(*p)
+			taxCodes, err := h.taxCodesForAddons(ctx, p.Namespace, *p)
+			if err != nil {
+				return ArchiveAddonResponse{}, err
+			}
+
+			return FromAddon(*p, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[ArchiveAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(

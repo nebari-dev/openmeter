@@ -9,10 +9,12 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
-	apphttpdriver "github.com/openmeterio/openmeter/openmeter/app/httpdriver"
 	"github.com/openmeterio/openmeter/openmeter/billing"
+	billingconvert "github.com/openmeterio/openmeter/openmeter/billing/apiconvert"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
+	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/convert"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/defaultx"
@@ -26,15 +28,20 @@ import (
 var _ ProfileHandler = (*handler)(nil)
 
 type (
-	CreateProfileRequest  = billing.CreateProfileInput
-	CreateProfileResponse = api.BillingProfile
+	// CreateProfileRequest keeps the default tax config unmapped: mapping it may create Tax Codes
+	// for legacy stripe.code values, which has to happen in the same transaction as the create.
+	CreateProfileRequest struct {
+		Input            billing.CreateProfileInput
+		DefaultTaxConfig *apiv1models.TaxConfig
+	}
+	CreateProfileResponse = apiv1models.BillingProfile
 	CreateProfileHandler  httptransport.Handler[CreateProfileRequest, CreateProfileResponse]
 )
 
 func (h *handler) CreateProfile() CreateProfileHandler {
 	return httptransport.NewHandler(
 		func(ctx context.Context, r *http.Request) (CreateProfileRequest, error) {
-			body := api.BillingProfileCreate{}
+			body := apiv1models.BillingProfileCreate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return CreateProfileRequest{}, fmt.Errorf("failed to decode request body: %w", err)
 			}
@@ -50,41 +57,66 @@ func (h *handler) CreateProfile() CreateProfileHandler {
 			}
 
 			return CreateProfileRequest{
-				Namespace: ns,
+				Input: billing.CreateProfileInput{
+					Namespace: ns,
 
-				Name:        body.Name,
-				Description: body.Description,
+					Name:        body.Name,
+					Description: body.Description,
 
-				Metadata: lo.FromPtrOr(body.Metadata, map[string]string{}),
+					Metadata: lo.FromPtrOr(body.Metadata, map[string]string{}),
 
-				Supplier: apiBillingPartyCreateToSupplierContact(body.Supplier),
+					Supplier: apiBillingPartyCreateToSupplierContact(body.Supplier),
 
-				Default: body.Default,
+					Default: body.Default,
 
-				WorkflowConfig: workflow,
-				Apps: billing.CreateProfileAppsInput{
-					Tax: app.AppID{
-						Namespace: ns,
-						ID:        body.Apps.Tax,
-					},
-					Invoicing: app.AppID{
-						Namespace: ns,
-						ID:        body.Apps.Invoicing,
-					},
-					Payment: app.AppID{
-						Namespace: ns,
-						ID:        body.Apps.Payment,
+					WorkflowConfig: workflow,
+					Apps: billing.CreateProfileAppsInput{
+						Tax: app.AppID{
+							Namespace: ns,
+							ID:        body.Apps.Tax,
+						},
+						Invoicing: app.AppID{
+							Namespace: ns,
+							ID:        body.Apps.Invoicing,
+						},
+						Payment: app.AppID{
+							Namespace: ns,
+							ID:        body.Apps.Payment,
+						},
 					},
 				},
+				DefaultTaxConfig: lo.FromPtr(body.Workflow.Invoicing).DefaultTaxConfig,
 			}, nil
 		},
 		func(ctx context.Context, request CreateProfileRequest) (CreateProfileResponse, error) {
-			profile, err := h.service.CreateProfile(ctx, request)
-			if err != nil {
-				return CreateProfileResponse{}, fmt.Errorf("failed to create profile: %w", err)
-			}
+			var resp CreateProfileResponse
 
-			return h.MapProfileToApi(ctx, profile)
+			err := h.taxCodeResolver.WithResolver(ctx, func(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver) error {
+				input := request.Input
+
+				// Nothing is stored yet, so the gate rejects any tax code and nothing gets resolved
+				// or created; only behavior can get through.
+				defaultTaxConfig, err := billingconvert.ResolveProfileDefaultTaxConfig(ctx, resolver, billingconvert.ResolveProfileDefaultTaxConfigInput{
+					Namespace: input.Namespace,
+					Raw:       mapTaxConfigToEntity(request.DefaultTaxConfig),
+				})
+				if err != nil {
+					return err
+				}
+
+				input.WorkflowConfig.Invoicing.DefaultTaxConfig = defaultTaxConfig
+
+				profile, err := h.service.CreateProfile(ctx, input)
+				if err != nil {
+					return fmt.Errorf("failed to create profile: %w", err)
+				}
+
+				resp, err = h.mapProfileWithTaxCodesToAPI(ctx, profile)
+
+				return err
+			})
+
+			return resp, err
 		},
 		commonhttp.JSONResponseEncoderWithStatus[CreateProfileResponse](http.StatusCreated),
 		httptransport.AppendOptions(
@@ -98,10 +130,10 @@ func (h *handler) CreateProfile() CreateProfileHandler {
 type (
 	GetProfileParams struct {
 		ID     string
-		Expand []api.BillingProfileExpand
+		Expand []apiv1models.BillingProfileExpand
 	}
 	GetProfileRequest  = billing.GetProfileInput
-	GetProfileResponse = api.BillingProfile
+	GetProfileResponse = apiv1models.BillingProfile
 	GetProfileHandler  httptransport.HandlerWithArgs[GetProfileRequest, GetProfileResponse, GetProfileParams]
 )
 
@@ -127,7 +159,7 @@ func (h *handler) GetProfile() GetProfileHandler {
 				return GetProfileResponse{}, fmt.Errorf("failed to get profile: %w", err)
 			}
 
-			return h.MapProfileToApi(ctx, profile)
+			return h.mapProfileWithTaxCodesToAPI(ctx, profile)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[CreateProfileResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -174,15 +206,20 @@ func (h *handler) DeleteProfile() DeleteProfileHandler {
 }
 
 type (
-	UpdateProfileRequest  = billing.UpdateProfileInput
-	UpdateProfileResponse = api.BillingProfile
+	// UpdateProfileRequest keeps the default tax config unmapped for the same reason as
+	// CreateProfileRequest.
+	UpdateProfileRequest struct {
+		Input            billing.UpdateProfileInput
+		DefaultTaxConfig *apiv1models.TaxConfig
+	}
+	UpdateProfileResponse = apiv1models.BillingProfile
 	UpdateProfileHandler  httptransport.HandlerWithArgs[UpdateProfileRequest, UpdateProfileResponse, string]
 )
 
 func (h *handler) UpdateProfile() UpdateProfileHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, id string) (UpdateProfileRequest, error) {
-			body := api.BillingProfileReplaceUpdateWithWorkflow{}
+			body := apiv1models.BillingProfileReplaceUpdateWithWorkflow{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return UpdateProfileRequest{}, fmt.Errorf("failed to decode request body: %w", err)
 			}
@@ -198,28 +235,64 @@ func (h *handler) UpdateProfile() UpdateProfileHandler {
 			}
 
 			return UpdateProfileRequest{
-				Namespace: ns,
-				ID:        id,
+				Input: billing.UpdateProfileInput{
+					Namespace: ns,
+					ID:        id,
 
-				Name:        body.Name,
-				Description: body.Description,
+					Name:        body.Name,
+					Description: body.Description,
 
-				Metadata: lo.FromPtrOr(body.Metadata, map[string]string{}),
+					Metadata: lo.FromPtrOr(body.Metadata, map[string]string{}),
 
-				Supplier: apiBillingPartyToSupplierContact(body.Supplier),
+					Supplier: apiBillingPartyToSupplierContact(body.Supplier),
 
-				Default: body.Default,
+					Default: body.Default,
 
-				WorkflowConfig: workflow,
+					WorkflowConfig: workflow,
+				},
+				DefaultTaxConfig: lo.FromPtr(body.Workflow.Invoicing).DefaultTaxConfig,
 			}, nil
 		},
 		func(ctx context.Context, request UpdateProfileRequest) (UpdateProfileResponse, error) {
-			profile, err := h.service.UpdateProfile(ctx, request)
-			if err != nil {
-				return UpdateProfileResponse{}, fmt.Errorf("failed to update profile: %w", err)
-			}
+			var resp UpdateProfileResponse
 
-			return h.MapProfileToApi(ctx, profile)
+			err := h.taxCodeResolver.WithResolver(ctx, func(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver) error {
+				input := request.Input
+
+				stored, err := h.service.GetProfile(ctx, billing.GetProfileInput{
+					Profile: input.ProfileID(),
+				})
+				if err != nil {
+					return fmt.Errorf("failed to get profile: %w", err)
+				}
+
+				storedDefaultTaxConfig, err := billingconvert.LegacyProfileDefaultTaxConfig(ctx, h.taxCodeResolver, input.Namespace, stored.WorkflowConfig)
+				if err != nil {
+					return err
+				}
+
+				defaultTaxConfig, err := billingconvert.ResolveProfileDefaultTaxConfig(ctx, resolver, billingconvert.ResolveProfileDefaultTaxConfigInput{
+					Namespace: input.Namespace,
+					Raw:       mapTaxConfigToEntity(request.DefaultTaxConfig),
+					Stored:    storedDefaultTaxConfig,
+				})
+				if err != nil {
+					return err
+				}
+
+				input.WorkflowConfig.Invoicing.DefaultTaxConfig = defaultTaxConfig
+
+				profile, err := h.service.UpdateProfile(ctx, input)
+				if err != nil {
+					return fmt.Errorf("failed to update profile: %w", err)
+				}
+
+				resp, err = h.mapProfileWithTaxCodesToAPI(ctx, profile)
+
+				return err
+			})
+
+			return resp, err
 		},
 		commonhttp.JSONResponseEncoderWithStatus[UpdateProfileResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -232,18 +305,18 @@ func (h *handler) UpdateProfile() UpdateProfileHandler {
 
 type (
 	ListProfilesRequest  = billing.ListProfilesInput
-	ListProfilesResponse = api.BillingProfilePaginatedResponse
-	ListProfilesParams   = api.ListBillingProfilesParams
+	ListProfilesResponse = apiv1models.BillingProfilePaginatedResponse
+	ListProfilesParams   = apiv1models.ListBillingProfilesParams
 	ListProfilesHandler  httptransport.HandlerWithArgs[ListProfilesRequest, ListProfilesResponse, ListProfilesParams]
 )
 
-func mapProfileOrderBy(orderBy api.BillingProfileOrderBy) billing.ProfileOrderBy {
+func mapProfileOrderBy(orderBy apiv1models.BillingProfileOrderBy) billing.ProfileOrderBy {
 	switch orderBy {
-	case api.BillingProfileOrderByName:
+	case apiv1models.BillingProfileOrderByName:
 		return billing.ProfileOrderByName
-	case api.BillingProfileOrderByUpdatedAt:
+	case apiv1models.BillingProfileOrderByUpdatedAt:
 		return billing.ProfileOrderByUpdatedAt
-	case api.BillingProfileOrderByDefault:
+	case apiv1models.BillingProfileOrderByDefault:
 		return billing.ProfileOrderByDefault
 	default:
 		return billing.ProfileOrderByCreatedAt
@@ -261,8 +334,8 @@ func (h *handler) ListProfiles() ListProfilesHandler {
 			return ListProfilesRequest{
 				Namespace:       ns,
 				IncludeArchived: lo.FromPtrOr(params.IncludeArchived, DefaultIncludeArchived),
-				OrderBy:         mapProfileOrderBy(lo.FromPtrOr(params.OrderBy, api.BillingProfileOrderByCreatedAt)),
-				Order:           sortx.Order(lo.FromPtrOr(params.Order, api.SortOrderDESC)),
+				OrderBy:         mapProfileOrderBy(lo.FromPtrOr(params.OrderBy, apiv1models.BillingProfileOrderByCreatedAt)),
+				Order:           sortx.Order(lo.FromPtrOr(params.Order, apiv1models.SortOrderDESC)),
 
 				Page: pagination.Page{
 					PageSize:   defaultx.WithDefault(params.PageSize, DefaultPageSize),
@@ -277,14 +350,22 @@ func (h *handler) ListProfiles() ListProfilesHandler {
 			}
 
 			out := ListProfilesResponse{
-				Items:      make([]api.BillingProfile, 0, len(profiles.Items)),
+				Items:      make([]apiv1models.BillingProfile, 0, len(profiles.Items)),
 				Page:       profiles.Page.PageNumber,
 				PageSize:   profiles.Page.PageSize,
 				TotalCount: profiles.TotalCount,
 			}
 
+			taxCodes, err := billingconvert.ResolveWorkflowTaxCodes(ctx, h.taxCodeResolver, request.Namespace,
+				lo.Map(profiles.Items, func(p billing.Profile, _ int) billing.WorkflowConfig {
+					return p.WorkflowConfig
+				})...)
+			if err != nil {
+				return ListProfilesResponse{}, err
+			}
+
 			for _, profile := range profiles.Items {
-				apiProfile, err := h.MapProfileToApi(ctx, &profile)
+				apiProfile, err := toAPIBillingProfile(&profile, taxCodes)
 				if err != nil {
 					return ListProfilesResponse{}, fmt.Errorf("failed to convert profile to API: %w", err)
 				}
@@ -303,7 +384,7 @@ func (h *handler) ListProfiles() ListProfilesHandler {
 	)
 }
 
-func apiBillingPartyCreateToSupplierContact(c api.BillingParty) billing.SupplierContact {
+func apiBillingPartyCreateToSupplierContact(c apiv1models.BillingParty) billing.SupplierContact {
 	out := billing.SupplierContact{
 		Name: lo.FromPtr(c.Name),
 	}
@@ -331,7 +412,7 @@ func apiBillingPartyCreateToSupplierContact(c api.BillingParty) billing.Supplier
 	return out
 }
 
-func apiBillingPartyToSupplierContact(c api.BillingParty) billing.SupplierContact {
+func apiBillingPartyToSupplierContact(c apiv1models.BillingParty) billing.SupplierContact {
 	out := billing.SupplierContact{
 		Name: lo.FromPtr(c.Name),
 	}
@@ -359,27 +440,27 @@ func apiBillingPartyToSupplierContact(c api.BillingParty) billing.SupplierContac
 	return out
 }
 
-func fromAPIBillingWorkflow(i api.BillingWorkflow) (billing.WorkflowConfig, error) {
+func fromAPIBillingWorkflow(i apiv1models.BillingWorkflow) (billing.WorkflowConfig, error) {
 	return fromAPIBillingWorkflowWithSubscriptionEndProrationModeDefault(i, "")
 }
 
-func fromAPIBillingWorkflowWithSubscriptionEndProrationModeDefault(i api.BillingWorkflow, defaultSubscriptionEndProrationMode billing.SubscriptionEndProrationMode) (billing.WorkflowConfig, error) {
+func fromAPIBillingWorkflowWithSubscriptionEndProrationModeDefault(i apiv1models.BillingWorkflow, defaultSubscriptionEndProrationMode billing.SubscriptionEndProrationMode) (billing.WorkflowConfig, error) {
 	def := billing.DefaultWorkflowConfig
 
 	if i.Collection == nil {
-		i.Collection = &api.BillingWorkflowCollectionSettings{}
+		i.Collection = &apiv1models.BillingWorkflowCollectionSettings{}
 	}
 
 	if i.Invoicing == nil {
-		i.Invoicing = &api.BillingWorkflowInvoicingSettings{}
+		i.Invoicing = &apiv1models.BillingWorkflowInvoicingSettings{}
 	}
 
 	if i.Payment == nil {
-		i.Payment = &api.BillingWorkflowPaymentSettings{}
+		i.Payment = &apiv1models.BillingWorkflowPaymentSettings{}
 	}
 
 	if i.Tax == nil {
-		i.Tax = &api.BillingWorkflowTaxSettings{}
+		i.Tax = &apiv1models.BillingWorkflowTaxSettings{}
 	}
 
 	collInterval, err := parseDurationPtr(i.Collection.Interval, def.Collection.Interval)
@@ -414,7 +495,8 @@ func fromAPIBillingWorkflowWithSubscriptionEndProrationModeDefault(i api.Billing
 			DueAfter:                     dueAfter,
 			ProgressiveBilling:           lo.FromPtrOr(i.Invoicing.ProgressiveBilling, def.Invoicing.ProgressiveBilling),
 			SubscriptionEndProrationMode: subscriptionEndProrationMode,
-			DefaultTaxConfig:             mapTaxConfigToEntity(i.Invoicing.DefaultTaxConfig),
+			// The default tax config is mapped by the handlers: it needs the stored profile and
+			// the tax code resolver.
 		},
 
 		Payment: billing.PaymentConfig{
@@ -428,9 +510,9 @@ func fromAPIBillingWorkflowWithSubscriptionEndProrationModeDefault(i api.Billing
 	}, nil
 }
 
-func fromAPIBillingWorkflowCreate(i api.BillingWorkflowCreate) (billing.WorkflowConfig, error) {
+func fromAPIBillingWorkflowCreate(i apiv1models.BillingWorkflowCreate) (billing.WorkflowConfig, error) {
 	return fromAPIBillingWorkflowWithSubscriptionEndProrationModeDefault(
-		api.BillingWorkflow(i),
+		apiv1models.BillingWorkflow(i),
 		billing.DefaultWorkflowConfig.Invoicing.SubscriptionEndProrationMode,
 	)
 }
@@ -443,17 +525,30 @@ func parseDurationPtr(d *string, defaultDuration datetime.ISODuration) (datetime
 	return datetime.ISODurationString(*d).Parse()
 }
 
-func (h *handler) MapProfileToApi(ctx context.Context, p *billing.Profile) (api.BillingProfile, error) {
+func (h *handler) mapProfileWithTaxCodesToAPI(ctx context.Context, p *billing.Profile) (apiv1models.BillingProfile, error) {
 	if p == nil {
-		return api.BillingProfile{}, errors.New("profile is nil")
+		return apiv1models.BillingProfile{}, errors.New("profile is nil")
 	}
 
-	workflowConfig, err := mapWorkflowConfigToAPI(p.WorkflowConfig)
+	taxCodes, err := billingconvert.ResolveWorkflowTaxCodes(ctx, h.taxCodeResolver, p.Namespace, p.WorkflowConfig)
 	if err != nil {
-		return api.BillingProfile{}, fmt.Errorf("failed to map workflow config to API: %w", err)
+		return apiv1models.BillingProfile{}, err
 	}
 
-	out := api.BillingProfile{
+	return toAPIBillingProfile(p, taxCodes)
+}
+
+func toAPIBillingProfile(p *billing.Profile, taxCodes map[string]*taxcode.TaxCode) (apiv1models.BillingProfile, error) {
+	if p == nil {
+		return apiv1models.BillingProfile{}, errors.New("profile is nil")
+	}
+
+	workflowConfig, err := billingconvert.ToAPIBillingWorkflow(p.WorkflowConfig, taxCodes)
+	if err != nil {
+		return apiv1models.BillingProfile{}, fmt.Errorf("failed to map workflow config to API: %w", err)
+	}
+
+	out := apiv1models.BillingProfile{
 		Id:        p.ID,
 		CreatedAt: p.CreatedAt,
 		UpdatedAt: p.UpdatedAt,
@@ -464,23 +559,23 @@ func (h *handler) MapProfileToApi(ctx context.Context, p *billing.Profile) (api.
 		Default:     p.Default,
 
 		Name:     p.Name,
-		Supplier: mapSupplierContactToAPI(p.Supplier),
+		Supplier: billingconvert.ToAPIBillingParty(p.Supplier),
 		Workflow: workflowConfig,
 	}
 
 	if p.Apps != nil {
-		apps, err := mapProfileAppsToAPI(p.Apps)
+		apps, err := billingconvert.ToAPIBillingProfileApps(p.Apps)
 		if err != nil {
-			return api.BillingProfile{}, fmt.Errorf("failed to map profile apps: %w", err)
+			return apiv1models.BillingProfile{}, fmt.Errorf("failed to map profile apps: %w", err)
 		}
 
 		if apps != nil {
 			out.Apps = *apps
 		}
 	} else {
-		apps, err := mapProfileAppReferencesToAPI(p.AppReferences)
+		apps, err := billingconvert.ToAPIBillingProfileAppReferences(p.AppReferences)
 		if err != nil {
-			return api.BillingProfile{}, fmt.Errorf("failed to map profile app references: %w", err)
+			return apiv1models.BillingProfile{}, fmt.Errorf("failed to map profile app references: %w", err)
 		}
 
 		if apps != nil {
@@ -491,205 +586,12 @@ func (h *handler) MapProfileToApi(ctx context.Context, p *billing.Profile) (api.
 	return out, nil
 }
 
-func mapProfileAppsToAPI(a *billing.ProfileApps) (*api.BillingProfileAppsOrReference, error) {
-	if a == nil {
-		return nil, nil
-	}
-
-	tax, err := apphttpdriver.MapAppToAPI(a.Tax)
-	if err != nil {
-		return nil, fmt.Errorf("cannot map tax app: %w", err)
-	}
-
-	invoicing, err := apphttpdriver.MapAppToAPI(a.Invoicing)
-	if err != nil {
-		return nil, fmt.Errorf("cannot map invoicing app: %w", err)
-	}
-
-	payment, err := apphttpdriver.MapAppToAPI(a.Payment)
-	if err != nil {
-		return nil, fmt.Errorf("cannot map payment app: %w", err)
-	}
-
-	apps := api.BillingProfileApps{
-		Tax:       tax,
-		Invoicing: invoicing,
-		Payment:   payment,
-	}
-
-	out := api.BillingProfileAppsOrReference{}
-
-	if err := out.FromBillingProfileApps(apps); err != nil {
-		return nil, fmt.Errorf("failed to convert apps to API: %w", err)
-	}
-
-	return &out, nil
-}
-
-func mapProfileAppReferencesToAPI(a *billing.ProfileAppReferences) (*api.BillingProfileAppsOrReference, error) {
-	if a == nil {
-		return nil, nil
-	}
-
-	apps := api.BillingProfileAppReferences{
-		Tax: api.AppReference{
-			Id: a.Tax.ID,
-		},
-		Invoicing: api.AppReference{
-			Id: a.Invoicing.ID,
-		},
-		Payment: api.AppReference{
-			Id: a.Payment.ID,
-		},
-	}
-
-	out := api.BillingProfileAppsOrReference{}
-
-	if err := out.FromBillingProfileAppReferences(apps); err != nil {
-		return nil, fmt.Errorf("failed to convert apps to API: %w", err)
-	}
-
-	return &out, nil
-}
-
-func mapProfileExpandToEntity(expand []api.BillingProfileExpand) billing.ProfileExpand {
+func mapProfileExpandToEntity(expand []apiv1models.BillingProfileExpand) billing.ProfileExpand {
 	if len(expand) == 0 {
 		return billing.ProfileExpand{}
 	}
 
 	return billing.ProfileExpand{
-		Apps: slices.Contains(expand, api.BillingProfileExpandApps),
+		Apps: slices.Contains(expand, apiv1models.BillingProfileExpandApps),
 	}
-}
-
-func mapSupplierContactToAPI(c billing.SupplierContact) api.BillingParty {
-	a := c.Address
-
-	out := api.BillingParty{
-		Id:   lo.EmptyableToPtr(c.ID),
-		Name: lo.EmptyableToPtr(c.Name),
-		Addresses: lo.ToPtr([]api.Address{
-			{
-				Country:     (*string)(a.Country),
-				PostalCode:  a.PostalCode,
-				State:       a.State,
-				City:        a.City,
-				Line1:       a.Line1,
-				Line2:       a.Line2,
-				PhoneNumber: a.PhoneNumber,
-			},
-		}),
-	}
-
-	if c.TaxCode != nil {
-		out.TaxId = &api.BillingPartyTaxIdentity{
-			Code: c.TaxCode,
-		}
-	}
-
-	return out
-}
-
-func mapAlignmentToAPI(c billing.CollectionConfig) (*api.BillingWorkflowCollectionAlignment, error) {
-	apiAlignment := &api.BillingWorkflowCollectionAlignment{}
-
-	switch c.Alignment {
-	case billing.AlignmentKindSubscription:
-		if err := apiAlignment.FromBillingWorkflowCollectionAlignmentSubscription(
-			api.BillingWorkflowCollectionAlignmentSubscription{
-				Type: api.BillingWorkflowCollectionAlignmentSubscriptionType(c.Alignment),
-			},
-		); err != nil {
-			return &api.BillingWorkflowCollectionAlignment{}, fmt.Errorf("failed to map alignment to API: %w", err)
-		}
-	case billing.AlignmentKindAnchored:
-		if c.AnchoredAlignmentDetail == nil {
-			return &api.BillingWorkflowCollectionAlignment{}, fmt.Errorf("anchored alignment detail is not set")
-		}
-
-		interval := api.RecurringPeriodInterval{}
-		if err := interval.FromRecurringPeriodInterval0(c.AnchoredAlignmentDetail.Interval.ISOString().String()); err != nil {
-			return &api.BillingWorkflowCollectionAlignment{}, fmt.Errorf("failed to map interval to API: %w", err)
-		}
-
-		if err := apiAlignment.FromBillingWorkflowCollectionAlignmentAnchored(
-			api.BillingWorkflowCollectionAlignmentAnchored{
-				Type: api.BillingWorkflowCollectionAlignmentAnchoredType(c.Alignment),
-				RecurringPeriod: api.RecurringPeriodV2{
-					Anchor:   c.AnchoredAlignmentDetail.Anchor,
-					Interval: interval,
-				},
-			},
-		); err != nil {
-			return &api.BillingWorkflowCollectionAlignment{}, fmt.Errorf("failed to map alignment to API: %w", err)
-		}
-	default:
-		return &api.BillingWorkflowCollectionAlignment{}, fmt.Errorf("invalid alignment: %s", c.Alignment)
-	}
-
-	return apiAlignment, nil
-}
-
-func mapWorkflowConfigToAPI(c billing.WorkflowConfig) (api.BillingWorkflow, error) {
-	apiAlignment, err := mapAlignmentToAPI(c.Collection)
-	if err != nil {
-		return api.BillingWorkflow{}, fmt.Errorf("failed to map alignment to API: %w", err)
-	}
-
-	return api.BillingWorkflow{
-		Collection: &api.BillingWorkflowCollectionSettings{
-			Alignment: apiAlignment,
-			Interval:  lo.EmptyableToPtr(c.Collection.Interval.String()),
-		},
-
-		Invoicing: &api.BillingWorkflowInvoicingSettings{
-			AutoAdvance:                  lo.ToPtr(c.Invoicing.AutoAdvance),
-			DraftPeriod:                  lo.EmptyableToPtr(c.Invoicing.DraftPeriod.String()),
-			DueAfter:                     lo.EmptyableToPtr(c.Invoicing.DueAfter.String()),
-			ProgressiveBilling:           lo.ToPtr(c.Invoicing.ProgressiveBilling),
-			SubscriptionEndProrationMode: lo.ToPtr(api.BillingWorkflowInvoicingSubscriptionEndProrationMode(c.Invoicing.SubscriptionEndProrationMode)),
-			DefaultTaxConfig:             mapTaxConfigToAPI(c.Invoicing.DefaultTaxConfig),
-		},
-
-		Payment: &api.BillingWorkflowPaymentSettings{
-			CollectionMethod: (*api.CollectionMethod)(lo.EmptyableToPtr(string(c.Payment.CollectionMethod))),
-		},
-
-		Tax: &api.BillingWorkflowTaxSettings{
-			Enabled:  lo.ToPtr(c.Tax.Enabled),
-			Enforced: lo.ToPtr(c.Tax.Enforced),
-		},
-	}, nil
-}
-
-func mapWorkflowConfigSettingsToAPI(c billing.WorkflowConfig) (api.BillingWorkflow, error) {
-	apiAlignment, err := mapAlignmentToAPI(c.Collection)
-	if err != nil {
-		return api.BillingWorkflow{}, fmt.Errorf("failed to map alignment to API: %w", err)
-	}
-
-	return api.BillingWorkflow{
-		Collection: &api.BillingWorkflowCollectionSettings{
-			Alignment: apiAlignment,
-			Interval:  lo.EmptyableToPtr(c.Collection.Interval.String()),
-		},
-
-		Invoicing: &api.BillingWorkflowInvoicingSettings{
-			AutoAdvance:                  lo.ToPtr(c.Invoicing.AutoAdvance),
-			DraftPeriod:                  lo.EmptyableToPtr(c.Invoicing.DraftPeriod.String()),
-			DueAfter:                     lo.EmptyableToPtr(c.Invoicing.DueAfter.String()),
-			ProgressiveBilling:           lo.ToPtr(c.Invoicing.ProgressiveBilling),
-			SubscriptionEndProrationMode: lo.ToPtr(api.BillingWorkflowInvoicingSubscriptionEndProrationMode(c.Invoicing.SubscriptionEndProrationMode)),
-			DefaultTaxConfig:             mapTaxConfigToAPI(c.Invoicing.DefaultTaxConfig),
-		},
-
-		Payment: &api.BillingWorkflowPaymentSettings{
-			CollectionMethod: (*api.CollectionMethod)(lo.EmptyableToPtr(string(c.Payment.CollectionMethod))),
-		},
-
-		Tax: &api.BillingWorkflowTaxSettings{
-			Enabled:  lo.ToPtr(c.Tax.Enabled),
-			Enforced: lo.ToPtr(c.Tax.Enforced),
-		},
-	}, nil
 }

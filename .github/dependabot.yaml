@@ -49,6 +49,10 @@ updates:
       prometheus:
         patterns:
           - "github.com/prometheus/*"
+      clickhouse:
+        patterns:
+          - "github.com/ClickHouse/clickhouse-go/v2"
+          - "github.com/ClickHouse/ch-go"
       redis:
         patterns:
           - "github.com/redis/go-redis/*"
@@ -116,7 +120,9 @@ updates:
 
   - package-ecosystem: pip
     open-pull-requests-limit: 1
-    directory: "/api/client/python"
+    directories:
+      - "/api/client/python"
+      - "/api/client/python/examples"
     schedule:
       interval: weekly
     cooldown:

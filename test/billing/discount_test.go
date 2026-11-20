@@ -18,6 +18,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
+	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
@@ -38,7 +39,7 @@ func (s *DiscountsTestSuite) TestCorrelationIDHandling() {
 	sandboxApp := s.InstallSandboxApp(s.T(), namespace)
 
 	s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID(), WithProgressiveBilling())
-	s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+	s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 	customerEntity := s.CreateTestCustomer(namespace, "test-customer")
 	s.NotNil(customerEntity)
@@ -145,21 +146,37 @@ func (s *DiscountsTestSuite) TestCorrelationIDHandling() {
 		s.Len(invoices[0].Lines.OrEmpty(), 1)
 
 		invoiceLine := invoices[0].Lines.OrEmpty()[0]
-		s.NotNil(invoiceLine.SplitLineHierarchy)
+		s.NotNil(invoiceLine.SplitLineGroupID)
 
 		// Root line has the same correlation ID for the discount
 		s.Equal(discountCorrelationID, invoiceLine.RateCardDiscounts.Percentage.CorrelationID)
 
-		// Split lines have the same correlation ID for the discount
-		s.Len(invoiceLine.SplitLineHierarchy.Lines, 2)
-		genericLinesWithInvoices := invoiceLine.SplitLineHierarchy.Lines
+		hierarchy, err := s.SplitLineGroupService.GetSplitLineGroup(ctx, models.NamespacedID{
+			Namespace: invoiceLine.Namespace,
+			ID:        *invoiceLine.SplitLineGroupID,
+		})
+		s.Require().NoError(err)
 
-		for _, genericLine := range genericLinesWithInvoices {
-			s.Equal(discountCorrelationID, genericLine.Line.GetRateCardDiscounts().Percentage.CorrelationID)
+		// Split lines have the same correlation ID for the discount
+		s.Len(hierarchy.Lines, 2)
+		for _, child := range hierarchy.Lines {
+			childInvoice, err := s.BillingService.GetInvoiceById(ctx, billing.GetInvoiceByIdInput{
+				Invoice: child.Invoice.InvoiceID,
+				Expand:  billing.InvoiceExpandAll,
+			})
+			s.Require().NoError(err)
+			genericInvoice, err := childInvoice.AsGenericInvoice()
+			s.Require().NoError(err)
+			genericLine := genericInvoice.GetGenericLines().MustGet()
+			matchedLine, found := lo.Find(genericLine, func(line billing.GenericInvoiceLine) bool {
+				return line.GetID() == child.ID
+			})
+			s.Require().True(found)
+			s.Equal(discountCorrelationID, matchedLine.GetRateCardDiscounts().Percentage.CorrelationID)
 		}
 
 		// The split line group has the same correlation ID for the discount
-		s.Equal(discountCorrelationID, invoiceLine.SplitLineHierarchy.Group.RatecardDiscounts.Percentage.CorrelationID)
+		s.Equal(discountCorrelationID, hierarchy.Group.RatecardDiscounts.Percentage.CorrelationID)
 
 		// An amount discount is also created, and it retains the same correlation ID
 		s.Len(invoiceLine.DetailedLines, 1)
@@ -189,6 +206,7 @@ func (s *DiscountsTestSuite) TestCorrelationIDHandling() {
 						Quantity: alpacadecimal.NewFromFloat(10),
 					},
 				}
+
 				return nil
 			},
 		})
@@ -289,7 +307,6 @@ func (s *DiscountsTestSuite) TestUnitDiscountProgressiveBilling() {
 	// Then:
 	// - The line in the draft invoice will have 30 quantity, 30 metered quantity
 	// - The line will not have an unit line discount
-
 	namespace := "ns-discounts-usage-progressive"
 	ctx := context.Background()
 
@@ -396,7 +413,7 @@ func (s *DiscountsTestSuite) TestUnitDiscountProgressiveBilling() {
 		s.Len(invoices[0].Lines.OrEmpty(), 1)
 
 		invoiceLine := invoices[0].Lines.OrEmpty()[0]
-		s.NotNil(invoiceLine.SplitLineHierarchy)
+		s.NotNil(invoiceLine.SplitLineGroupID)
 
 		// The line has 0 quantity, 50 metered quantity
 		require.Equal(s.T(), float64(0), invoiceLine.UsageBased.Quantity.InexactFloat64())
@@ -437,7 +454,7 @@ func (s *DiscountsTestSuite) TestUnitDiscountProgressiveBilling() {
 		s.Len(invoices[0].Lines.OrEmpty(), 1)
 
 		invoiceLine := invoices[0].Lines.OrEmpty()[0]
-		s.NotNil(invoiceLine.SplitLineHierarchy)
+		s.NotNil(invoiceLine.SplitLineGroupID)
 
 		// The line has 0 quantity, 50 metered quantity
 		require.Equal(s.T(), float64(15), invoiceLine.UsageBased.Quantity.InexactFloat64())
@@ -481,7 +498,7 @@ func (s *DiscountsTestSuite) TestUnitDiscountProgressiveBilling() {
 		s.Len(invoices[0].Lines.OrEmpty(), 1)
 
 		invoiceLine := invoices[0].Lines.OrEmpty()[0]
-		s.NotNil(invoiceLine.SplitLineHierarchy)
+		s.NotNil(invoiceLine.SplitLineGroupID)
 
 		// The line has 0 quantity, 50 metered quantity
 		require.Equal(s.T(), float64(30), invoiceLine.UsageBased.Quantity.InexactFloat64())
@@ -497,4 +514,122 @@ func (s *DiscountsTestSuite) TestUnitDiscountProgressiveBilling() {
 		detailedLine := invoiceLine.DetailedLines[0]
 		require.Equal(s.T(), float64(30), detailedLine.Quantity.InexactFloat64())
 	})
+}
+
+func (s *DiscountsTestSuite) TestPercentageDiscountProgressiveCommitments() {
+	type invoiceSlice struct {
+		endAfter  time.Duration
+		quantity  float64
+		amount    float64
+		discounts float64
+		charges   float64
+		total     float64
+	}
+
+	for _, tc := range []struct {
+		name        string
+		commitments productcatalog.Commitments
+		slices      []invoiceSlice
+	}{
+		{
+			name: "minimum spend tops up discounted prior usage",
+			commitments: productcatalog.Commitments{
+				MinimumAmount: lo.ToPtr(alpacadecimal.NewFromInt(100)),
+			},
+			slices: []invoiceSlice{
+				{endAfter: 8 * time.Hour, quantity: 10, amount: 100, discounts: 40, total: 60},
+				{endAfter: 24 * time.Hour, charges: 40, total: 40},
+			},
+		},
+		{
+			name: "maximum spend caps discounted usage across repeated invoices",
+			commitments: productcatalog.Commitments{
+				MaximumAmount: lo.ToPtr(alpacadecimal.NewFromInt(100)),
+			},
+			slices: []invoiceSlice{
+				{endAfter: 8 * time.Hour, quantity: 10, amount: 100, discounts: 40, total: 60},
+				{endAfter: 16 * time.Hour, quantity: 10, amount: 100, discounts: 60, total: 40},
+				{endAfter: 24 * time.Hour, quantity: 10, amount: 100, discounts: 100, total: 0},
+			},
+		},
+	} {
+		s.Run(tc.name, func() {
+			// Given a progressive unit price of 10, a 40% discount, and a spend commitment of 100.
+			ctx := s.T().Context()
+			namespace := s.GetUniqueNamespace("discounted-progressive-commitment")
+			period := timeutil.ClosedPeriod{
+				From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				To:   time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+			}
+			clock.FreezeTime(period.To.Add(time.Hour))
+			defer clock.UnFreeze()
+
+			sandboxApp := s.InstallSandboxApp(s.T(), namespace)
+			customerEntity := s.CreateTestCustomer(namespace, "test-customer")
+			s.ProvisionBillingProfile(ctx, namespace, sandboxApp.GetID(), WithProgressiveBilling())
+			s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
+			testFeature := s.SetupApiRequestsTotalFeature(ctx, namespace)
+			defer testFeature.Cleanup()
+
+			_, err := s.BillingService.CreatePendingInvoiceLines(ctx, billing.CreatePendingInvoiceLinesInput{
+				Customer: customerEntity.GetID(),
+				Currency: currencyx.FiatCode(currency.USD),
+				Lines: billing.NewCreatePendingInvoiceLines([]billing.GatheringLine{
+					{
+						GatheringLineBase: billing.GatheringLineBase{
+							ManagedResource: models.NewManagedResource(models.ManagedResourceInput{
+								Name: "discounted usage",
+							}),
+							ServicePeriod: period,
+							InvoiceAt:     period.To,
+							ManagedBy:     billing.ManuallyManagedLine,
+							FeatureKey:    testFeature.Feature.Key,
+							Price: lo.FromPtr(productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+								Amount:      alpacadecimal.NewFromInt(10),
+								Commitments: tc.commitments,
+							})),
+							RateCardDiscounts: billing.Discounts{
+								Percentage: &billing.PercentageDiscount{
+									PercentageDiscount: productcatalog.PercentageDiscount{
+										Percentage: models.NewPercentage(40),
+									},
+								},
+							},
+						},
+					},
+				}),
+			})
+			s.Require().NoError(err)
+
+			var totalBilled alpacadecimal.Decimal
+			var groupID string
+			for idx, expected := range tc.slices {
+				// When each slice is collected, the engine reloads the earlier invoices from storage.
+				asOf := period.From.Add(expected.endAfter)
+				s.MockStreamingConnector.AddSimpleEvent(testFeature.Feature.Key, expected.quantity, asOf.Add(-time.Hour))
+				invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+					Customer: customerEntity.GetID(),
+					AsOf:     &asOf,
+				})
+				s.Require().NoError(err)
+				s.Require().Len(invoices, 1)
+				s.Require().Len(invoices[0].Lines.OrEmpty(), 1)
+				stdLine := invoices[0].Lines.OrEmpty()[0]
+				s.Require().NotNil(stdLine.SplitLineGroupID)
+				if idx == 0 {
+					groupID = *stdLine.SplitLineGroupID
+				}
+
+				// Then each invoice uses net prior spend, including when the maximum was already reached.
+				s.Equal(groupID, *stdLine.SplitLineGroupID)
+				s.Require().Equal(expected.amount, stdLine.Totals.Amount.InexactFloat64(), "slice %d gross amount", idx+1)
+				s.Require().Equal(expected.discounts, stdLine.Totals.DiscountsTotal.InexactFloat64(), "slice %d discounts", idx+1)
+				s.Require().Equal(expected.charges, stdLine.Totals.ChargesTotal.InexactFloat64(), "slice %d minimum top-up", idx+1)
+				s.Require().Equal(expected.total, stdLine.Totals.Total.InexactFloat64(), "slice %d net total", idx+1)
+				totalBilled = totalBilled.Add(stdLine.Totals.Total)
+			}
+
+			s.Require().Equal(float64(100), totalBilled.InexactFloat64())
+		})
+	}
 }

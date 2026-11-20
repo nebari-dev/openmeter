@@ -12,11 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stripe/stripe-go/v80"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
 	appstripe "github.com/openmeterio/openmeter/openmeter/app/stripe"
 	stripeclient "github.com/openmeterio/openmeter/openmeter/app/stripe/client"
-	appstripeservice "github.com/openmeterio/openmeter/openmeter/app/stripe/service"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	customerapp "github.com/openmeterio/openmeter/openmeter/customer/app"
@@ -79,7 +78,7 @@ func (s *AppHandlerTestSuite) TestCreate(ctx context.Context, t *testing.T) {
 
 	stripeApp, ok := createApp.App.(appstripe.App)
 	require.True(t, ok, "Create stripe app must return a stripe app")
-	require.Equal(t, appstripeservice.LatestWebhookSchemaVersion, stripeApp.WebhookSchemaVersion)
+	require.Equal(t, appstripe.LatestWebhookSchemaVersion, stripeApp.WebhookSchemaVersion)
 
 	// Create with same Stripe account ID should return conflict
 	_, err = s.Env.App().InstallApp(ctx, app.InstallAppV3Input{
@@ -159,6 +158,56 @@ func (s *AppHandlerTestSuite) TestUpdate(ctx context.Context, t *testing.T) {
 	require.Empty(t, updateApp.GetAppBase().Metadata, "Metadata must be updated")
 }
 
+func (s *AppHandlerTestSuite) TestUpdateAPIKeyThroughAppUpdate(t *testing.T) {
+	// Given an installed Stripe app and a valid replacement key for the same account.
+	ctx := t.Context()
+	s.setupNamespace(t)
+
+	installedApp, err := s.Env.Fixture().setupApp(ctx, s.namespace)
+	require.NoError(t, err)
+
+	stripeAppData, err := s.Env.AppStripe().GetStripeAppData(ctx, appstripe.GetStripeAppDataInput{
+		AppID: installedApp.GetID(),
+	})
+	require.NoError(t, err)
+
+	s.Env.StripeAppClient().
+		On("GetAccount").
+		Return(stripeclient.StripeAccount{StripeAccountID: stripeAppData.StripeAccountID}, nil).
+		Once()
+	defer s.Env.StripeAppClient().Restore()
+	defer s.Env.StripeAppClient().AssertExpectations(t)
+
+	// When rotating through the app update, the outer transaction already holds the app row lock.
+	updateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	newAPIKey := "sk_live_regression_rotated_key"
+	_, err = s.Env.App().UpdateApp(updateCtx, app.UpdateAppInput{
+		AppID: installedApp.GetID(),
+		Name:  installedApp.GetAppBase().Name,
+		AppConfigUpdate: appstripe.Configuration{
+			SecretAPIKey: lo.ToPtr(newAPIKey),
+		},
+	})
+
+	// Then the status update must share that transaction so the new key can commit.
+	require.NoError(t, err, "rotating the Stripe key through UpdateApp must not wait on its own app row lock")
+
+	updatedApp, err := s.Env.App().GetApp(ctx, installedApp.GetID())
+	require.NoError(t, err)
+	require.Equal(t, app.AppStatusReady, updatedApp.GetStatus())
+
+	updatedStripeAppData, err := s.Env.AppStripe().GetStripeAppData(ctx, appstripe.GetStripeAppDataInput{
+		AppID: installedApp.GetID(),
+	})
+	require.NoError(t, err)
+
+	updatedSecret, err := s.Env.Secret().GetAppSecret(ctx, updatedStripeAppData.APIKey)
+	require.NoError(t, err)
+	require.Equal(t, newAPIKey, updatedSecret.Value)
+}
+
 // TestUninstall tests uninstalling a stripe app
 func (s *AppHandlerTestSuite) TestUninstall(ctx context.Context, t *testing.T) {
 	// Given an active Stripe app with provider metadata and credentials.
@@ -211,6 +260,10 @@ func (s *AppHandlerTestSuite) TestUninstall(ctx context.Context, t *testing.T) {
 	require.Empty(t, deletedStripeApp.APIKey.ID)
 	require.Empty(t, deletedStripeApp.WebhookSecret.ID)
 	require.ErrorIs(t, deleted.ValidateCapabilities(app.CapabilityTypeInvoiceCustomers), app.ErrAppDeleted)
+	require.ErrorAs(t, s.Env.AppStripe().UpdateWebhookSchemaVersion(ctx, appstripe.UpdateWebhookSchemaVersionInput{
+		AppID:                createApp.GetID(),
+		WebhookSchemaVersion: appstripe.LatestWebhookSchemaVersion,
+	}), new(*app.AppNotFoundError), "schema version must not be written to a deleted app")
 	s.Env.Secret().AssertExpectations(t)
 }
 
@@ -745,7 +798,7 @@ func (s *AppHandlerTestSuite) TestCreateCheckoutSession(ctx context.Context, t *
 			AppID:            appID,
 			CustomerID:       customerID,
 			StripeCustomerID: defaultStripeCustomerID,
-			Options:          api.CreateStripeCheckoutSessionRequestOptions{},
+			Options:          apiv1models.CreateStripeCheckoutSessionRequestOptions{},
 		}).
 		Return(stripeclient.StripeCheckoutSession{
 			SessionID:     "cs_123",
@@ -761,7 +814,7 @@ func (s *AppHandlerTestSuite) TestCreateCheckoutSession(ctx context.Context, t *
 		Namespace:  s.namespace,
 		AppID:      appID,
 		CustomerID: &customerID,
-		Options:    api.CreateStripeCheckoutSessionRequestOptions{},
+		Options:    apiv1models.CreateStripeCheckoutSessionRequestOptions{},
 	})
 
 	require.NoError(t, err, "Create checkout session must not return error")
@@ -788,7 +841,7 @@ func (s *AppHandlerTestSuite) TestCreateCheckoutSession(ctx context.Context, t *
 		Namespace:  s.namespace,
 		AppID:      appIdNotFound,
 		CustomerID: &customerID,
-		Options:    api.CreateStripeCheckoutSessionRequestOptions{},
+		Options:    apiv1models.CreateStripeCheckoutSessionRequestOptions{},
 	})
 
 	require.True(t, app.IsAppNotFoundError(err), "Create checkout session must return app not found error")
@@ -803,7 +856,7 @@ func (s *AppHandlerTestSuite) TestCreateCheckoutSession(ctx context.Context, t *
 		Namespace:  s.namespace,
 		AppID:      appID,
 		CustomerID: &customerIdNotFound,
-		Options:    api.CreateStripeCheckoutSessionRequestOptions{},
+		Options:    apiv1models.CreateStripeCheckoutSessionRequestOptions{},
 	})
 
 	require.True(t, models.IsGenericNotFoundError(err), "Create checkout session must return customer not found error")
@@ -816,7 +869,7 @@ func (s *AppHandlerTestSuite) TestCreateCheckoutSession(ctx context.Context, t *
 			AppID:            appID,
 			CustomerID:       customerID,
 			StripeCustomerID: defaultStripeCustomerID,
-			Options: api.CreateStripeCheckoutSessionRequestOptions{
+			Options: apiv1models.CreateStripeCheckoutSessionRequestOptions{
 				Currency: lo.ToPtr("usd"),
 			},
 		}).
@@ -1014,4 +1067,61 @@ func (s *AppHandlerTestSuite) TestUpdateAPIKey(ctx context.Context, t *testing.T
 
 	require.NoError(t, err, "Get app must not return error")
 	require.Equal(t, testApp.GetStatus(), app.AppStatusReady, "App status must be ready")
+}
+
+// TestExecuteAction tests the reconcile_webhook_events action lifecycle on a stripe app
+func (s *AppHandlerTestSuite) TestExecuteAction(ctx context.Context, t *testing.T) {
+	testApp, err := s.Env.Fixture().setupApp(ctx, s.namespace)
+	require.NoError(t, err, "setup fixture must not return error")
+
+	defer s.Env.StripeAppClient().Restore()
+
+	reconcile := app.ExecuteAppActionInput{
+		AppID: testApp.GetID(),
+		Type:  appstripe.AppActionTypeReconcileWebhookEvents,
+	}
+
+	// given a freshly installed app on the latest schema version
+	// when the reconcile action is executed
+	// then it is rejected without touching Stripe
+	_, err = s.Env.App().ExecuteAppAction(ctx, reconcile)
+	require.ErrorAs(t, err, new(*app.AppActionUnsupportedError))
+	s.Env.StripeAppClient().AssertNotCalled(t, "UpdateWebhook", mock.Anything)
+
+	// given an app registered with an older webhook event set
+	err = s.Env.AppStripe().UpdateWebhookSchemaVersion(ctx, appstripe.UpdateWebhookSchemaVersionInput{
+		AppID:                testApp.GetID(),
+		WebhookSchemaVersion: 1,
+	})
+	require.NoError(t, err, "Update webhook schema version must not return error")
+
+	testApp, err = s.Env.App().GetApp(ctx, testApp.GetID())
+	require.NoError(t, err, "Get app must not return error")
+	require.Equal(t, []app.AppAction{{
+		Type:        appstripe.AppActionTypeReconcileWebhookEvents,
+		Description: "The Stripe webhook endpoint is registered with an outdated event set. Reconcile the webhook to receive all supported events.",
+	}}, testApp.Actions())
+
+	stripeApp, err := s.Env.AppStripe().GetStripeAppData(ctx, appstripe.GetStripeAppDataInput{AppID: testApp.GetID()})
+	require.NoError(t, err, "Get stripe app data must not return error")
+
+	s.Env.StripeAppClient().
+		On("UpdateWebhook", stripeclient.UpdateWebhookInput{
+			AppID:           testApp.GetID(),
+			StripeWebhookID: stripeApp.StripeWebhookID,
+			EnabledEvents:   stripeclient.WebhookEnabledEvents,
+		}).
+		Return(nil)
+
+	// when the reconcile action is executed
+	// then the endpoint is re-registered and the action is no longer reported
+	testApp, err = s.Env.App().ExecuteAppAction(ctx, reconcile)
+	require.NoError(t, err, "Execute app action must not return error")
+	require.Empty(t, testApp.Actions())
+
+	stripeApp, err = s.Env.AppStripe().GetStripeAppData(ctx, appstripe.GetStripeAppDataInput{AppID: testApp.GetID()})
+	require.NoError(t, err, "Get stripe app data must not return error")
+	require.Equal(t, appstripe.LatestWebhookSchemaVersion, stripeApp.WebhookSchemaVersion)
+
+	s.Env.StripeAppClient().AssertExpectations(t)
 }

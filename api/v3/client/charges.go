@@ -4,6 +4,7 @@ package openmeter
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/url"
@@ -12,6 +13,24 @@ import (
 
 type ChargesService struct {
 	client *Client
+}
+
+type GetChargeParams struct {
+	Expand []ChargesExpand
+}
+
+func (p GetChargeParams) values() url.Values {
+	q := url.Values{}
+
+	if len(p.Expand) > 0 {
+		expandValues := make([]string, 0, len(p.Expand))
+		for _, value := range p.Expand {
+			expandValues = append(expandValues, string(value))
+		}
+		q.Set("expand", strings.Join(expandValues, ","))
+	}
+
+	return q
 }
 
 type ListChargesFilter struct {
@@ -36,6 +55,9 @@ type ListChargesFilter struct {
 	ServicePeriodTo *DateTimeFilter
 	// Filter charges by the ID of their customer.
 	CustomerID *StringExactFilter
+	// Filter charges by the ID of their subscription. Only charges linked to a
+	// subscription can match, including when using `neq`.
+	SubscriptionID *StringExactFilter
 }
 
 type ListChargesParams struct {
@@ -59,6 +81,7 @@ func (p ListChargesParams) values() url.Values {
 		addDateTimeFilter(q, "filter[service_period_from]", p.Filter.ServicePeriodFrom)
 		addDateTimeFilter(q, "filter[service_period_to]", p.Filter.ServicePeriodTo)
 		addStringExactFilter(q, "filter[customer_id]", p.Filter.CustomerID)
+		addStringExactFilter(q, "filter[subscription_id]", p.Filter.SubscriptionID)
 	}
 
 	if len(p.Expand) > 0 {
@@ -70,6 +93,31 @@ func (p ListChargesParams) values() url.Values {
 	}
 
 	return q
+}
+
+// Get a flat fee or usage-based charge by ID.
+//
+// Deleted charges are returned with their status and realization history.
+func (s *ChargesService) Get(ctx context.Context, chargeID string, params GetChargeParams) (*Charge, error) {
+	if chargeID == "" {
+		return nil, fmt.Errorf("openmeter: %s must not be empty: %w", "chargeID", ErrEmptyID)
+	}
+
+	path := "/openmeter/charges/{chargeId}"
+
+	path = replacePathParam(path, "chargeId", chargeID)
+
+	req, err := s.client.newRequestWithContentType(ctx, http.MethodGet, path, params.values(), nil, "", "application/json")
+	if err != nil {
+		return nil, err
+	}
+
+	var out Charge
+	if err := s.client.doJSON(req, &out); err != nil {
+		return nil, err
+	}
+
+	return &out, nil
 }
 
 // List charges.

@@ -19,7 +19,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/invoicemetrics"
 	billingworkermetricsadapter "github.com/openmeterio/openmeter/openmeter/billing/worker/invoicemetrics/adapter"
 	billingworkermetricsservice "github.com/openmeterio/openmeter/openmeter/billing/worker/invoicemetrics/service"
-	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
+	subscriptionsyncservice "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/service"
 	entdb "github.com/openmeterio/openmeter/openmeter/ent/db"
 	watermillkafka "github.com/openmeterio/openmeter/openmeter/watermill/driver/kafka"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
@@ -35,6 +35,7 @@ var BillingWorker = wire.NewSet(
 
 	BillingWorkerProvisionTopics,
 	BillingWorkerSubscriber,
+	NewBillingWorkerSubscriptionStatus,
 
 	Lockr,
 	FFX,
@@ -69,11 +70,16 @@ func BillingWorkerProvisionTopics(conf config.BillingConfiguration) []pkgkafka.T
 	return provisionTopics
 }
 
+func NewBillingWorkerSubscriptionStatus(conf config.EventsConfiguration) *watermillkafka.SubscriptionStatus {
+	return watermillkafka.NewSubscriptionStatus([]string{conf.SystemEvents.Topic})
+}
+
 // no closer function: the subscriber is closed by the router/worker
-func BillingWorkerSubscriber(conf config.BillingConfiguration, brokerOptions watermillkafka.BrokerOptions) (message.Subscriber, error) {
+func BillingWorkerSubscriber(conf config.BillingConfiguration, brokerOptions watermillkafka.BrokerOptions, subscriptionStatus *watermillkafka.SubscriptionStatus) (message.Subscriber, error) {
 	subscriber, err := watermillkafka.NewSubscriber(watermillkafka.SubscriberOptions{
-		Broker:            brokerOptions,
-		ConsumerGroupName: conf.Worker.ConsumerGroupName,
+		Broker:             brokerOptions,
+		ConsumerGroupName:  conf.Worker.ConsumerGroupName,
+		SubscriptionStatus: subscriptionStatus,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize Kafka subscriber: %w", err)
@@ -88,7 +94,7 @@ func NewBillingWorkerOptions(
 	eventBus eventbus.Publisher,
 	billingRegistry BillingRegistry,
 	subscriptionServices SubscriptionServiceWithWorkflow,
-	subscriptionSyncService subscriptionsync.Service,
+	subscriptionSyncService *subscriptionsyncservice.Service,
 	billingCollector *billingworkercollect.InvoiceCollector,
 	billingFsConfig config.BillingFeatureSwitchesConfiguration,
 	logger *slog.Logger,
@@ -96,14 +102,15 @@ func NewBillingWorkerOptions(
 	return billingworker.WorkerOptions{
 		SystemEventsTopic: eventConfig.SystemEvents.Topic,
 
-		Router:                  routerOptions,
-		EventBus:                eventBus,
-		BillingService:          billingRegistry.Billing,
-		BillingCollector:        billingCollector,
-		ChargesService:          billingRegistry.ChargesServiceOrNil(),
-		SubscriptionService:     subscriptionServices.Service,
-		BillingSubscriptionSync: subscriptionSyncService,
-		Logger:                  logger,
+		Router:                       routerOptions,
+		EventBus:                     eventBus,
+		BillingService:               billingRegistry.Billing,
+		BillingCollector:             billingCollector,
+		ChargesService:               billingRegistry.ChargesServiceOrNil(),
+		SubscriptionService:          subscriptionServices.Service,
+		BillingSubscriptionSync:      subscriptionSyncService,
+		SubscriptionSyncEventHandler: subscriptionSyncService,
+		Logger:                       logger,
 
 		// Feature switches
 		LockdownNamespaces: billingFsConfig.NamespaceLockdown,
@@ -148,8 +155,11 @@ func BillingWorkerGroup(
 	worker *billingworker.Worker,
 	invoiceMetrics invoicemetrics.Service,
 	telemetryServer TelemetryServer,
+	subscriptionStatus *watermillkafka.SubscriptionStatus,
 ) run.Group {
 	var group run.Group
+
+	telemetryServer.Handle("/healthz/subscriptions", subscriptionStatus)
 
 	group.Add(
 		func() error { return telemetryServer.ListenAndServe() },

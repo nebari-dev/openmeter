@@ -65,13 +65,12 @@ func (e *LineEngine) AreLinesBillableAsOf(ctx context.Context, input billing.Are
 	return slicesx.MapWithErrPreservingResults(input.Lines, func(line billing.GatheringLine, index int) (billing.IsLineBillableAsOfResult, error) {
 		var errs []error
 		charge := charges[index]
-		featureMeter, err := featureMeters.Get(charge)
-
 		ratingInput := rating.ResolveBillablePeriodInput{
 			Line:               line,
 			ProgressiveBilling: input.ProgressiveBilling,
 			AsOf:               input.AsOf,
 		}
+		featureMeter, err := featureMeters.Get(charge)
 		if err != nil {
 			// This becomes a validation issue on the resulting standard invoice, but we still need to provide
 			// the result too.
@@ -113,6 +112,7 @@ func (e *LineEngine) GateInvoiceAssignment(ctx context.Context, input billing.Ga
 		if _, ok := linesByChargeID[*line.ChargeID]; !ok {
 			chargeIDs = append(chargeIDs, *line.ChargeID)
 		}
+
 		linesByChargeID[*line.ChargeID] = append(linesByChargeID[*line.ChargeID], line)
 	}
 
@@ -149,6 +149,7 @@ func (e *LineEngine) GateInvoiceAssignment(ctx context.Context, input billing.Ga
 		if err != nil {
 			return nil, fmt.Errorf("checking feature meter availability for usage based charge[%s]: %w", charge.ID, err)
 		}
+
 		var changed bool
 		validationIssues, changed = replaceValidationIssueComponent(
 			validationIssues,
@@ -163,6 +164,7 @@ func (e *LineEngine) GateInvoiceAssignment(ctx context.Context, input billing.Ga
 		if err != nil {
 			return nil, fmt.Errorf("checking current realization run for usage based charge[%s]: %w", charge.ID, err)
 		}
+
 		validationIssues, changed = replaceValidationIssueComponent(
 			validationIssues,
 			usagebased.ValidationIssueComponentLineEngine,
@@ -375,7 +377,7 @@ func (e *LineEngine) buildGatheringPreviewRun(ctx context.Context, charge usageb
 	storedAtLT := meta.NormalizeTimestamp(stdLine.Period.To)
 	servicePeriodTo := storedAtLT
 	if runType == usagebased.RealizationRunTypeFinalRealization {
-		storedAtLT, _ = stateMachineConfig.CustomerOverride.MergedProfile.WorkflowConfig.Collection.Interval.AddTo(charge.Intent.GetEffectiveServicePeriod().To)
+		storedAtLT, _ = stateMachineConfig.CustomerBillingProfile.EffectiveProfile.WorkflowConfig.Collection.Interval.AddTo(charge.Intent.GetEffectiveServicePeriod().To)
 		storedAtLT = meta.NormalizeTimestamp(storedAtLT)
 		servicePeriodTo = meta.NormalizeTimestamp(charge.Intent.GetEffectiveServicePeriod().To)
 	}
@@ -386,15 +388,15 @@ func (e *LineEngine) buildGatheringPreviewRun(ctx context.Context, charge usageb
 	}
 
 	return e.service.runs.BuildCreditThenInvoiceGatheringPreviewRun(ctx, usagebasedrun.BuildCreditThenInvoiceGatheringPreviewRunInput{
-		Charge:             charge,
-		CustomerOverride:   stateMachineConfig.CustomerOverride,
-		FeatureMeter:       featureMeter,
-		Type:               runType,
-		StoredAtLT:         storedAtLT,
-		ServicePeriodTo:    servicePeriodTo,
-		LineID:             stdLine.ID,
-		InvoiceID:          stdLine.InvoiceID,
-		CurrencyCalculator: stateMachineConfig.CurrencyCalculator,
+		Charge:                 charge,
+		CustomerBillingProfile: stateMachineConfig.CustomerBillingProfile,
+		FeatureMeter:           featureMeter,
+		Type:                   runType,
+		StoredAtLT:             storedAtLT,
+		ServicePeriodTo:        servicePeriodTo,
+		LineID:                 stdLine.ID,
+		InvoiceID:              stdLine.InvoiceID,
+		CurrencyCalculator:     stateMachineConfig.CurrencyCalculator,
 	})
 }
 
@@ -430,10 +432,14 @@ func (e *LineEngine) OnStandardInvoiceCreated(ctx context.Context, input billing
 			})
 		}
 
-		if err := stateMachine.FireAndAdvanceUntilStable(ctx, meta.TriggerInvoiceCreated, invoiceCreatedInput{
-			LineID:        stdLine.ID,
-			InvoiceID:     input.Invoice.ID,
-			ServicePeriod: stdLine.Period,
+		// Early activation saves the resolved cost basis before the run starts, so a failed
+		// run start has to undo it even when the caller keeps its transaction.
+		if err := transaction.RunWithNoValue(ctx, e.service.adapter, func(ctx context.Context) error {
+			return stateMachine.FireAndAdvanceUntilStable(ctx, meta.TriggerInvoiceCreated, invoiceCreatedInput{
+				LineID:        stdLine.ID,
+				InvoiceID:     input.Invoice.ID,
+				ServicePeriod: stdLine.Period,
+			})
 		}); err != nil {
 			return stdLine, fmt.Errorf("triggering %s for charge[%s]: %w", meta.TriggerInvoiceCreated, stateMachine.GetCharge().ID, err)
 		}
@@ -685,10 +691,12 @@ func (e *LineEngine) attachManualStandardLine(ctx context.Context, standardInvoi
 		))
 	}
 
-	if err := stateMachine.FireAndAdvanceUntilStable(ctx, meta.TriggerInvoiceCreated, invoiceCreatedInput{
-		LineID:        standardLine.ID,
-		InvoiceID:     standardInvoice.ID,
-		ServicePeriod: standardLine.Period,
+	if err := transaction.RunWithNoValue(ctx, e.service.adapter, func(ctx context.Context) error {
+		return stateMachine.FireAndAdvanceUntilStable(ctx, meta.TriggerInvoiceCreated, invoiceCreatedInput{
+			LineID:        standardLine.ID,
+			InvoiceID:     standardInvoice.ID,
+			ServicePeriod: standardLine.Period,
+		})
 	}); err != nil {
 		return nil, fmt.Errorf("triggering %s for charge[%s]: %w", meta.TriggerInvoiceCreated, charge.ID, err)
 	}
@@ -778,6 +786,7 @@ func (e *LineEngine) validateInvoiceLineDeleteViaAPI(ctx context.Context, invoic
 		if err != nil {
 			return usagebased.Charge{}, fmt.Errorf("getting usage based realization run for line[%s]: %w", line.GetID(), err)
 		}
+
 		if charge.Intent.GetEffectiveIntent().Currency.IsCustom() {
 			if err := validateCustomCurrencyInvoiceLineDelete(invoice, line, run); err != nil {
 				return usagebased.Charge{}, err
@@ -1020,6 +1029,7 @@ func (e *LineEngine) reconcileDeletedStandardLines(ctx context.Context, input bi
 		if err != nil {
 			return nil, fmt.Errorf("calculating fiat overage for usage based realization run[%s]: %w", run.ID.ID, err)
 		}
+
 		if fiatOverage.ShouldOmitInvoiceLine {
 			continue
 		}
@@ -1113,6 +1123,7 @@ func (e *LineEngine) validateDeletedStandardLines(ctx context.Context, input bil
 		if err != nil {
 			return fmt.Errorf("calculating fiat overage for usage based realization run[%s]: %w", run.ID.ID, err)
 		}
+
 		if fiatOverage.ShouldOmitInvoiceLine {
 			continue
 		}
@@ -1240,6 +1251,7 @@ func (e *LineEngine) OnInvoiceFinalizing(ctx context.Context, input billing.OnIn
 		if err != nil {
 			return nil, fmt.Errorf("validating finalizing update for line[%s]: %w", stdLine.ID, err)
 		}
+
 		if updatedLine == nil {
 			return stdLine, nil
 		}
@@ -1261,6 +1273,23 @@ func (e *LineEngine) OnInvoiceIssued(ctx context.Context, input billing.OnInvoic
 				Line:    stdLine,
 				Invoice: input.Invoice,
 			}
+		},
+		ShouldSkipFn: func(charge usagebased.Charge, stdLine *billing.StandardLine) (bool, error) {
+			// Billing retries invoice_issued for every line when any line callback fails.
+			// A preceding line can therefore have committed its charge and ledger updates.
+			// Immutable is persisted only after that work succeeds, so a matching run is
+			// already complete and must not receive invoice_issued again.
+			// See TestCreditThenInvoiceTestSuite/TestUsageBasedIssuingRetryPreservesCompletedChargeBooking.
+			run, err := charge.Realizations.GetByLineID(stdLine.ID)
+			if err != nil || !run.Immutable {
+				return false, nil
+			}
+
+			if run.InvoiceID == nil || *run.InvoiceID != input.Invoice.ID {
+				return false, fmt.Errorf("issued realization run[%s] invoice does not match invoice[%s]", run.ID.ID, input.Invoice.ID)
+			}
+
+			return true, nil
 		},
 	})
 }
@@ -1290,9 +1319,10 @@ func (e *LineEngine) OnPaymentSettled(ctx context.Context, input billing.OnPayme
 }
 
 type fireLineTriggerInput struct {
-	Lines   billing.StandardLines
-	Trigger meta.Trigger
-	InputFn func(*billing.StandardLine) models.Validator
+	Lines        billing.StandardLines
+	Trigger      meta.Trigger
+	InputFn      func(*billing.StandardLine) models.Validator
+	ShouldSkipFn func(usagebased.Charge, *billing.StandardLine) (bool, error)
 }
 
 func (i fireLineTriggerInput) Validate() error {
@@ -1322,23 +1352,36 @@ func (e *LineEngine) fireLineTrigger(ctx context.Context, input fireLineTriggerI
 			return err
 		}
 
+		charge := stateMachine.GetCharge()
+
+		if input.ShouldSkipFn != nil {
+			shouldSkip, err := input.ShouldSkipFn(charge, stdLine)
+			if err != nil {
+				return fmt.Errorf("checking whether to skip %s for charge[%s]: %w", input.Trigger, charge.ID, err)
+			}
+
+			if shouldSkip {
+				continue
+			}
+		}
+
 		canFire, err := stateMachine.CanFire(ctx, input.Trigger)
 		if err != nil {
-			return fmt.Errorf("checking %s for charge[%s]: %w", input.Trigger, stateMachine.GetCharge().ID, err)
+			return fmt.Errorf("checking %s for charge[%s]: %w", input.Trigger, charge.ID, err)
 		}
 
 		if !canFire {
 			return fmt.Errorf(
 				"charge[%s] in status %s cannot handle %s for standard line[%s]",
-				stateMachine.GetCharge().ID,
-				stateMachine.GetCharge().Status,
+				charge.ID,
+				charge.Status,
 				input.Trigger,
 				stdLine.ID,
 			)
 		}
 
 		if err := stateMachine.FireAndAdvanceUntilStable(ctx, input.Trigger, input.InputFn(stdLine)); err != nil {
-			return fmt.Errorf("triggering %s for charge[%s]: %w", input.Trigger, stateMachine.GetCharge().ID, err)
+			return fmt.Errorf("triggering %s for charge[%s]: %w", input.Trigger, charge.ID, err)
 		}
 	}
 

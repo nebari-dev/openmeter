@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	subscriptionaddon "github.com/openmeterio/openmeter/openmeter/subscription/addon"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
@@ -22,7 +22,7 @@ type (
 		SubscriptionID      models.NamespacedID
 		SubscriptionAddonID models.NamespacedID
 	}
-	GetSubscriptionAddonResponse = api.SubscriptionAddon
+	GetSubscriptionAddonResponse = apiv1models.SubscriptionAddon
 	GetSubscriptionAddonHandler  = httptransport.HandlerWithArgs[GetSubscriptionAddonRequest, GetSubscriptionAddonResponse, GetSubscriptionAddonParams]
 )
 
@@ -56,7 +56,12 @@ func (h *handler) GetSubscriptionAddon() GetSubscriptionAddonHandler {
 				return GetSubscriptionAddonResponse{}, productcatalog.ErrUnitConfigNotRepresentable
 			}
 
-			return MapSubscriptionAddonToResponse(view, *res)
+			taxCodes, err := h.taxCodesForAddons(ctx, req.SubscriptionAddonID.Namespace, *res)
+			if err != nil {
+				return GetSubscriptionAddonResponse{}, err
+			}
+
+			return MapSubscriptionAddonToResponse(view, *res, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[GetSubscriptionAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(

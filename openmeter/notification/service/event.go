@@ -77,6 +77,7 @@ func (s Service) ResendEvent(ctx context.Context, params notification.ResendEven
 
 	fn := func(ctx context.Context) error {
 		event, err := s.adapter.GetEvent(ctx, notification.GetEventInput{
+			Expand:    &notification.EventExpand{DeliveryStatus: true},
 			Namespace: params.Namespace,
 			ID:        params.ID,
 		})
@@ -124,9 +125,10 @@ func (s Service) ResendEvent(ctx context.Context, params notification.ResendEven
 				continue
 			}
 
-			// Don't resend to disabled channels.
+			// The event is loaded with active channels only, so a channel missing from
+			// the map has been disabled or deleted since delivery.
 			channel, ok := channelsByID[status.ChannelID]
-			if ok && channel.Disabled {
+			if !ok || channel.Disabled {
 				continue
 			}
 

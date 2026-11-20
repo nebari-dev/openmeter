@@ -80,7 +80,6 @@ func TestRateKeepsDetailedLineChildUniqueReferenceIDsWithoutServicePeriodSuffix(
 		out.DetailedLines[1].ChildUniqueReferenceID,
 	})
 	require.False(t, ratingService.lastOpts.IgnoreMinimumCommitment)
-	require.True(t, ratingService.lastOpts.DisableCreditsMutator)
 }
 
 func TestRatePreservesValidationWarningWithSuccessfulResult(t *testing.T) {
@@ -163,7 +162,6 @@ func TestRateIgnoresMinimumCommitmentForPartialRun(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, ratingService.lastOpts.IgnoreMinimumCommitment)
-	require.True(t, ratingService.lastOpts.DisableCreditsMutator)
 }
 
 func TestRateSubtractsAlreadyBilledLinesAndBooksDeltaOnCurrentPeriod(t *testing.T) {
@@ -402,4 +400,103 @@ func (s *stubRatingService) ResolveBillablePeriod(in billingrating.ResolveBillab
 func (s *stubRatingService) GenerateDetailedLines(in billingrating.StandardLineAccessor, opts ...billingrating.GenerateDetailedLinesOption) (billingrating.GenerateDetailedLinesResult, error) {
 	s.lastOpts = billingrating.NewGenerateDetailedLinesOptions(opts...)
 	return s.result, s.err
+}
+
+func (s *stubRatingService) GenerateLegacyProgressiveBilledLines(in billingrating.LegacyProgressivelyBillableLineAccessor, opts ...billingrating.GenerateDetailedLinesOption) (billingrating.GenerateDetailedLinesResult, error) {
+	return s.GenerateDetailedLines(in, opts...)
+}
+
+func TestGraduatedTieredDeltaDoesNotCarryExhaustedFreeTierToThirdInvoice(t *testing.T) {
+	t.Parallel()
+
+	// Given: one charge progressively invoiced three times, with the first ten
+	// units free and every subsequent unit priced at $1.
+	// When: cumulative usage reaches 5, 15, then 20 units, the first two invoices
+	// already account for all ten free units.
+	// Then: the third invoice contains only five additional paid units; an empty
+	// free-tier delta has neither new usage nor an amount to present.
+	periods := deltaRatingTestPeriods()
+
+	runDeltaRatingTestCase(t, deltaRatingTestCase{
+		price: *productcatalog.NewPriceFrom(productcatalog.TieredPrice{
+			Mode: productcatalog.GraduatedTieredPrice,
+			Tiers: []productcatalog.PriceTier{
+				{
+					UpToAmount: lo.ToPtr(alpacadecimal.NewFromInt(10)),
+					UnitPrice: &productcatalog.PriceTierUnitPrice{
+						Amount: alpacadecimal.Zero,
+					},
+				},
+				{
+					UnitPrice: &productcatalog.PriceTierUnitPrice{
+						Amount: alpacadecimal.NewFromInt(1),
+					},
+				},
+			},
+		}),
+		phases: []deltaRatingPhase{
+			{
+				period:          periods.period1,
+				meteredQuantity: 5,
+				expectedDetailedLines: []ratingtestutils.ExpectedDetailedLine{
+					{
+						ChildUniqueReferenceID: "graduated-tiered-1-price-usage",
+						Category:               stddetailedline.CategoryRegular,
+						ServicePeriod:          lo.ToPtr(periods.period1),
+						PerUnitAmount:          0,
+						Quantity:               5,
+					},
+				},
+			},
+			{
+				period:          periods.period2,
+				meteredQuantity: 15,
+				expectedDetailedLines: []ratingtestutils.ExpectedDetailedLine{
+					{
+						ChildUniqueReferenceID: "graduated-tiered-1-price-usage",
+						Category:               stddetailedline.CategoryRegular,
+						ServicePeriod:          lo.ToPtr(periods.period2),
+						PerUnitAmount:          0,
+						Quantity:               5,
+					},
+					{
+						ChildUniqueReferenceID: "graduated-tiered-2-price-usage",
+						Category:               stddetailedline.CategoryRegular,
+						ServicePeriod:          lo.ToPtr(periods.period2),
+						PerUnitAmount:          1,
+						Quantity:               5,
+						Totals: ratingtestutils.ExpectedTotals{
+							Amount: 5,
+							Total:  5,
+						},
+					},
+				},
+				expectedTotals: ratingtestutils.ExpectedTotals{
+					Amount: 5,
+					Total:  5,
+				},
+			},
+			{
+				period:          periods.period3,
+				meteredQuantity: 20,
+				expectedDetailedLines: []ratingtestutils.ExpectedDetailedLine{
+					{
+						ChildUniqueReferenceID: "graduated-tiered-2-price-usage",
+						Category:               stddetailedline.CategoryRegular,
+						ServicePeriod:          lo.ToPtr(periods.period3),
+						PerUnitAmount:          1,
+						Quantity:               5,
+						Totals: ratingtestutils.ExpectedTotals{
+							Amount: 5,
+							Total:  5,
+						},
+					},
+				},
+				expectedTotals: ratingtestutils.ExpectedTotals{
+					Amount: 5,
+					Total:  5,
+				},
+			},
+		},
+	})
 }

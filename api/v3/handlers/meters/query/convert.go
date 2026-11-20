@@ -3,7 +3,7 @@ package query
 import (
 	"fmt"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 )
 
@@ -26,6 +26,7 @@ func ConvertISO8601DurationToWindowSize(duration string) (meter.WindowSize, erro
 	if !ok {
 		return "", NewInvalidWindowSizeError(duration)
 	}
+
 	return ws, nil
 }
 
@@ -33,12 +34,13 @@ func ConvertWindowSizeToISO8601Duration(ws meter.WindowSize) (string, error) {
 	if d, ok := windowSizeToISO8601[ws]; ok {
 		return d, nil
 	}
+
 	return "", fmt.Errorf("unknown WindowSize: %q", ws)
 }
 
 // ExtractStringsFromQueryFilter extracts a flat list of string values from a QueryFilterString.
 // Only the eq and in operators are supported; an error is returned if any other operator is set.
-func ExtractStringsFromQueryFilter(f *api.QueryFilterString, fieldPath ...string) ([]string, error) {
+func ExtractStringsFromQueryFilter(f *apiv3models.QueryFilterString, fieldPath ...string) ([]string, error) {
 	if f == nil {
 		return nil, nil
 	}
@@ -48,6 +50,7 @@ func ExtractStringsFromQueryFilter(f *api.QueryFilterString, fieldPath ...string
 		f.And != nil || f.Or != nil {
 		return nil, NewUnsupportedFilterOperatorError(fieldPath...)
 	}
+
 	if f.Eq != nil && f.In != nil {
 		return nil, NewUnsupportedFilterOperatorError(fieldPath...)
 	}
@@ -56,15 +59,17 @@ func ExtractStringsFromQueryFilter(f *api.QueryFilterString, fieldPath ...string
 	if f.Eq != nil {
 		result = append(result, *f.Eq)
 	}
+
 	if f.In != nil {
 		result = append(result, *f.In...)
 	}
+
 	return result, nil
 }
 
 // ExtractStringsFromQueryFilterMapItem extracts a flat list of string values from a QueryFilterStringMapItem.
 // Only the eq and in operators are supported; an error is returned if any other operator is set.
-func ExtractStringsFromQueryFilterMapItem(f *api.QueryFilterStringMapItem, fieldPath ...string) ([]string, error) {
+func ExtractStringsFromQueryFilterMapItem(f *apiv3models.QueryFilterStringMapItem, fieldPath ...string) ([]string, error) {
 	if f == nil {
 		return nil, nil
 	}
@@ -74,6 +79,7 @@ func ExtractStringsFromQueryFilterMapItem(f *api.QueryFilterStringMapItem, field
 		f.And != nil || f.Or != nil || f.Exists != nil {
 		return nil, NewUnsupportedFilterOperatorError(fieldPath...)
 	}
+
 	if f.Eq != nil && f.In != nil {
 		return nil, NewUnsupportedFilterOperatorError(fieldPath...)
 	}
@@ -82,8 +88,10 @@ func ExtractStringsFromQueryFilterMapItem(f *api.QueryFilterStringMapItem, field
 	if f.Eq != nil {
 		result = append(result, *f.Eq)
 	}
+
 	if f.In != nil {
 		result = append(result, *f.In...)
 	}
+
 	return result, nil
 }

@@ -7,9 +7,8 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/meter"
-	"github.com/openmeterio/openmeter/openmeter/streaming"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -21,8 +20,8 @@ import (
 const limit = 1000
 
 type (
-	ListMetersParams   = api.ListMetersParams
-	ListMetersResponse = []api.Meter
+	ListMetersParams   = apiv1models.ListMetersParams
+	ListMetersResponse = []apiv1models.Meter
 	ListMetersHandler  httptransport.HandlerWithArgs[ListMetersRequest, ListMetersResponse, ListMetersParams]
 )
 
@@ -48,8 +47,8 @@ func (h *handler) ListMeters() ListMetersHandler {
 				// TODO: update when meter pagination is implemented
 				page:           pagination.NewPage(1, limit),
 				includeDeleted: lo.FromPtrOr(params.IncludeDeleted, false),
-				orderBy:        meter.OrderBy(lo.FromPtrOr(params.OrderBy, api.MeterOrderByKey)),
-				order:          sortx.Order(lo.FromPtrOr(params.Order, api.SortOrderASC)),
+				orderBy:        meter.OrderBy(lo.FromPtrOr(params.OrderBy, apiv1models.MeterOrderByKey)),
+				order:          sortx.Order(lo.FromPtrOr(params.Order, apiv1models.SortOrderASC)),
 			}, nil
 		},
 		func(ctx context.Context, request ListMetersRequest) (ListMetersResponse, error) {
@@ -83,7 +82,7 @@ func (h *handler) ListMeters() ListMetersHandler {
 
 type (
 	GetMeterParams   = string
-	GetMeterResponse = api.Meter
+	GetMeterResponse = apiv1models.Meter
 	GetMeterHandler  httptransport.HandlerWithArgs[GetMeterRequest, GetMeterResponse, GetMeterParams]
 )
 
@@ -128,9 +127,9 @@ func (h *handler) GetMeter() GetMeterHandler {
 type (
 	CreateMeterRequest = struct {
 		Namespace string
-		api.MeterCreate
+		apiv1models.MeterCreate
 	}
-	CreateMeterResponse = api.Meter
+	CreateMeterResponse = apiv1models.Meter
 )
 
 type CreateMeterHandler = httptransport.Handler[CreateMeterRequest, CreateMeterResponse]
@@ -143,7 +142,7 @@ func (h handler) CreateMeter() CreateMeterHandler {
 				return CreateMeterRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			body := api.MeterCreate{}
+			body := apiv1models.MeterCreate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return CreateMeterRequest{}, fmt.Errorf("failed to decode create meter request: %w", err)
 			}
@@ -154,12 +153,6 @@ func (h handler) CreateMeter() CreateMeterHandler {
 			}, nil
 		},
 		func(ctx context.Context, request CreateMeterRequest) (CreateMeterResponse, error) {
-			// Validate JSON paths via ClickHouse
-			err := validateJSONPaths(ctx, h.streaming, request.MeterCreate.ValueProperty, request.MeterCreate.GroupBy)
-			if err != nil {
-				return CreateMeterResponse{}, err
-			}
-
 			// Create meter
 			input := meter.CreateMeterInput{
 				Namespace: request.Namespace,
@@ -194,9 +187,9 @@ type (
 	UpdateMeterRequest = struct {
 		namespace string
 		idOrKey   string
-		api.MeterUpdate
+		apiv1models.MeterUpdate
 	}
-	UpdateMeterResponse = api.Meter
+	UpdateMeterResponse = apiv1models.Meter
 )
 
 type UpdateMeterHandler = httptransport.HandlerWithArgs[UpdateMeterRequest, UpdateMeterResponse, string]
@@ -209,7 +202,7 @@ func (h handler) UpdateMeter() UpdateMeterHandler {
 				return UpdateMeterRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			body := api.MeterUpdate{}
+			body := apiv1models.MeterUpdate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return UpdateMeterRequest{}, fmt.Errorf("failed to decode update meter request: %w", err)
 			}
@@ -228,12 +221,6 @@ func (h handler) UpdateMeter() UpdateMeterHandler {
 			})
 			if err != nil {
 				return UpdateMeterResponse{}, fmt.Errorf("failed to get meter: %w", err)
-			}
-
-			// Validate JSON paths via ClickHouse
-			err = validateGroupByJSONPaths(ctx, h.streaming, request.MeterUpdate.GroupBy)
-			if err != nil {
-				return UpdateMeterResponse{}, err
 			}
 
 			// Update meter
@@ -312,59 +299,4 @@ func (h handler) DeleteMeter() DeleteMeterHandler {
 			httptransport.WithOperationName("deleteMeter"),
 		)...,
 	)
-}
-
-// Validate JSON paths via ClickHouse
-// This is necessary because ClickHouse is more strict than JSONPath libraries in Go.
-// Ideally this would be a RegExp
-func validateJSONPaths(ctx context.Context, streaming streaming.Connector, valueProperty *string, groupBy *map[string]string) error {
-	err := validateValuePropertyJSONPath(ctx, streaming, valueProperty)
-	if err != nil {
-		return err
-	}
-
-	err = validateGroupByJSONPaths(ctx, streaming, groupBy)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// Validate Value Property JSON path via ClickHouse
-func validateValuePropertyJSONPath(ctx context.Context, streaming streaming.Connector, valueProperty *string) error {
-	if valueProperty == nil {
-		return nil
-	}
-
-	isValid, err := streaming.ValidateJSONPath(ctx, *valueProperty)
-	if err != nil {
-		return fmt.Errorf("validate json path in clickhouse: %w", err)
-	}
-
-	if !isValid {
-		return models.NewGenericValidationError(fmt.Errorf("invalid JSONPath: %w", err))
-	}
-
-	return nil
-}
-
-// Validate GroupBy JSON paths via ClickHouse
-func validateGroupByJSONPaths(ctx context.Context, streaming streaming.Connector, groupBy *map[string]string) error {
-	if groupBy == nil {
-		return nil
-	}
-
-	for groupByKey, jsonPath := range *groupBy {
-		isValid, err := streaming.ValidateJSONPath(ctx, jsonPath)
-		if err != nil {
-			return fmt.Errorf("validate json path in clickhouse: %w", err)
-		}
-
-		if !isValid {
-			return models.NewGenericValidationError(fmt.Errorf("invalid JSONPath for %s group by: %w", groupByKey, err))
-		}
-	}
-
-	return nil
 }

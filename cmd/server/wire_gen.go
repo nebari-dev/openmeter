@@ -28,11 +28,13 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/namespace"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/openmeter/portal"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/featureresolver"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	"github.com/openmeterio/openmeter/openmeter/progressmanager"
 	"github.com/openmeterio/openmeter/openmeter/registry"
 	"github.com/openmeterio/openmeter/openmeter/secret"
@@ -218,7 +220,18 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	addonService, err := common.NewAddonService(logger, client, featureResolver, currencyResolver, taxcodeService, eventbusPublisher)
+	taxCodeResolver, err := taxcoderesolver.New(taxcodeService)
+	if err != nil {
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return Application{}, nil, err
+	}
+	addonService, err := common.NewAddonService(logger, client, featureResolver, currencyResolver, taxCodeResolver, eventbusPublisher)
 	if err != nil {
 		cleanup7()
 		cleanup6()
@@ -342,7 +355,7 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	planService, err := common.NewPlanService(logger, client, featureResolver, currencyResolver, taxcodeService, eventbusPublisher)
+	planService, err := common.NewPlanService(logger, client, featureResolver, currencyResolver, taxCodeResolver, eventbusPublisher)
 	if err != nil {
 		cleanup8()
 		cleanup7()
@@ -367,7 +380,11 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		return Application{}, nil, err
 	}
 	ffxService := ffx.NewContextService()
-	subscriptionServiceWithWorkflow, err := common.NewSubscriptionServices(logger, client, featureConnector, entitlement, customerService, currenciesService, currencyResolver, planService, planaddonService, addonService, eventbusPublisher, locker, ffxService, taxcodeService)
+	creditsConfiguration := conf.Credits
+	gate := featuregate.NewNoop()
+	featureGateConfiguration := conf.FeatureGate
+	featureGateChecker := common.NewFeatureGateChecker(gate, featureGateConfiguration, creditsConfiguration)
+	subscriptionServiceWithWorkflow, err := common.NewSubscriptionServices(logger, client, featureConnector, entitlement, customerService, currenciesService, currencyResolver, planService, planaddonService, addonService, eventbusPublisher, locker, ffxService, taxCodeResolver, creditsConfiguration, featureGateChecker)
 	if err != nil {
 		cleanup8()
 		cleanup7()
@@ -381,14 +398,13 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 	}
 	validator := subscriptionServiceWithWorkflow.ItemReferenceValidator
 	billingFeatureSwitchesConfiguration := billingConfiguration.FeatureSwitches
-	creditsConfiguration := conf.Credits
 	repo := common.NewLedgerHistoricalRepo(client)
 	accountRepo := common.NewLedgerAccountRepo(client)
 	accountService := common.NewLedgerAccountService(creditsConfiguration, accountRepo, locker)
 	accountCatalog := common.NewLedgerAccountCatalog(accountService)
 	accountLocker := common.NewLedgerAccountLocker(accountService)
 	routingValidator := common.NewLedgerRoutingValidator()
-	ledgerReadWriter := common.NewLedgerHistoricalLedger(creditsConfiguration, repo, accountCatalog, accountLocker, routingValidator)
+	ledgerReadWriter := common.NewLedgerHistoricalLedgerWithMetadata(commonMetadata, creditsConfiguration, repo, accountCatalog, accountLocker, routingValidator)
 	ledger := common.NewLedgerService(ledgerReadWriter)
 	balanceQuerier := common.NewLedgerBalanceQuerier(ledgerReadWriter)
 	customerAccountRepo := common.NewLedgerResolversRepo(client)
@@ -406,10 +422,7 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	gate := featuregate.NewNoop()
-	featureGateConfiguration := conf.FeatureGate
-	featureGateChecker := common.NewFeatureGateChecker(gate, featureGateConfiguration, creditsConfiguration)
-	billingRegistry, err := common.NewBillingRegistry(logger, appService, billingAdapter, ratingService, customerService, featureConnector, service, meter, connector, eventbusPublisher, billingConfiguration, subscriptionServiceWithWorkflow, validator, client, billingFeatureSwitchesConfiguration, creditsConfiguration, tracer, taxcodeService, currencyResolver, currenciesService, locker, ledger, balanceQuerier, accountResolver, accountService, breakageService, featureGateChecker)
+	billingRegistry, err := common.NewBillingRegistry(logger, appService, billingAdapter, ratingService, customerService, featureConnector, service, meter, connector, eventbusPublisher, billingConfiguration, subscriptionServiceWithWorkflow, validator, client, billingFeatureSwitchesConfiguration, creditsConfiguration, tracer, taxcodeService, taxCodeResolver, currencyResolver, currenciesService, locker, ledger, balanceQuerier, accountResolver, accountService, breakageService, featureGateChecker)
 	if err != nil {
 		cleanup8()
 		cleanup7()
@@ -520,8 +533,8 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	customerOverrideService := common.NewBillingCustomerOverrideService(billingRegistry)
-	customerSubjectHook, err := common.NewCustomerSubjectServiceHook(customerConfiguration, logger, tracer, subjectService, customerService, customerOverrideService)
+	customerBillingProfileService := common.NewBillingCustomerOverrideService(billingRegistry)
+	customerSubjectHook, err := common.NewCustomerSubjectServiceHook(customerConfiguration, logger, tracer, subjectService, customerService, customerBillingProfileService)
 	if err != nil {
 		cleanup8()
 		cleanup7()
@@ -593,7 +606,7 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	customerbalanceService, err := common.NewCustomerBalanceService(creditsConfiguration, ledger, balanceQuerier, accountResolver, accountService, billingRegistry, currenciesService, breakageService, creditvoidService)
+	customerbalanceService, err := common.NewCustomerBalanceService(creditsConfiguration, logger, meter, ledger, balanceQuerier, accountResolver, accountService, billingRegistry, currenciesService, breakageService, creditvoidService)
 	if err != nil {
 		cleanup8()
 		cleanup7()
@@ -733,7 +746,7 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
-	manageService := common.NewMeterManageService(adapter, manager, eventbusPublisher, v6)
+	manageService := common.NewMeterManageService(adapter, manager, eventbusPublisher, v6, connector)
 	v7 := common.NewMeterConfigInitializer(logger, v4, manageService, manager)
 	metereventService := common.NewMeterEventService(connector, customerService, service)
 	notificationRepository, err := common.NewNotificationAdapter(logger, client)
@@ -852,9 +865,22 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
+	transactionalTaxCodeResolver, err := common.NewTransactionalTaxCodeResolver(taxcodeService, taxcodeRepository)
+	if err != nil {
+		cleanup9()
+		cleanup8()
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return Application{}, nil, err
+	}
 	health := common.NewHealthChecker(logger)
 	telemetryHandler := common.NewTelemetryHandler(metricsTelemetryConfig, health, logger)
-	v10, cleanup10 := common.NewTelemetryServer(telemetryConfig, telemetryHandler)
+	telemetryServer, cleanup10 := common.NewTelemetryServer(telemetryConfig, telemetryHandler)
 	terminationConfig := conf.Termination
 	terminationChecker, err := common.NewTerminationChecker(terminationConfig, health)
 	if err != nil {
@@ -930,6 +956,7 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		LedgerNamespaceHandler:           handler,
 		LLMCostService:                   llmcostService,
 		Logger:                           logger,
+		Metadata:                         commonMetadata,
 		MetricMeter:                      meter,
 		MeterConfigInitializer:           v7,
 		MeterManageService:               manageService,
@@ -950,7 +977,8 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		StreamingConnector:               connector,
 		TaxCodeNamespaceHandler:          taxcodeNamespaceHandler,
 		TaxCodeService:                   taxcodeService,
-		TelemetryServer:                  v10,
+		TaxCodeResolver:                  transactionalTaxCodeResolver,
+		TelemetryServer:                  telemetryServer,
 		TerminationChecker:               terminationChecker,
 		RuntimeMetricsCollector:          runtimeMetricsCollector,
 		Tracer:                           tracer,
@@ -1004,6 +1032,7 @@ type Application struct {
 	LedgerNamespaceHandler           namespace.Handler
 	LLMCostService                   llmcost.Service
 	Logger                           *slog.Logger
+	Metadata                         common.Metadata
 	MetricMeter                      metric.Meter
 	MeterConfigInitializer           common.MeterConfigInitializer
 	MeterManageService               meter.ManageService
@@ -1024,6 +1053,7 @@ type Application struct {
 	StreamingConnector               streaming.Connector
 	TaxCodeNamespaceHandler          *taxcode.NamespaceHandler
 	TaxCodeService                   taxcode.Service
+	TaxCodeResolver                  productcatalog.TransactionalTaxCodeResolver
 	TelemetryServer                  common.TelemetryServer
 	TerminationChecker               *common.TerminationChecker
 	RuntimeMetricsCollector          common.RuntimeMetricsCollector

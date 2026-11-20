@@ -4,7 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	plansubscription "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
@@ -14,7 +15,7 @@ import (
 
 type (
 	MigrateSubscriptionRequest  = plansubscription.MigrateSubscriptionRequest
-	MigrateSubscriptionResponse = api.SubscriptionChangeResponseBody
+	MigrateSubscriptionResponse = apiv1models.SubscriptionChangeResponseBody
 	MigrateSubscriptionParams   = struct {
 		ID string
 	}
@@ -24,7 +25,7 @@ type (
 func (h *handler) MigrateSubscription() MigrateSubscriptionHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, params MigrateSubscriptionParams) (MigrateSubscriptionRequest, error) {
-			var body api.MigrateSubscriptionJSONRequestBody
+			var body apiv1models.MigrateSubscriptionJSONRequestBody
 
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return MigrateSubscriptionRequest{}, err
@@ -59,17 +60,36 @@ func (h *handler) MigrateSubscription() MigrateSubscriptionHandler {
 			}, nil
 		},
 		func(ctx context.Context, request MigrateSubscriptionRequest) (MigrateSubscriptionResponse, error) {
-			res, err := h.PlanSubscriptionService.Migrate(ctx, request)
-			if err != nil {
-				return MigrateSubscriptionResponse{}, err
-			}
+			var resp MigrateSubscriptionResponse
 
-			v, err := MapSubscriptionViewToAPI(res.Next)
+			// One transaction for the migration and the response lookup: if the lookup failed
+			// after the migration committed, a retry would find the subscription already at
+			// the target version and fail. Same as in change.go.
+			err := h.TaxCodeResolver.WithResolver(ctx, func(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver) error {
+				res, err := h.PlanSubscriptionService.Migrate(ctx, request)
+				if err != nil {
+					return err
+				}
 
-			return MigrateSubscriptionResponse{
-				Current: MapSubscriptionToAPI(res.Current),
-				Next:    v,
-			}, err
+				taxCodes, err := h.taxCodesForView(ctx, res.Next)
+				if err != nil {
+					return err
+				}
+
+				v, err := MapSubscriptionViewToAPI(res.Next, taxCodes)
+				if err != nil {
+					return err
+				}
+
+				resp = MigrateSubscriptionResponse{
+					Current: MapSubscriptionToAPI(res.Current),
+					Next:    v,
+				}
+
+				return nil
+			})
+
+			return resp, err
 		},
 		commonhttp.JSONResponseEncoderWithStatus[MigrateSubscriptionResponse](http.StatusOK),
 		httptransport.AppendOptions(

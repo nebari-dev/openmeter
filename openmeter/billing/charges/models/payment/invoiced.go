@@ -7,6 +7,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/schema/field"
+	"github.com/alpacahq/alpacadecimal"
 
 	"github.com/openmeterio/openmeter/pkg/framework/entutils"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -78,6 +79,7 @@ type InvoicedCreator[T any] interface {
 func CreateInvoiced[T InvoicedCreator[T]](creator InvoicedCreator[T], in InvoicedCreate) T {
 	creator = Create(creator, in.Namespace, in.Base)
 	creator = creator.SetInvoiceID(in.InvoiceID)
+
 	return creator.SetLineID(in.LineID)
 }
 
@@ -85,6 +87,13 @@ type InvoicedUpdater[T any] = Updater[T]
 
 func UpdateInvoiced[T InvoicedUpdater[T]](updater InvoicedUpdater[T], in Invoiced) T {
 	return Update(updater, in.Payment)
+}
+
+type BookingKey struct {
+	Namespace  string
+	InvoiceID  string
+	LineID     string
+	FiatAmount alpacadecimal.Decimal
 }
 
 // InvoicePayment represents a payment settlement using a standard invoice managed
@@ -114,6 +123,27 @@ func (r Invoiced) Validate() error {
 	}
 
 	return models.NewNillableGenericValidationError(errors.Join(errs...))
+}
+
+// Billing retries payment callbacks for every line when any line fails, so a
+// retried line can meet its own completed booking. Matching on namespace,
+// invoice, line, and amount tells that apart from a booking for another line.
+func (r Invoiced) IsBookedFor(key BookingKey) bool {
+	return r.DeletedAt == nil &&
+		r.Namespace == key.Namespace &&
+		r.InvoiceID == key.InvoiceID &&
+		r.LineID == key.LineID &&
+		r.FiatAmount.Equal(key.FiatAmount)
+}
+
+// A malformed booking is an error rather than a non-match, so a settled status
+// without its ledger reference is never accepted as completed work.
+func (r Invoiced) IsSettledFor(key BookingKey) (bool, error) {
+	if err := r.Validate(); err != nil {
+		return false, fmt.Errorf("validating booked payment: %w", err)
+	}
+
+	return r.Status == StatusSettled && r.IsBookedFor(key), nil
 }
 
 func (r Invoiced) ErrorAttributes() models.Attributes {

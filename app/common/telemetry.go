@@ -262,13 +262,26 @@ func NewTelemetryHandler(
 	return router
 }
 
-type TelemetryServer = *http.Server
+type TelemetryServer struct {
+	*http.Server
+	router *http.ServeMux
+}
+
+// Handle registers a telemetry route alongside the built-in health and metrics endpoints.
+func (s TelemetryServer) Handle(pattern string, handler http.Handler) {
+	s.router.Handle(pattern, handler)
+}
 
 func NewTelemetryServer(conf config.TelemetryConfig, handler TelemetryHandler) (TelemetryServer, func()) {
-	server := &http.Server{
-		Addr:              conf.Address,
-		Handler:           handler,
-		ReadHeaderTimeout: conf.ReadHeaderTimeout,
+	router := http.NewServeMux()
+	router.Handle("/", handler)
+	server := TelemetryServer{
+		Server: &http.Server{
+			Addr:              conf.Address,
+			Handler:           router,
+			ReadHeaderTimeout: conf.ReadHeaderTimeout,
+		},
+		router: router,
 	}
 
 	return server, func() { server.Close() }
@@ -327,9 +340,11 @@ func NewTelemetryRouterHook(meterProvider metric.MeterProvider, tracerProvider t
 							route = rctx.RoutePattern()
 						}
 					}
+
 					if route == "" || strings.Contains(route, "*") {
 						route = lowCardinalityPath(r.URL.Path)
 					}
+
 					return r.Method + " " + route
 				}),
 			)
@@ -373,6 +388,7 @@ func lowCardinalityPath(path string) string {
 	if truncated {
 		out += "/..."
 	}
+
 	return out
 }
 
@@ -382,15 +398,19 @@ func isHighCardinalitySegment(seg string) bool {
 	if len(seg) > maxRouteSegmentLen {
 		return true
 	}
+
 	if isAllDigits(seg) {
 		return true
 	}
+
 	if _, err := ulid.ParseStrict(seg); err == nil {
 		return true
 	}
+
 	if _, err := uuid.Parse(seg); err == nil {
 		return true
 	}
+
 	return false
 }
 
@@ -398,11 +418,13 @@ func isAllDigits(s string) bool {
 	if s == "" {
 		return false
 	}
+
 	for _, r := range s {
 		if r < '0' || r > '9' {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -421,6 +443,7 @@ func NewRuntimeMetricsCollector(
 	}
 
 	logger.Debug("started collecting runtime metrics")
+
 	return RuntimeMetricsCollector{}, nil
 }
 

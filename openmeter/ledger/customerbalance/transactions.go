@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
@@ -24,15 +25,16 @@ import (
 type CreditTransactionType string
 
 const (
-	CreditTransactionTypeFunded   CreditTransactionType = "funded"
-	CreditTransactionTypeConsumed CreditTransactionType = "consumed"
-	CreditTransactionTypeExpired  CreditTransactionType = "expired"
-	CreditTransactionTypeVoided   CreditTransactionType = "voided"
+	CreditTransactionTypeFunded     CreditTransactionType = "funded"
+	CreditTransactionTypeConsumed   CreditTransactionType = "consumed"
+	CreditTransactionTypeCorrection CreditTransactionType = "correction"
+	CreditTransactionTypeExpired    CreditTransactionType = "expired"
+	CreditTransactionTypeVoided     CreditTransactionType = "voided"
 )
 
 func (t CreditTransactionType) Validate() error {
 	switch t {
-	case CreditTransactionTypeFunded, CreditTransactionTypeConsumed, CreditTransactionTypeExpired, CreditTransactionTypeVoided:
+	case CreditTransactionTypeFunded, CreditTransactionTypeConsumed, CreditTransactionTypeCorrection, CreditTransactionTypeExpired, CreditTransactionTypeVoided:
 		return nil
 	default:
 		return fmt.Errorf("invalid credit transaction type: %s", t)
@@ -144,6 +146,7 @@ func (s *service) ListCreditTransactions(ctx context.Context, input ListCreditTr
 	if err != nil {
 		return ListCreditTransactionsResult{}, fmt.Errorf("resolve customer balance accounts: %w", err)
 	}
+
 	if accountIDs.FBO == "" {
 		return emptyCreditTransactions(), nil
 	}
@@ -177,11 +180,26 @@ func (s *service) ListCreditTransactions(ctx context.Context, input ListCreditTr
 		loadersHaveMore = loadersHaveMore || loaded.HasMore
 	}
 
+	compare := compareCreditTransactionsByCursor
+	if input.Before != nil {
+		// Before-pages select the nearest newer activities across all loaders,
+		// then return that page in the usual newest-first response order.
+		for _, items := range loadedLists {
+			slices.Reverse(items)
+		}
+
+		compare = func(a, b CreditTransaction) int { return -compareCreditTransactionsByCursor(a, b) }
+	}
+
 	mergedItems, bufferedHasMore := mergeSortedLists(
 		loadedLists,
 		input.Limit,
-		compareCreditTransactionsByCursor,
+		compare,
 	)
+	if input.Before != nil {
+		slices.Reverse(mergedItems)
+	}
+
 	// bufferedHasMore only reflects whether there are still items in the fetched in-memory lists.
 	// loadersHaveMore captures additional records in the requested cursor direction beyond each loader's in-memory window.
 	hasMoreInQueryDirection := bufferedHasMore || loadersHaveMore
@@ -280,6 +298,7 @@ func creditTransactionFromLedgerTransaction(tx ledger.Transaction) (CreditTransa
 	if err != nil {
 		return CreditTransaction{}, err
 	}
+
 	cursor := tx.Cursor()
 
 	return CreditTransaction{
@@ -311,6 +330,7 @@ func creditTransactionFBOImpact(tx ledger.Transaction) (alpacadecimal.Decimal, c
 		if currency.Code == "" {
 			currency = entryCurrency
 		}
+
 		if !currency.Equal(entryCurrency) {
 			return alpacadecimal.Decimal{}, currencies.CurrencyReference{}, fmt.Errorf("transaction %s has multiple customer FBO currencies", tx.ID().ID)
 		}
@@ -342,6 +362,7 @@ func (tx CreditTransaction) balanceQuery() ledger.BalanceQuery {
 	}
 
 	asOf := tx.BookedAt
+
 	return ledger.BalanceQuery{AsOf: &asOf}
 }
 

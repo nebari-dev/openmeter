@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
@@ -15,7 +15,7 @@ import (
 
 type (
 	CreateNotificationChannelRequest  = notification.CreateChannelInput
-	CreateNotificationChannelResponse = api.NotificationChannel
+	CreateNotificationChannelResponse = apiv3models.BillingNotificationChannel
 	CreateNotificationChannelHandler  = httptransport.Handler[CreateNotificationChannelRequest, CreateNotificationChannelResponse]
 )
 
@@ -23,7 +23,7 @@ type (
 func (h *handler) CreateNotificationChannel() CreateNotificationChannelHandler {
 	return httptransport.NewHandler(
 		func(ctx context.Context, r *http.Request) (CreateNotificationChannelRequest, error) {
-			body := api.CreateNotificationChannelRequest{}
+			body := apiv3models.CreateNotificationChannelRequest{}
 			if err := request.ParseBody(r, &body); err != nil {
 				return CreateNotificationChannelRequest{}, err
 			}
@@ -50,7 +50,7 @@ func (h *handler) CreateNotificationChannel() CreateNotificationChannelHandler {
 		commonhttp.JSONResponseEncoderWithStatus[CreateNotificationChannelResponse](http.StatusCreated),
 		httptransport.AppendOptions(
 			h.options,
-			httptransport.WithOperationName("create-notification-channel"),
+			httptransport.WithOperationName("create-billing-notification-channel"),
 			httptransport.WithErrorEncoder(apierrors.GenericErrorEncoder()),
 			httptransport.WithErrorEncoder(errorEncoder()),
 		)...,

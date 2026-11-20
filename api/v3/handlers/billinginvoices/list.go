@@ -7,10 +7,10 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
-	v3 "github.com/openmeterio/openmeter/api/v3"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/billing"
@@ -23,8 +23,8 @@ import (
 
 type (
 	ListBillingInvoicesRequest  = billing.ListInvoicesInput
-	ListBillingInvoicesResponse = response.PagePaginationResponse[v3.BillingInvoice]
-	ListBillingInvoicesParams   = v3.ListInvoicesParams
+	ListBillingInvoicesResponse = response.PagePaginationResponse[apiv3models.BillingInvoice]
+	ListBillingInvoicesParams   = apiv3models.ListInvoicesParams
 	ListBillingInvoicesHandler  = httptransport.HandlerWithArgs[ListBillingInvoicesRequest, ListBillingInvoicesResponse, ListBillingInvoicesParams]
 )
 
@@ -51,7 +51,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 			}
 
 			// Default sort: created_at ascending.
-			orderBy := api.InvoiceOrderByCreatedAt
+			orderBy := apiv1models.InvoiceOrderByCreatedAt
 			order := sortx.OrderAsc
 
 			if params.Sort != nil {
@@ -61,10 +61,12 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 						{Field: "sort", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				orderBy, err = FromAPIInvoiceSortField(ctx, sort.Field)
 				if err != nil {
 					return ListBillingInvoicesRequest{}, err
 				}
+
 				order = sort.Order.ToSortxOrder()
 			}
 
@@ -84,6 +86,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 							{Field: "filter[status]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 						})
 					}
+
 					req.Statuses = lo.Map(statuses, func(s billing.InvoiceShortStatus, _ int) string { return string(s) })
 				}
 
@@ -94,6 +97,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 							{Field: "filter[customer_id]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 						})
 					}
+
 					req.CustomerID = customerID
 				}
 
@@ -104,6 +108,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 							{Field: "filter[issued_at]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 						})
 					}
+
 					req.IssuedAt = issuedAt
 				}
 
@@ -114,6 +119,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 							{Field: "filter[service_period_start]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 						})
 					}
+
 					req.PeriodStart = periodStart
 				}
 
@@ -124,6 +130,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 							{Field: "filter[created_at]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 						})
 					}
+
 					req.CreatedAt = createdAt
 				}
 			}
@@ -136,7 +143,7 @@ func (h *handler) ListBillingInvoices() ListBillingInvoicesHandler {
 				return ListBillingInvoicesResponse{}, fmt.Errorf("listing invoices: %w", err)
 			}
 
-			items, err := slicesx.MapWithErr(result.Items, func(inv billing.Invoice) (v3.BillingInvoice, error) {
+			items, err := slicesx.MapWithErr(result.Items, func(inv billing.Invoice) (apiv3models.BillingInvoice, error) {
 				return ToAPIBillingInvoice(inv)
 			})
 			if err != nil {

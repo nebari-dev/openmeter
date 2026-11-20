@@ -8327,7 +8327,7 @@ export const IngestEventsBody = zod
         'The event payload.\nOptional, if present it must be a JSON object.',
       ),
     datacontenttype: zod
-      .enum(['application/json'])
+      .union([zod.literal('application/json'), zod.literal(null)])
       .nullish()
       .describe(
         'Content type of the CloudEvents data value. Only the value "application/json" is allowed over HTTP.',
@@ -8864,7 +8864,7 @@ export const MarketplaceAppInstallBody = zod
       .boolean()
       .default(marketplaceAppInstallBodyCreateBillingProfileDefault)
       .describe(
-        'If true, a billing profile will be created for the app.\nThe Stripe app will be also set as the default billing profile if the current default is a Sandbox app.',
+        'If true, a billing profile will be created for the app.\nThe Stripe app will be also set as the default billing profile if the current default is a Sandbox app.\nCustom Invoicing apps use the Auto Collection preset with an OpenMeter supplier\nin the US (postal code 94114), without replacing the default profile.',
       ),
     name: zod.coerce
       .string()
@@ -8897,7 +8897,7 @@ export const MarketplaceAppAPIKeyInstallBody = zod.object({
     .boolean()
     .default(marketplaceAppAPIKeyInstallBodyCreateBillingProfileDefault)
     .describe(
-      'If true, a billing profile will be created for the app.\nThe Stripe app will be also set as the default billing profile if the current default is a Sandbox app.',
+      'If true, a billing profile will be created for the app.\nThe Stripe app will be also set as the default billing profile if the current default is a Sandbox app.\nCustom Invoicing apps use the Auto Collection preset with an OpenMeter supplier\nin the US (postal code 94114), without replacing the default profile.',
     ),
   name: zod.coerce
     .string()
@@ -14610,6 +14610,12 @@ export const CreateSubscriptionBody = zod
           .describe(
             'The billing anchor of the subscription. The provided date will be normalized according to the billing cadence to the nearest recurrence before start time. If not provided, the subscription start time will be used.',
           ),
+        billingStartsAt: zod.coerce
+          .date()
+          .optional()
+          .describe(
+            "When billing starts for the subscription. Nothing is billed for service before this time, while access,\nentitlements and metering start with the subscription. Use it when the time before was already billed elsewhere,\nfor example when importing a subscription from another billing system.\n\nIt cannot be before the start of the subscription and cannot be changed later. On subscriptions billed through\ninvoice lines it must be the start of a billing period. If not provided, billing starts with the subscription.\n\nWhen billing starts inside a billing period, we recommend enabling price pro-rating (`prorate_prices`) on the\nplan. Without it that billing period's flat fees are billed in full.",
+          ),
         costBasisMode: zod
           .enum(['dynamic', 'pinned'])
           .describe(
@@ -14710,6 +14716,12 @@ export const CreateSubscriptionBody = zod
           .optional()
           .describe(
             'The billing anchor of the subscription. The provided date will be normalized according to the billing cadence to the nearest recurrence before start time. If not provided, the subscription start time will be used.',
+          ),
+        billingStartsAt: zod.coerce
+          .date()
+          .optional()
+          .describe(
+            "When billing starts for the subscription. Nothing is billed for service before this time, while access,\nentitlements and metering start with the subscription. Use it when the time before was already billed elsewhere,\nfor example when importing a subscription from another billing system.\n\nIt cannot be before the start of the subscription and cannot be changed later. On subscriptions billed through\ninvoice lines it must be the start of a billing period. If not provided, billing starts with the subscription.\n\nWhen billing starts inside a billing period, we recommend enabling price pro-rating (`prorate_prices`) on the\nplan. Without it that billing period's flat fees are billed in full.",
           ),
         costBasisMode: zod
           .enum(['dynamic', 'pinned'])

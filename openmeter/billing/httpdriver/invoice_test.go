@@ -1,8 +1,11 @@
 package httpdriver
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -14,9 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/billing"
-	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	"github.com/openmeterio/openmeter/openmeter/customer"
+	"github.com/openmeterio/openmeter/openmeter/namespace/namespacedriver"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
@@ -29,46 +33,6 @@ type InvoicingTestSuite struct {
 
 func TestInvoicingTax(t *testing.T) {
 	suite.Run(t, new(InvoicingTestSuite))
-}
-
-func TestMapTotalsToAPIIncludesCreditsTotal(t *testing.T) {
-	got := mapTotalsToAPI(totals.Totals{
-		Amount:              alpacadecimal.NewFromInt(100),
-		ChargesTotal:        alpacadecimal.NewFromInt(0),
-		DiscountsTotal:      alpacadecimal.NewFromInt(10),
-		CreditsTotal:        alpacadecimal.NewFromInt(15),
-		TaxesInclusiveTotal: alpacadecimal.NewFromInt(0),
-		TaxesExclusiveTotal: alpacadecimal.NewFromInt(5),
-		TaxesTotal:          alpacadecimal.NewFromInt(5),
-		Total:               alpacadecimal.NewFromInt(80),
-	})
-
-	require.Equal(t, "15", got.CreditsTotal)
-}
-
-func TestMapInvoiceLineCreditsToAPI(t *testing.T) {
-	got := mapInvoiceLineCreditsToAPI(billing.CreditsApplied{
-		{
-			Amount:              alpacadecimal.NewFromFloat(12.34),
-			Description:         "credit grant",
-			CreditRealizationID: "01K8N36X000000000000000001",
-		},
-		{
-			Amount:              alpacadecimal.NewFromInt(5),
-			CreditRealizationID: "01K8N36X000000000000000002",
-		},
-	})
-
-	require.NotNil(t, got)
-	require.Len(t, *got, 2)
-	require.Equal(t, "12.34", (*got)[0].Amount)
-	require.Equal(t, "credit grant", *(*got)[0].Description)
-	require.Equal(t, "5", (*got)[1].Amount)
-	require.Nil(t, (*got)[1].Description)
-}
-
-func TestMapInvoiceLineCreditsToAPIOmitsEmptyCredits(t *testing.T) {
-	require.Nil(t, mapInvoiceLineCreditsToAPI(nil))
 }
 
 func TestValidateAPIGenericInvoiceDeleteSupportedForGatheringInvoices(t *testing.T) {
@@ -250,7 +214,7 @@ func (s *InvoicingTestSuite) TestGatheringInvoiceSerialization() {
 	s.Equal(billing.StandardInvoiceStatusGathering, standardInvoice.Status)
 
 	// Let's serialize the invoice
-	apiInvoice, err := MapStandardInvoiceToAPI(standardInvoice)
+	apiInvoice, err := MapStandardInvoiceToAPI(standardInvoice, nil)
 	s.NoError(err)
 
 	// Let's deserialize the invoice
@@ -333,6 +297,7 @@ func (s *InvoicingTestSuite) TestGatheringInvoiceSerialization() {
 				}
 
 				_, err = ulid.Parse(strValue)
+
 				return err
 			},
 		},
@@ -351,6 +316,7 @@ func (s *InvoicingTestSuite) TestGatheringInvoiceSerialization() {
 				}
 
 				_, err = time.Parse(time.RFC3339, timeString)
+
 				return err
 			},
 		},
@@ -392,4 +358,67 @@ func toString(member any) (string, error) {
 	default:
 		return "", fmt.Errorf("expected string, got %T", member)
 	}
+}
+
+func (s *InvoicingTestSuite) TestSimulateInvoiceHTTP() {
+	namespace := "ns-simulate-invoice-http"
+	ctx := s.T().Context()
+
+	// given:
+	// - a customer with a billing profile
+	// - a simulate invoice request with one flat price line
+	appSandbox := s.InstallSandboxApp(s.T(), namespace)
+
+	cust, err := s.CustomerService.CreateCustomer(ctx, customer.CreateCustomerInput{
+		Namespace: namespace,
+
+		CustomerMutate: customer.CustomerMutate{
+			Key:      lo.ToPtr("test-customer"),
+			Name:     "Test Customer",
+			Currency: lo.ToPtr(currencyx.Code(currency.USD)),
+		},
+	})
+	s.Require().NoError(err)
+
+	s.ProvisionBillingProfile(ctx, namespace, appSandbox.GetID())
+
+	price := apiv1models.RateCardUsageBasedPrice{}
+	s.NoError(price.FromFlatPriceWithPaymentTerm(apiv1models.FlatPriceWithPaymentTerm{
+		Amount: "10",
+		Type:   apiv1models.FlatPriceWithPaymentTermTypeFlat,
+	}))
+
+	period := invoiceLineTestPeriod()
+	body, err := json.Marshal(apiv1models.InvoiceSimulationInput{
+		Currency: apiv1models.CurrencyCode(currency.USD),
+		Lines: []apiv1models.InvoiceSimulationLine{
+			{
+				Name:      "simulated flat fee",
+				Period:    apiv1models.Period(period),
+				InvoiceAt: period.To,
+				RateCard:  &apiv1models.InvoiceUsageBasedRateCard{Price: &price},
+			},
+		},
+	})
+	s.NoError(err)
+
+	h := &handler{
+		service:          s.BillingService,
+		namespaceDecoder: namespacedriver.StaticNamespaceDecoder(namespace),
+	}
+
+	// when:
+	// - the request goes through the HTTP handler and the billing service
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/billing/customers/"+cust.ID+"/invoices/simulate", bytes.NewReader(body))
+	h.SimulateInvoice().With(SimulateInvoiceParams{CustomerID: cust.ID}).ServeHTTP(w, r)
+
+	// then:
+	// - the service rates the line through the invoicing engine and returns the simulated invoice
+	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+	var invoice apiv1models.Invoice
+	s.NoError(json.Unmarshal(w.Body.Bytes(), &invoice))
+	s.Len(lo.FromPtr(invoice.Lines), 1)
+	s.Equal(10.0, alpacadecimal.RequireFromString(invoice.Totals.Total).InexactFloat64())
 }

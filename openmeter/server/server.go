@@ -15,12 +15,11 @@ import (
 	oapimiddleware "github.com/oapi-codegen/nethttp-middleware"
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1 "github.com/openmeterio/openmeter/api"
 	v3server "github.com/openmeterio/openmeter/api/v3/server"
 	appconfig "github.com/openmeterio/openmeter/app/config"
 	"github.com/openmeterio/openmeter/openmeter/portal/authenticator"
 	"github.com/openmeterio/openmeter/openmeter/server/router"
-	"github.com/openmeterio/openmeter/pkg/contextx"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/server"
 )
@@ -93,7 +92,7 @@ func NewServer(config *Config) (*Server, error) {
 	}
 
 	// Get the OpenAPI spec
-	swagger, err := api.GetSwagger()
+	swagger, err := apiv1.GetSwagger()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get swagger: %w", err)
 	}
@@ -122,14 +121,7 @@ func NewServer(config *Config) (*Server, error) {
 	v3Middlewares = append(v3Middlewares, []server.MiddlewareFunc{
 		config.ClientIPMiddleware,
 		middleware.RequestID,
-		func(h http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ctx := r.Context()
-				ctx = contextx.WithAttrs(ctx, server.GetRequestAttributes(r))
-
-				h.ServeHTTP(w, r.WithContext(ctx))
-			})
-		},
+		server.NewRequestAttributesMiddleware(),
 		server.NewRequestLoggerMiddleware(slog.Default().Handler()),
 		middleware.Recoverer,
 	}...)
@@ -165,6 +157,7 @@ func NewServer(config *Config) (*Server, error) {
 		SubscriptionWorkflowService: config.RouterConfig.SubscriptionWorkflowService,
 		ChargeService:               config.RouterConfig.ChargeService,
 		TaxCodeService:              config.RouterConfig.TaxCodeService,
+		TaxCodeResolver:             config.RouterConfig.TaxCodeResolver,
 		CostService:                 config.RouterConfig.CostService,
 		FeatureConnector:            config.RouterConfig.FeatureConnector,
 		NotificationService:         config.RouterConfig.Notification,
@@ -193,14 +186,7 @@ func NewServer(config *Config) (*Server, error) {
 
 		r.Use(config.ClientIPMiddleware)
 		r.Use(middleware.RequestID)
-		r.Use(func(h http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ctx := r.Context()
-				ctx = contextx.WithAttrs(ctx, server.GetRequestAttributes(r))
-
-				h.ServeHTTP(w, r.WithContext(ctx))
-			})
-		})
+		r.Use(server.NewRequestAttributesMiddleware())
 		r.Use(server.NewRequestLoggerMiddleware(slog.Default().Handler()))
 		r.Use(middleware.Recoverer)
 		if config.RouterConfig.PortalCORSEnabled {
@@ -218,6 +204,7 @@ func NewServer(config *Config) (*Server, error) {
 				},
 			}))
 		}
+
 		r.Use(render.SetContentType(render.ContentTypeJSON))
 		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 			models.NewStatusProblem(r.Context(), nil, http.StatusNotFound).Respond(w)
@@ -236,7 +223,7 @@ func NewServer(config *Config) (*Server, error) {
 			routeHook(r)
 		}
 
-		middlewares := []api.MiddlewareFunc{
+		middlewares := []apiv1.MiddlewareFunc{
 			authenticator.NewAuthenticator(config.RouterConfig.Portal, config.RouterConfig.ErrorHandler).NewAuthenticatorMiddlewareFunc(swagger),
 			oapimiddleware.OapiRequestValidatorWithOptions(swagger, &oapimiddleware.Options{
 				ErrorHandler: func(w http.ResponseWriter, message string, statusCode int) {
@@ -254,14 +241,14 @@ func NewServer(config *Config) (*Server, error) {
 			}),
 		}
 
-		postAuthMiddlewares := lo.Map(config.PostAuthMiddlewares, func(mwf server.MiddlewareFunc, _ int) api.MiddlewareFunc {
-			return api.MiddlewareFunc(mwf)
+		postAuthMiddlewares := lo.Map(config.PostAuthMiddlewares, func(mwf server.MiddlewareFunc, _ int) apiv1.MiddlewareFunc {
+			return apiv1.MiddlewareFunc(mwf)
 		})
 
 		middlewares = append(middlewares, postAuthMiddlewares...)
 
 		// Use validator middleware to check requests against the OpenAPI schema
-		_ = api.HandlerWithOptions(impl, api.ChiServerOptions{
+		_ = apiv1.HandlerWithOptions(impl, apiv1.ChiServerOptions{
 			BaseRouter:  r,
 			Middlewares: middlewares,
 			ErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -293,28 +280,29 @@ func collectMiddlewareHooks(hooks []MiddlewareHook) []server.MiddlewareFunc {
 	for _, hook := range hooks {
 		hook(c)
 	}
+
 	return c.middlewares
 }
 
 // errorHandlerReply handles errors returned by the OpenAPI layer.
 func errorHandlerReply(w http.ResponseWriter, r *http.Request, err error) {
 	switch e := err.(type) {
-	case *api.UnescapedCookieParamError:
+	case *apiv1.UnescapedCookieParamError:
 		err := fmt.Errorf("unescaped cookie param %s: %w", e.ParamName, err)
 		models.NewStatusProblem(r.Context(), err, http.StatusBadRequest).Respond(w)
-	case *api.UnmarshalingParamError:
+	case *apiv1.UnmarshalingParamError:
 		err := fmt.Errorf("unmarshaling param %s: %w", e.ParamName, err)
 		models.NewStatusProblem(r.Context(), err, http.StatusBadRequest).Respond(w)
-	case *api.RequiredParamError:
+	case *apiv1.RequiredParamError:
 		err := fmt.Errorf("required param missing %s: %w", e.ParamName, err)
 		models.NewStatusProblem(r.Context(), err, http.StatusBadRequest).Respond(w)
-	case *api.RequiredHeaderError:
+	case *apiv1.RequiredHeaderError:
 		err := fmt.Errorf("required header missing %s: %w", e.ParamName, err)
 		models.NewStatusProblem(r.Context(), err, http.StatusBadRequest).Respond(w)
-	case *api.InvalidParamFormatError:
+	case *apiv1.InvalidParamFormatError:
 		err := fmt.Errorf("invalid param format %s: %w", e.ParamName, err)
 		models.NewStatusProblem(r.Context(), err, http.StatusBadRequest).Respond(w)
-	case *api.TooManyValuesForParamError:
+	case *apiv1.TooManyValuesForParamError:
 		err := fmt.Errorf("too many values for param %s: %w", e.ParamName, err)
 		models.NewStatusProblem(r.Context(), err, http.StatusBadRequest).Respond(w)
 	default:

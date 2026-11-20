@@ -135,6 +135,7 @@ func (r *subscriptionAddonRepo) List(ctx context.Context, namespace string, filt
 			if err != nil {
 				return pagination.Result[subscriptionaddon.SubscriptionAddon]{}, err
 			}
+
 			return pagination.Result[subscriptionaddon.SubscriptionAddon]{
 				Items:      items,
 				Page:       pagination.NewPage(1, len(items)),
@@ -156,7 +157,6 @@ func querySubscriptionAddon(query *db.SubscriptionAddonQuery) *db.SubscriptionAd
 		WithAddon(func(aq *db.AddonQuery) {
 			aq.WithRatecards(func(arq *db.AddonRateCardQuery) {
 				arq.WithFeatures()
-				arq.WithTaxCode()
 			})
 		}).
 		WithQuantities(func(saqq *db.SubscriptionAddonQuantityQuery) {

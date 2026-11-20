@@ -1,0 +1,268 @@
+name: Container Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cancel-older-runs:
+    # Fork and Dependabot tokens cannot cancel runs in this repository.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+      actions: write # Required by the cancellation job; other jobs retain their own permissions.
+    uses: $/.github/workflows/cancel-stale-pr-runs.yaml
+
+  fork:
+    name: Fork
+    if: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') }}
+    runs-on: ubuntu-24.04
+    env:
+      OPENMETER_IMAGE: openmeter-ci:${{ github.sha }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+          use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
+          api-key: ${{ secrets.STEP_SECURITY_API_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build OpenMeter image
+        run: docker build --build-arg "COMMIT_SHA=${GITHUB_SHA}" --build-arg VERSION=v0.0.0-e2e --tag "${OPENMETER_IMAGE}" .
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            collector/go.sum
+            api/v3/client/go.sum
+            e2e/go.sum
+
+      - name: Quickstart
+        id: quickstart
+        continue-on-error: true
+        run: bash .github/scripts/run-quickstart.sh "${OPENMETER_IMAGE}" never
+
+      - name: Base E2E
+        id: e2e
+        continue-on-error: true
+        run: bash .github/scripts/run-e2e.sh base "${OPENMETER_IMAGE}" never upstream
+
+      - name: Credits-disabled E2E
+        id: e2e-credits-disabled
+        continue-on-error: true
+        run: bash .github/scripts/run-e2e.sh credits-disabled "${OPENMETER_IMAGE}" never upstream
+
+      - name: Upload OpenMeter logs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: "[${{ github.job }}] OpenMeter logs"
+          path: |
+            quickstart/artifacts/logs/**
+            e2e/artifacts/logs/**
+          retention-days: 14
+
+      - name: Verify container test results
+        if: always()
+        env:
+          QUICKSTART_RESULT: ${{ steps.quickstart.outcome }}
+          E2E_RESULT: ${{ steps.e2e.outcome }}
+          CREDITS_DISABLED_RESULT: ${{ steps.e2e-credits-disabled.outcome }}
+        run: |
+          failed="false"
+
+          for result in \
+            "Quickstart:${QUICKSTART_RESULT}" \
+            "Base E2E:${E2E_RESULT}" \
+            "Credits-disabled E2E:${CREDITS_DISABLED_RESULT}"
+          do
+            name="${result%%:*}"
+            outcome="${result#*:}"
+            echo "${name}: ${outcome}"
+
+            if [ "${outcome}" != "success" ]; then
+              failed="true"
+            fi
+          done
+
+          if [ "${failed}" = "true" ]; then
+            exit 1
+          fi
+
+  registry-image:
+    name: Build
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: registry.depot.dev/${{ steps.build.outputs.project-id }}@${{ steps.build.outputs.imageid }}
+
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+          use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
+          api-key: ${{ secrets.STEP_SECURITY_API_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Depot CLI
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
+
+      - name: Build OpenMeter image
+        id: build
+        uses: depot/build-push-action@0f27be7c41d76663a98518dfe68f1c46582242c4 # v1.19.0
+        with:
+          context: .
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            VERSION=v0.0.0-e2e
+          platforms: linux/amd64
+          tags: openmeter-ci:${{ github.sha }}
+          push: false
+          save: true
+          project: ${{ vars.DEPOT_PROJECT }}
+
+  registry-container-tests:
+    name: ${{ matrix.name }}
+    needs: registry-image
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Quickstart
+            suite: quickstart
+            runner: ubuntu-24.04
+            go_cache: true
+            verify_depot_cache: false
+            dependency_source: upstream
+          - name: Base E2E
+            suite: base
+            runner: depot-ubuntu-24.04-8
+            go_cache: false
+            verify_depot_cache: true
+            dependency_source: depot
+          - name: Credits-disabled E2E
+            suite: credits-disabled
+            runner: ubuntu-24.04
+            go_cache: true
+            verify_depot_cache: false
+            dependency_source: upstream
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+          use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
+          api-key: ${{ secrets.STEP_SECURITY_API_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: ${{ matrix.go_cache }}
+          cache-dependency-path: |
+            go.sum
+            collector/go.sum
+            api/v3/client/go.sum
+            e2e/go.sum
+
+      - name: Verify Depot Go cache
+        if: matrix.verify_depot_cache
+        run: |
+          cache_program="$(go env GOCACHEPROG)"
+
+          if [[ "${cache_program}" != *"depot gocache"* ]]; then
+            echo "Depot Go cache is unavailable with upstream Go"
+            exit 1
+          fi
+
+          echo "Using ${cache_program}"
+
+      - name: Set up Depot CLI
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
+
+      - name: Log in to Depot build registry
+        env:
+          DEPOT_PROJECT: ${{ vars.DEPOT_PROJECT }}
+        run: depot pull-token --project "${DEPOT_PROJECT}" | docker login registry.depot.dev --username x-token --password-stdin
+
+      - name: Run ${{ matrix.name }}
+        env:
+          OPENMETER_IMAGE: ${{ needs.registry-image.outputs.image }}
+        run: |
+          case "${{ matrix.suite }}" in
+            quickstart)
+              bash .github/scripts/run-quickstart.sh "${OPENMETER_IMAGE}" always
+              ;;
+            base|credits-disabled)
+              bash .github/scripts/run-e2e.sh "${{ matrix.suite }}" "${OPENMETER_IMAGE}" always "${{ matrix.dependency_source }}"
+              ;;
+          esac
+
+      - name: Upload OpenMeter logs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: "[${{ github.job }}-${{ matrix.suite }}] OpenMeter logs"
+          path: |
+            quickstart/artifacts/logs/**
+            e2e/artifacts/logs/**
+          retention-days: 14
+
+  # Branch protection needs one stable result even though fork and registry
+  # builds intentionally use different execution graphs.
+  result:
+    name: Result
+    needs:
+      - fork
+      - registry-image
+      - registry-container-tests
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Verify container test path
+        env:
+          FORK_RESULT: ${{ needs.fork.result }}
+          REGISTRY_IMAGE_RESULT: ${{ needs.registry-image.result }}
+          REGISTRY_TESTS_RESULT: ${{ needs.registry-container-tests.result }}
+        run: |
+          case "${FORK_RESULT}:${REGISTRY_IMAGE_RESULT}:${REGISTRY_TESTS_RESULT}" in
+            success:skipped:skipped|skipped:success:success)
+              exit 0
+              ;;
+            *)
+              echo "Container tests did not complete successfully"
+              exit 1
+              ;;
+          esac

@@ -22,13 +22,13 @@ import (
 	lineageservice "github.com/openmeterio/openmeter/openmeter/billing/charges/legacylineage/service"
 	chargestestutils "github.com/openmeterio/openmeter/openmeter/billing/charges/testutils"
 	featuremeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	splitlinegrouptestutils "github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup/testutils"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	billingratingservice "github.com/openmeterio/openmeter/openmeter/billing/rating/service"
 	billingsequenceadapter "github.com/openmeterio/openmeter/openmeter/billing/sequence/adapter"
 	billingsequenceservice "github.com/openmeterio/openmeter/openmeter/billing/sequence/service"
 	billingservice "github.com/openmeterio/openmeter/openmeter/billing/service"
 	"github.com/openmeterio/openmeter/openmeter/billing/service/invoicecalc"
-	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
 	subscriptionsyncadapter "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/adapter"
 	subscriptionsyncservice "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/service"
 	enttx "github.com/openmeterio/openmeter/openmeter/ent/tx"
@@ -37,6 +37,10 @@ import (
 	ledgerbreakageadapter "github.com/openmeterio/openmeter/openmeter/ledger/breakage/adapter"
 	ledgerchargeadapter "github.com/openmeterio/openmeter/openmeter/ledger/chargeadapter"
 	ledgercollector "github.com/openmeterio/openmeter/openmeter/ledger/collector"
+	"github.com/openmeterio/openmeter/openmeter/ledger/creditvoid"
+	creditvoidadapter "github.com/openmeterio/openmeter/openmeter/ledger/creditvoid/adapter"
+	"github.com/openmeterio/openmeter/openmeter/ledger/customerbalance"
+	fbotestutils "github.com/openmeterio/openmeter/openmeter/ledger/fbo/testutils"
 	"github.com/openmeterio/openmeter/openmeter/ledger/recognizer"
 	ledgertestutils "github.com/openmeterio/openmeter/openmeter/ledger/testutils"
 	"github.com/openmeterio/openmeter/openmeter/ledger/transactions"
@@ -46,8 +50,6 @@ import (
 	subscription "github.com/openmeterio/openmeter/openmeter/subscription"
 	subscriptiontestutils "github.com/openmeterio/openmeter/openmeter/subscription/testutils"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
-	taxcodeservice "github.com/openmeterio/openmeter/openmeter/taxcode/service"
 	"github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/datetime"
@@ -60,9 +62,10 @@ type testDeps struct {
 	pcSubscriptionService       pcsubscription.PlanSubscriptionService
 	subscriptionService         subscription.Service
 	subscriptionWorkflowService subscriptionworkflow.Service
-	subscriptionSyncService     subscriptionsync.Service
+	subscriptionSyncService     *subscriptionsyncservice.Service
 	billingService              billing.Service
 	chargesService              charges.Service
+	customerBalanceService      customerbalance.Service
 	ledgerDeps                  ledgertestutils.Deps
 	lineageService              legacylineage.Service
 	sandboxApp                  app.App
@@ -94,6 +97,7 @@ func setup(t *testing.T, config setupConfig) testDeps {
 		PlanService:         deps.PlanService,
 		FeatureResolver:     featureResolver,
 		CurrencyResolver:    deps.CurrencyResolver,
+		TaxCodeResolver:     deps.TaxCodeResolver,
 		Logger:              testutils.NewLogger(t),
 		CustomerService:     deps.CustomerService,
 	})
@@ -129,18 +133,6 @@ func setup(t *testing.T, config setupConfig) testDeps {
 	})
 	require.NoError(t, err)
 
-	taxCodeAdapter, err := taxcodeadapter.New(taxcodeadapter.Config{
-		Client: deps.DBDeps.DBClient,
-		Logger: slog.Default(),
-	})
-	require.NoError(t, err)
-
-	taxCodeService, err := taxcodeservice.New(taxcodeservice.Config{
-		Adapter: taxCodeAdapter,
-		Logger:  slog.Default(),
-	})
-	require.NoError(t, err)
-
 	billingRatingService := billingratingservice.New(billingratingservice.Config{UnitConfigEnabled: true})
 	featureMeterResolver, err := featuremeterservice.New(featuremeterservice.Config{
 		FeatureService: deps.FeatureConnector,
@@ -149,8 +141,10 @@ func setup(t *testing.T, config setupConfig) testDeps {
 	})
 	require.NoError(t, err)
 
+	splitLineGroupService := splitlinegrouptestutils.NewTestEnv(t, deps.DBDeps.DBClient, slog.Default())
+
 	legacyBillingLineEngine, err := billinglineengine.New(billinglineengine.Config{
-		SplitLineGroupAdapter:        billingAdapter,
+		SplitLineGroupService:        splitLineGroupService,
 		RatingService:                billingRatingService,
 		FeatureMeterResolver:         featureMeterResolver,
 		StreamingConnector:           deps.MockStreamingConnector,
@@ -161,7 +155,6 @@ func setup(t *testing.T, config setupConfig) testDeps {
 	billingService, err := billingservice.New(billingservice.Config{
 		Adapter:                 billingAdapter,
 		SequenceService:         billingSequenceService,
-		RatingService:           billingRatingService,
 		LegacyBillingLineEngine: legacyBillingLineEngine,
 		CustomerService:         deps.CustomerService,
 		AppService:              appService,
@@ -169,7 +162,8 @@ func setup(t *testing.T, config setupConfig) testDeps {
 		FeatureMeterResolver:    featureMeterResolver,
 		Publisher:               publisher,
 		AdvancementStrategy:     billing.ForegroundAdvancementStrategy,
-		TaxCodeService:          taxCodeService,
+		TaxCodeService:          deps.TaxCodeEnv.Service,
+		TaxCodeResolver:         deps.TaxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -178,6 +172,7 @@ func setup(t *testing.T, config setupConfig) testDeps {
 	billingService = billingService.WithInvoiceCalculator(invoiceCalculator)
 
 	var chargesService charges.Service
+	var customerBalanceService customerbalance.Service
 	var ledgerDeps ledgertestutils.Deps
 
 	var lineageService legacylineage.Service
@@ -211,6 +206,7 @@ func setup(t *testing.T, config setupConfig) testDeps {
 		advanceService := advancetestutils.NewService(t, ledgerDeps, breakageService)
 
 		collector, err := ledgercollector.NewService(ledgercollector.Config{
+			Meter:              metricnoop.NewMeterProvider().Meter("test"),
 			Logger:             logger,
 			Advance:            advanceService,
 			Ledger:             ledgerDeps.HistoricalLedger,
@@ -247,7 +243,7 @@ func setup(t *testing.T, config setupConfig) testDeps {
 			FeatureMeterResolver:  featureMeterResolver,
 			CustomerService:       deps.CustomerService,
 			StreamingConnector:    deps.MockStreamingConnector,
-			TaxCodeService:        taxCodeService,
+			TaxCodeService:        deps.TaxCodeEnv.Service,
 			FlatFeeHandler:        ledgerchargeadapter.NewFlatFeeHandler(ledgerDeps.HistoricalLedger, resolverDeps, collector),
 			CreditPurchaseHandler: creditPurchaseHandler,
 			UsageBasedHandler:     ledgerchargeadapter.NewUsageBasedHandler(ledgerDeps.HistoricalLedger, resolverDeps, collector),
@@ -258,6 +254,30 @@ func setup(t *testing.T, config setupConfig) testDeps {
 		require.NoError(t, err)
 
 		chargesService = stack.ChargesService
+
+		creditVoidAdapter, err := creditvoidadapter.New(creditvoidadapter.Config{Client: deps.DBDeps.DBClient})
+		require.NoError(t, err)
+		creditVoidService, err := creditvoid.NewService(creditvoid.Config{
+			Adapter:            creditVoidAdapter,
+			Ledger:             ledgerDeps.HistoricalLedger,
+			Dependencies:       resolverDeps,
+			Breakage:           breakageService,
+			AccountLocker:      ledgerDeps.AccountService,
+			TransactionManager: transactionManager,
+		})
+		require.NoError(t, err)
+		customerBalanceService, err = customerbalance.New(customerbalance.Config{
+			AccountResolver:   ledgerDeps.ResolversService,
+			FBO:               fbotestutils.NewService(t, ledgerDeps, breakageService),
+			ChargesService:    stack.ChargesService,
+			UsageBasedService: stack.UsageBasedService,
+			Currencies:        stack.CurrencyService,
+			Ledger:            ledgerDeps.HistoricalLedger,
+			BalanceQuerier:    ledgerDeps.HistoricalLedger,
+			Breakage:          breakageService,
+			CreditVoid:        creditVoidService,
+		})
+		require.NoError(t, err)
 	}
 
 	subscriptionSyncAdapter, err := subscriptionsyncadapter.New(subscriptionsyncadapter.Config{
@@ -268,6 +288,7 @@ func setup(t *testing.T, config setupConfig) testDeps {
 	subscriptionSyncService, err := subscriptionsyncservice.New(subscriptionsyncservice.Config{
 		BillingService:          billingService,
 		LegacyBillingLineEngine: legacyBillingLineEngine,
+		SplitLineGroupService:   splitLineGroupService,
 		ChargesService:          chargesService,
 		Logger:                  slog.Default(),
 		Tracer:                  noop.NewTracerProvider().Tracer("test"),
@@ -332,13 +353,14 @@ func setup(t *testing.T, config setupConfig) testDeps {
 		subscriptionSyncService:     subscriptionSyncService,
 		billingService:              billingService,
 		chargesService:              chargesService,
+		customerBalanceService:      customerBalanceService,
 		ledgerDeps:                  ledgerDeps,
 		lineageService:              lineageService,
 		sandboxApp:                  sandboxApp,
 	}
 }
 
-func minimalCreateProfileInputTemplate(appID app.AppID) billing.CreateProfileInput {
+func MinimalCreateProfileInputTemplate(appID app.AppID) billing.CreateProfileInput {
 	return billing.CreateProfileInput{
 		Name:      "Awesome Profile",
 		Default:   true,

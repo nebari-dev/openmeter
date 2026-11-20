@@ -15,9 +15,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/models/creditsapplied"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoice"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceflatfeelineconfig"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceline"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicelinediscount"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicelineusagediscount"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicesplitlinegroup"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceusagebasedlineconfig"
@@ -685,25 +683,6 @@ func (_u *BillingInvoiceLineUpdate) SetSplitLineGroup(v *BillingInvoiceSplitLine
 	return _u.SetSplitLineGroupID(v.ID)
 }
 
-// SetFlatFeeLineID sets the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity by ID.
-func (_u *BillingInvoiceLineUpdate) SetFlatFeeLineID(id string) *BillingInvoiceLineUpdate {
-	_u.mutation.SetFlatFeeLineID(id)
-	return _u
-}
-
-// SetNillableFlatFeeLineID sets the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity by ID if the given value is not nil.
-func (_u *BillingInvoiceLineUpdate) SetNillableFlatFeeLineID(id *string) *BillingInvoiceLineUpdate {
-	if id != nil {
-		_u = _u.SetFlatFeeLineID(*id)
-	}
-	return _u
-}
-
-// SetFlatFeeLine sets the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity.
-func (_u *BillingInvoiceLineUpdate) SetFlatFeeLine(v *BillingInvoiceFlatFeeLineConfig) *BillingInvoiceLineUpdate {
-	return _u.SetFlatFeeLineID(v.ID)
-}
-
 // SetUsageBasedLineID sets the "usage_based_line" edge to the BillingInvoiceUsageBasedLineConfig entity by ID.
 func (_u *BillingInvoiceLineUpdate) SetUsageBasedLineID(id string) *BillingInvoiceLineUpdate {
 	_u.mutation.SetUsageBasedLineID(id)
@@ -771,21 +750,6 @@ func (_u *BillingInvoiceLineUpdate) AddLineUsageDiscounts(v ...*BillingInvoiceLi
 		ids[i] = v[i].ID
 	}
 	return _u.AddLineUsageDiscountIDs(ids...)
-}
-
-// AddLineAmountDiscountIDs adds the "line_amount_discounts" edge to the BillingInvoiceLineDiscount entity by IDs.
-func (_u *BillingInvoiceLineUpdate) AddLineAmountDiscountIDs(ids ...string) *BillingInvoiceLineUpdate {
-	_u.mutation.AddLineAmountDiscountIDs(ids...)
-	return _u
-}
-
-// AddLineAmountDiscounts adds the "line_amount_discounts" edges to the BillingInvoiceLineDiscount entity.
-func (_u *BillingInvoiceLineUpdate) AddLineAmountDiscounts(v ...*BillingInvoiceLineDiscount) *BillingInvoiceLineUpdate {
-	ids := make([]string, len(v))
-	for i := range v {
-		ids[i] = v[i].ID
-	}
-	return _u.AddLineAmountDiscountIDs(ids...)
 }
 
 // SetSubscription sets the "subscription" edge to the Subscription entity.
@@ -936,12 +900,6 @@ func (_u *BillingInvoiceLineUpdate) ClearSplitLineGroup() *BillingInvoiceLineUpd
 	return _u
 }
 
-// ClearFlatFeeLine clears the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity.
-func (_u *BillingInvoiceLineUpdate) ClearFlatFeeLine() *BillingInvoiceLineUpdate {
-	_u.mutation.ClearFlatFeeLine()
-	return _u
-}
-
 // ClearUsageBasedLine clears the "usage_based_line" edge to the BillingInvoiceUsageBasedLineConfig entity.
 func (_u *BillingInvoiceLineUpdate) ClearUsageBasedLine() *BillingInvoiceLineUpdate {
 	_u.mutation.ClearUsageBasedLine()
@@ -1015,27 +973,6 @@ func (_u *BillingInvoiceLineUpdate) RemoveLineUsageDiscounts(v ...*BillingInvoic
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveLineUsageDiscountIDs(ids...)
-}
-
-// ClearLineAmountDiscounts clears all "line_amount_discounts" edges to the BillingInvoiceLineDiscount entity.
-func (_u *BillingInvoiceLineUpdate) ClearLineAmountDiscounts() *BillingInvoiceLineUpdate {
-	_u.mutation.ClearLineAmountDiscounts()
-	return _u
-}
-
-// RemoveLineAmountDiscountIDs removes the "line_amount_discounts" edge to BillingInvoiceLineDiscount entities by IDs.
-func (_u *BillingInvoiceLineUpdate) RemoveLineAmountDiscountIDs(ids ...string) *BillingInvoiceLineUpdate {
-	_u.mutation.RemoveLineAmountDiscountIDs(ids...)
-	return _u
-}
-
-// RemoveLineAmountDiscounts removes "line_amount_discounts" edges to BillingInvoiceLineDiscount entities.
-func (_u *BillingInvoiceLineUpdate) RemoveLineAmountDiscounts(v ...*BillingInvoiceLineDiscount) *BillingInvoiceLineUpdate {
-	ids := make([]string, len(v))
-	for i := range v {
-		ids[i] = v[i].ID
-	}
-	return _u.RemoveLineAmountDiscountIDs(ids...)
 }
 
 // ClearSubscription clears the "subscription" edge to the Subscription entity.
@@ -1423,35 +1360,6 @@ func (_u *BillingInvoiceLineUpdate) sqlSave(ctx context.Context) (_node int, err
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
-	if _u.mutation.FlatFeeLineCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.M2O,
-			Inverse: false,
-			Table:   billinginvoiceline.FlatFeeLineTable,
-			Columns: []string{billinginvoiceline.FlatFeeLineColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoiceflatfeelineconfig.FieldID, field.TypeString),
-			},
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.FlatFeeLineIDs(); len(nodes) > 0 {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.M2O,
-			Inverse: false,
-			Table:   billinginvoiceline.FlatFeeLineTable,
-			Columns: []string{billinginvoiceline.FlatFeeLineColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoiceflatfeelineconfig.FieldID, field.TypeString),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Add = append(_spec.Edges.Add, edge)
-	}
 	if _u.mutation.UsageBasedLineCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
@@ -1638,51 +1546,6 @@ func (_u *BillingInvoiceLineUpdate) sqlSave(ctx context.Context) (_node int, err
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelineusagediscount.FieldID, field.TypeString),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Add = append(_spec.Edges.Add, edge)
-	}
-	if _u.mutation.LineAmountDiscountsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   billinginvoiceline.LineAmountDiscountsTable,
-			Columns: []string{billinginvoiceline.LineAmountDiscountsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelinediscount.FieldID, field.TypeString),
-			},
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.RemovedLineAmountDiscountsIDs(); len(nodes) > 0 && !_u.mutation.LineAmountDiscountsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   billinginvoiceline.LineAmountDiscountsTable,
-			Columns: []string{billinginvoiceline.LineAmountDiscountsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelinediscount.FieldID, field.TypeString),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.LineAmountDiscountsIDs(); len(nodes) > 0 {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   billinginvoiceline.LineAmountDiscountsTable,
-			Columns: []string{billinginvoiceline.LineAmountDiscountsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelinediscount.FieldID, field.TypeString),
 			},
 		}
 		for _, k := range nodes {
@@ -2695,25 +2558,6 @@ func (_u *BillingInvoiceLineUpdateOne) SetSplitLineGroup(v *BillingInvoiceSplitL
 	return _u.SetSplitLineGroupID(v.ID)
 }
 
-// SetFlatFeeLineID sets the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity by ID.
-func (_u *BillingInvoiceLineUpdateOne) SetFlatFeeLineID(id string) *BillingInvoiceLineUpdateOne {
-	_u.mutation.SetFlatFeeLineID(id)
-	return _u
-}
-
-// SetNillableFlatFeeLineID sets the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity by ID if the given value is not nil.
-func (_u *BillingInvoiceLineUpdateOne) SetNillableFlatFeeLineID(id *string) *BillingInvoiceLineUpdateOne {
-	if id != nil {
-		_u = _u.SetFlatFeeLineID(*id)
-	}
-	return _u
-}
-
-// SetFlatFeeLine sets the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity.
-func (_u *BillingInvoiceLineUpdateOne) SetFlatFeeLine(v *BillingInvoiceFlatFeeLineConfig) *BillingInvoiceLineUpdateOne {
-	return _u.SetFlatFeeLineID(v.ID)
-}
-
 // SetUsageBasedLineID sets the "usage_based_line" edge to the BillingInvoiceUsageBasedLineConfig entity by ID.
 func (_u *BillingInvoiceLineUpdateOne) SetUsageBasedLineID(id string) *BillingInvoiceLineUpdateOne {
 	_u.mutation.SetUsageBasedLineID(id)
@@ -2781,21 +2625,6 @@ func (_u *BillingInvoiceLineUpdateOne) AddLineUsageDiscounts(v ...*BillingInvoic
 		ids[i] = v[i].ID
 	}
 	return _u.AddLineUsageDiscountIDs(ids...)
-}
-
-// AddLineAmountDiscountIDs adds the "line_amount_discounts" edge to the BillingInvoiceLineDiscount entity by IDs.
-func (_u *BillingInvoiceLineUpdateOne) AddLineAmountDiscountIDs(ids ...string) *BillingInvoiceLineUpdateOne {
-	_u.mutation.AddLineAmountDiscountIDs(ids...)
-	return _u
-}
-
-// AddLineAmountDiscounts adds the "line_amount_discounts" edges to the BillingInvoiceLineDiscount entity.
-func (_u *BillingInvoiceLineUpdateOne) AddLineAmountDiscounts(v ...*BillingInvoiceLineDiscount) *BillingInvoiceLineUpdateOne {
-	ids := make([]string, len(v))
-	for i := range v {
-		ids[i] = v[i].ID
-	}
-	return _u.AddLineAmountDiscountIDs(ids...)
 }
 
 // SetSubscription sets the "subscription" edge to the Subscription entity.
@@ -2946,12 +2775,6 @@ func (_u *BillingInvoiceLineUpdateOne) ClearSplitLineGroup() *BillingInvoiceLine
 	return _u
 }
 
-// ClearFlatFeeLine clears the "flat_fee_line" edge to the BillingInvoiceFlatFeeLineConfig entity.
-func (_u *BillingInvoiceLineUpdateOne) ClearFlatFeeLine() *BillingInvoiceLineUpdateOne {
-	_u.mutation.ClearFlatFeeLine()
-	return _u
-}
-
 // ClearUsageBasedLine clears the "usage_based_line" edge to the BillingInvoiceUsageBasedLineConfig entity.
 func (_u *BillingInvoiceLineUpdateOne) ClearUsageBasedLine() *BillingInvoiceLineUpdateOne {
 	_u.mutation.ClearUsageBasedLine()
@@ -3025,27 +2848,6 @@ func (_u *BillingInvoiceLineUpdateOne) RemoveLineUsageDiscounts(v ...*BillingInv
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveLineUsageDiscountIDs(ids...)
-}
-
-// ClearLineAmountDiscounts clears all "line_amount_discounts" edges to the BillingInvoiceLineDiscount entity.
-func (_u *BillingInvoiceLineUpdateOne) ClearLineAmountDiscounts() *BillingInvoiceLineUpdateOne {
-	_u.mutation.ClearLineAmountDiscounts()
-	return _u
-}
-
-// RemoveLineAmountDiscountIDs removes the "line_amount_discounts" edge to BillingInvoiceLineDiscount entities by IDs.
-func (_u *BillingInvoiceLineUpdateOne) RemoveLineAmountDiscountIDs(ids ...string) *BillingInvoiceLineUpdateOne {
-	_u.mutation.RemoveLineAmountDiscountIDs(ids...)
-	return _u
-}
-
-// RemoveLineAmountDiscounts removes "line_amount_discounts" edges to BillingInvoiceLineDiscount entities.
-func (_u *BillingInvoiceLineUpdateOne) RemoveLineAmountDiscounts(v ...*BillingInvoiceLineDiscount) *BillingInvoiceLineUpdateOne {
-	ids := make([]string, len(v))
-	for i := range v {
-		ids[i] = v[i].ID
-	}
-	return _u.RemoveLineAmountDiscountIDs(ids...)
 }
 
 // ClearSubscription clears the "subscription" edge to the Subscription entity.
@@ -3463,35 +3265,6 @@ func (_u *BillingInvoiceLineUpdateOne) sqlSave(ctx context.Context) (_node *Bill
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
-	if _u.mutation.FlatFeeLineCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.M2O,
-			Inverse: false,
-			Table:   billinginvoiceline.FlatFeeLineTable,
-			Columns: []string{billinginvoiceline.FlatFeeLineColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoiceflatfeelineconfig.FieldID, field.TypeString),
-			},
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.FlatFeeLineIDs(); len(nodes) > 0 {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.M2O,
-			Inverse: false,
-			Table:   billinginvoiceline.FlatFeeLineTable,
-			Columns: []string{billinginvoiceline.FlatFeeLineColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoiceflatfeelineconfig.FieldID, field.TypeString),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Add = append(_spec.Edges.Add, edge)
-	}
 	if _u.mutation.UsageBasedLineCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
@@ -3678,51 +3451,6 @@ func (_u *BillingInvoiceLineUpdateOne) sqlSave(ctx context.Context) (_node *Bill
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelineusagediscount.FieldID, field.TypeString),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Add = append(_spec.Edges.Add, edge)
-	}
-	if _u.mutation.LineAmountDiscountsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   billinginvoiceline.LineAmountDiscountsTable,
-			Columns: []string{billinginvoiceline.LineAmountDiscountsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelinediscount.FieldID, field.TypeString),
-			},
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.RemovedLineAmountDiscountsIDs(); len(nodes) > 0 && !_u.mutation.LineAmountDiscountsCleared() {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   billinginvoiceline.LineAmountDiscountsTable,
-			Columns: []string{billinginvoiceline.LineAmountDiscountsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelinediscount.FieldID, field.TypeString),
-			},
-		}
-		for _, k := range nodes {
-			edge.Target.Nodes = append(edge.Target.Nodes, k)
-		}
-		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
-	}
-	if nodes := _u.mutation.LineAmountDiscountsIDs(); len(nodes) > 0 {
-		edge := &sqlgraph.EdgeSpec{
-			Rel:     sqlgraph.O2M,
-			Inverse: false,
-			Table:   billinginvoiceline.LineAmountDiscountsTable,
-			Columns: []string{billinginvoiceline.LineAmountDiscountsColumn},
-			Bidi:    false,
-			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(billinginvoicelinediscount.FieldID, field.TypeString),
 			},
 		}
 		for _, k := range nodes {

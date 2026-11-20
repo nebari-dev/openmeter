@@ -10,6 +10,8 @@ import (
 	"github.com/invopop/gobl/currency"
 	"github.com/samber/lo"
 	"github.com/samber/mo"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges"
@@ -21,6 +23,9 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
 	chargestestutils "github.com/openmeterio/openmeter/openmeter/billing/charges/testutils"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
+	subscriptionsyncadapter "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/adapter"
+	subscriptionsynchooks "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/hooks"
+	subscriptionsyncservice "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/service"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	currenciestestutils "github.com/openmeterio/openmeter/openmeter/currencies/testutils"
 	"github.com/openmeterio/openmeter/openmeter/customer"
@@ -36,6 +41,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ledger/creditvoid"
 	creditvoidadapter "github.com/openmeterio/openmeter/openmeter/ledger/creditvoid/adapter"
 	"github.com/openmeterio/openmeter/openmeter/ledger/customerbalance"
+	fbotestutils "github.com/openmeterio/openmeter/openmeter/ledger/fbo/testutils"
 	"github.com/openmeterio/openmeter/openmeter/ledger/recognizer"
 	ledgerresolvers "github.com/openmeterio/openmeter/openmeter/ledger/resolvers"
 	ledgertestutils "github.com/openmeterio/openmeter/openmeter/ledger/testutils"
@@ -44,6 +50,7 @@ import (
 	omtestutils "github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
+	"github.com/openmeterio/openmeter/pkg/featuregate"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 	billingtest "github.com/openmeterio/openmeter/test/billing"
 )
@@ -52,8 +59,12 @@ const USD = currencyx.Code(currency.USD)
 
 type BaseSuite struct {
 	billingtest.BaseSuite
+	billingtest.SubscriptionMixin
+
+	SubscriptionSync *subscriptionsyncservice.Service
 
 	Charges              charges.Service
+	FlatFeeSvc           flatfee.Service
 	CreditPurchaseSvc    creditpurchase.Service
 	UsageBasedSvc        usagebased.Service
 	CustomerBalanceSvc   customerbalance.Service
@@ -148,6 +159,7 @@ func (s *BaseSuite) SetupSuite() {
 	s.RevenueRecognizer = revenueRecognizer
 
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:   metricnoop.NewMeterProvider().Meter("test"),
 		Logger:  logger,
 		Advance: s.AdvanceService,
 		Ledger:  deps.HistoricalLedger,
@@ -185,7 +197,7 @@ func (s *BaseSuite) SetupSuite() {
 		BillingService:        s.BillingService,
 		FeatureMeterResolver:  s.FeatureMeterResolver,
 		StreamingConnector:    s.MockStreamingConnector,
-		TaxCodeService:        s.TaxCodeService,
+		TaxCodeService:        s.TaxCodeEnv.Service,
 		CustomerService:       s.CustomerService,
 		FlatFeeHandler:        flatFeeHandler,
 		CreditPurchaseHandler: creditPurchaseHandler,
@@ -193,6 +205,7 @@ func (s *BaseSuite) SetupSuite() {
 	})
 	s.NoError(err)
 	s.Charges = stack.ChargesService
+	s.FlatFeeSvc = stack.FlatFeeService
 	s.CreditPurchaseSvc = stack.CreditPurchaseService
 	s.UsageBasedSvc = stack.UsageBasedService
 	s.CurrencyService = stack.CurrencyService
@@ -200,7 +213,7 @@ func (s *BaseSuite) SetupSuite() {
 
 	customerBalanceSvc, err := customerbalance.New(customerbalance.Config{
 		AccountResolver:   deps.ResolversService,
-		SubAccountService: deps.AccountService,
+		FBO:               fbotestutils.NewService(s.T(), deps, breakageService),
 		ChargesService:    stack.ChargesService,
 		UsageBasedService: stack.UsageBasedService,
 		Currencies:        stack.CurrencyService,
@@ -211,6 +224,31 @@ func (s *BaseSuite) SetupSuite() {
 	})
 	s.NoError(err)
 	s.CustomerBalanceSvc = customerBalanceSvc
+
+	s.SubscriptionMixin.SetupSuite(s.T(), s.GetSubscriptionMixInDependencies())
+
+	subscriptionSyncAdapter, err := subscriptionsyncadapter.New(subscriptionsyncadapter.Config{Client: s.DBClient})
+	s.NoError(err)
+
+	subscriptionSyncHook, err := subscriptionsynchooks.New(subscriptionsynchooks.Config{Adapter: subscriptionSyncAdapter, Logger: logger})
+	s.NoError(err)
+	s.NoError(s.SubscriptionService.RegisterHook(subscriptionSyncHook))
+
+	s.SubscriptionSync, err = subscriptionsyncservice.New(subscriptionsyncservice.Config{
+		BillingService:          s.BillingService,
+		LegacyBillingLineEngine: s.LegacyBillingLineEngine,
+		SplitLineGroupService:   s.SplitLineGroupService,
+		ChargesService:          s.Charges,
+		Logger:                  logger,
+		Tracer:                  tracenoop.NewTracerProvider().Tracer("test"),
+		SubscriptionSyncAdapter: subscriptionSyncAdapter,
+		SubscriptionService:     s.SubscriptionService,
+		FeatureFlags:            subscriptionsyncservice.FeatureFlags{EnableCreditThenInvoice: true},
+		FeatureGate: featuregate.NewFeatureGateChecker(featuregate.NewNoop(), featuregate.Flags{
+			featuregate.CtxKeyCredits: string(featuregate.CtxKeyCredits),
+		}, map[featuregate.FeatureFlag]bool{featuregate.CtxKeyCredits: true}),
+	})
+	s.NoError(err)
 }
 
 func (s *BaseSuite) TearDownTest() {
@@ -304,6 +342,7 @@ func (s *BaseSuite) CreateMockChargeIntent(input CreateMockChargeIntentInput) ch
 			FeatureKey:     lo.EmptyableToPtr(input.FeatureKey),
 			SettlementMode: lo.CoalesceOrEmpty(input.SettlementMode, productcatalog.CreditThenInvoiceSettlementMode),
 		}
+
 		return charges.NewChargeIntent(flatFeeIntent)
 	}
 

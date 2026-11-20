@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpacahq/alpacadecimal"
+	"github.com/invopop/gobl/currency"
 	"github.com/oklog/ulid/v2"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
@@ -12,12 +14,16 @@ import (
 
 	"github.com/openmeterio/openmeter/openmeter/app"
 	"github.com/openmeterio/openmeter/openmeter/billing"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/taxcode"
+	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/filter"
+	"github.com/openmeterio/openmeter/pkg/framework/transaction"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/sortx"
+	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
 
 type ProfileTestSuite struct {
@@ -30,9 +36,9 @@ func TestProfile(t *testing.T) {
 
 func (s *ProfileTestSuite) TestGetRejectsCrossNamespaceWorkflowReferences() {
 	// given:
-	// - profiles whose workflow config or tax code is deliberately moved to another namespace
+	// - a profile whose workflow config is deliberately moved to another namespace
 	// when:
-	// - either profile is read
+	// - the profile is read
 	// then:
 	// - the foreign reference is not returned and is reported as missing
 	ctx := s.T().Context()
@@ -42,7 +48,8 @@ func (s *ProfileTestSuite) TestGetRejectsCrossNamespaceWorkflowReferences() {
 	workflowProfile := s.ProvisionBillingProfile(ctx, workflowNamespace, s.InstallSandboxApp(s.T(), workflowNamespace).GetID())
 	workflowProfileDB, err := s.BillingAdapter.GetProfile(ctx, billing.GetProfileInput{Profile: workflowProfile.ProfileID()})
 	require.NoError(s.T(), err)
-	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx,
+	_, err = s.TestDB.PGDriver.DB().ExecContext(
+		ctx,
 		`UPDATE billing_workflow_configs SET namespace = $1 WHERE id = $2`,
 		foreignNamespace,
 		workflowProfileDB.WorkflowConfigID,
@@ -51,22 +58,57 @@ func (s *ProfileTestSuite) TestGetRejectsCrossNamespaceWorkflowReferences() {
 
 	_, err = s.BillingService.GetProfile(ctx, billing.GetProfileInput{Profile: workflowProfile.ProfileID()})
 	require.True(s.T(), models.IsGenericNotFoundError(err))
+}
 
-	taxNamespace := s.GetUniqueNamespace("profile-tax-target")
-	taxProfile := s.ProvisionBillingProfile(ctx, taxNamespace, s.InstallSandboxApp(s.T(), taxNamespace).GetID())
-	taxProfileDB, err := s.BillingAdapter.GetProfile(ctx, billing.GetProfileInput{Profile: taxProfile.ProfileID()})
+func (s *ProfileTestSuite) TestInvoiceCalculationRejectsCrossNamespaceDefaultTaxCode() {
+	// given:
+	// - a profile whose default tax config is deliberately pointed at another namespace's tax code
+	// when:
+	// - an invoice is created from it, which calculates the invoice
+	// then:
+	// - the foreign tax code isn't used and is reported as missing
+	ctx := s.T().Context()
+	foreignNamespace := s.GetUniqueNamespace("profile-tax-foreign")
+	namespace := s.GetUniqueNamespace("profile-tax-target")
+
+	profile := s.ProvisionBillingProfile(ctx, namespace, s.InstallSandboxApp(s.T(), namespace).GetID())
+	profileDB, err := s.BillingAdapter.GetProfile(ctx, billing.GetProfileInput{Profile: profile.ProfileID()})
 	require.NoError(s.T(), err)
-	foreignTaxCode := s.ProvisionProviderDefaultTaxCode(ctx, foreignNamespace)
+	foreignTaxCode := s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), foreignNamespace)
 	_, err = s.TestDB.PGDriver.DB().ExecContext(ctx, `
 		UPDATE billing_workflow_configs
 		SET tax_code_id = $1::char(26),
 		    invoice_default_tax_settings = jsonb_build_object('tax_code_id', ($1::char(26))::text)
 		WHERE id = $2
-	`, foreignTaxCode.ID, taxProfileDB.WorkflowConfigID)
+	`, foreignTaxCode.ID, profileDB.WorkflowConfigID)
 	require.NoError(s.T(), err)
 
-	_, err = s.BillingService.GetProfile(ctx, billing.GetProfileInput{Profile: taxProfile.ProfileID()})
-	require.True(s.T(), taxcode.IsTaxCodeNotFoundError(err))
+	cust := s.CreateTestCustomer(namespace, "test")
+	now := time.Now().Truncate(time.Microsecond).UTC()
+
+	_, err = s.BillingService.CreatePendingInvoiceLines(ctx, billing.CreatePendingInvoiceLinesInput{
+		Customer: cust.GetID(),
+		Currency: currencyx.FiatCode(currency.USD),
+		Lines: billing.NewCreatePendingInvoiceLines([]billing.GatheringLine{
+			billing.NewFlatFeeGatheringLine(billing.NewFlatFeeLineInput{
+				Namespace:     namespace,
+				Period:        timeutil.ClosedPeriod{From: now, To: now.Add(24 * time.Hour)},
+				InvoiceAt:     now,
+				ManagedBy:     billing.ManuallyManagedLine,
+				Name:          "line",
+				PerUnitAmount: alpacadecimal.NewFromFloat(100),
+				PaymentTerm:   productcatalog.InAdvancePaymentTerm,
+			}),
+		}),
+	})
+	require.NoError(s.T(), err)
+
+	_, err = s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+		Customer: cust.GetID(),
+		AsOf:     &now,
+	})
+	require.Error(s.T(), err)
+	require.True(s.T(), taxcode.IsTaxCodeNotFoundError(err), "expected tax code not found, got: %v", err)
 }
 
 // createProfileFixture creates a profile with the given default flag.
@@ -78,7 +120,7 @@ func (s *ProfileTestSuite) createProfileFixture(isDefault bool) *billing.Profile
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 
 	// Create a profile input
-	input := minimalCreateProfileInputTemplate(sandboxApp.GetID())
+	input := MinimalCreateProfileInputTemplate(sandboxApp.GetID())
 	input.Namespace = ns
 	input.Default = isDefault
 
@@ -147,7 +189,7 @@ func (s *ProfileTestSuite) TestProfileLifecycle() {
 		profile1 := s.createProfileFixture(true)
 
 		// Create a second default profile in the same namespace
-		input := minimalCreateProfileInputTemplate(profile1.AppReferences.Invoicing)
+		input := MinimalCreateProfileInputTemplate(profile1.AppReferences.Invoicing)
 		input.Namespace = profile1.Namespace
 		input.Default = true
 
@@ -354,6 +396,7 @@ func (s *ProfileTestSuite) TestProfileFieldSetting() {
 				DraftPeriod:                  datetime.MustParseDuration(t, "PT1H"),
 				DueAfter:                     datetime.MustParseDuration(t, "PT24H"),
 				SubscriptionEndProrationMode: billing.SubscriptionEndProrationModeBillActualPeriod,
+				EmptyInvoiceMode:             billing.EmptyInvoiceModeCreate,
 			},
 			Payment: billing.PaymentConfig{
 				CollectionMethod: billing.CollectionMethodSendInvoice,
@@ -444,7 +487,7 @@ func (s *ProfileTestSuite) TestProfileUpdates() {
 
 		Name: "Awesome Default Profile",
 
-		Apps: minimalCreateProfileInputTemplate(sandboxApp.GetID()).Apps,
+		Apps: MinimalCreateProfileInputTemplate(sandboxApp.GetID()).Apps,
 
 		WorkflowConfig: billing.WorkflowConfig{
 			Collection: billing.CollectionConfig{
@@ -456,6 +499,7 @@ func (s *ProfileTestSuite) TestProfileUpdates() {
 				DraftPeriod:                  datetime.MustParseDuration(s.T(), "PT1H"),
 				DueAfter:                     datetime.MustParseDuration(s.T(), "PT24H"),
 				SubscriptionEndProrationMode: billing.SubscriptionEndProrationModeBillActualPeriod,
+				EmptyInvoiceMode:             billing.EmptyInvoiceModeCreate,
 			},
 			Payment: billing.PaymentConfig{
 				CollectionMethod: billing.CollectionMethodSendInvoice,
@@ -512,6 +556,7 @@ func (s *ProfileTestSuite) TestProfileUpdates() {
 					DraftPeriod:                  datetime.MustParseDuration(s.T(), "PT2H"),
 					DueAfter:                     datetime.MustParseDuration(s.T(), "PT48H"),
 					SubscriptionEndProrationMode: billing.SubscriptionEndProrationModeBillActualPeriod,
+					EmptyInvoiceMode:             billing.EmptyInvoiceModeCreate,
 				},
 				Payment: billing.PaymentConfig{
 					CollectionMethod: billing.CollectionMethodChargeAutomatically,
@@ -570,7 +615,7 @@ func (s *ProfileTestSuite) TestProfileSubscriptionAlignmentPersists() {
 
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 
-	input := minimalCreateProfileInputTemplate(sandboxApp.GetID())
+	input := MinimalCreateProfileInputTemplate(sandboxApp.GetID())
 	input.Namespace = ns
 	input.WorkflowConfig.Collection.Alignment = billing.AlignmentKindSubscription
 
@@ -587,6 +632,52 @@ func (s *ProfileTestSuite) TestProfileSubscriptionAlignmentPersists() {
 
 	require.Equal(s.T(), billing.AlignmentKindSubscription, fetched.WorkflowConfig.Collection.Alignment)
 	require.Nil(s.T(), fetched.WorkflowConfig.Collection.AnchoredAlignmentDetail)
+}
+
+func (s *ProfileTestSuite) TestProfileEmptyInvoiceMode() {
+	ctx := s.T().Context()
+	ns := "test_profile_empty_invoice_mode"
+
+	sandboxApp := s.InstallSandboxApp(s.T(), ns)
+
+	// given: a profile created without an empty invoice mode
+	input := MinimalCreateProfileInputTemplate(sandboxApp.GetID())
+	input.Namespace = ns
+	input.WorkflowConfig.Invoicing.EmptyInvoiceMode = ""
+
+	profile, err := s.BillingService.CreateProfile(ctx, input)
+	s.Require().NoError(err)
+	s.Require().NotNil(profile)
+
+	// then: it defaults to creating empty invoices
+	s.Equal(billing.EmptyInvoiceModeCreate, profile.WorkflowConfig.Invoicing.EmptyInvoiceMode)
+
+	// when: the mode is set to omit
+	updateInput := toUpdateProfileInput(*profile)
+	updateInput.WorkflowConfig.Invoicing.EmptyInvoiceMode = billing.EmptyInvoiceModeOmit
+
+	_, err = s.BillingService.UpdateProfile(ctx, updateInput)
+	s.Require().NoError(err)
+
+	// then: it is persisted
+	fetched, err := s.BillingService.GetProfile(ctx, billing.GetProfileInput{
+		Profile: profile.ProfileID(),
+		Expand:  billing.ProfileExpandAll,
+	})
+	s.Require().NoError(err)
+	s.Require().NotNil(fetched)
+	s.Equal(billing.EmptyInvoiceModeOmit, fetched.WorkflowConfig.Invoicing.EmptyInvoiceMode)
+
+	// when: a client that does not know the field updates the profile
+	updateInput = toUpdateProfileInput(*fetched)
+	updateInput.WorkflowConfig.Invoicing.EmptyInvoiceMode = ""
+
+	updated, err := s.BillingService.UpdateProfile(ctx, updateInput)
+	s.Require().NoError(err)
+	s.Require().NotNil(updated)
+
+	// then: the stored mode is kept
+	s.Equal(billing.EmptyInvoiceModeOmit, updated.WorkflowConfig.Invoicing.EmptyInvoiceMode)
 }
 
 func toUpdateProfileInput(profile billing.Profile) billing.UpdateProfileInput {
@@ -708,4 +799,40 @@ func (s *ProfileTestSuite) TestListProfilesRejectsInvalidInput() {
 		Name:      &filter.FilterString{Eq: lo.ToPtr("a"), Ne: lo.ToPtr("b")},
 	})
 	s.ErrorContains(err, "invalid name filter")
+}
+
+func (s *ProfileTestSuite) TestProfileReadsReuseTransactionConnection() {
+	// given:
+	// - a profile and a connection pool limited to a single connection
+	// when:
+	// - the profile is read through the adapter inside a transaction
+	// then:
+	// - the reads reuse the transaction's connection instead of waiting for a second one
+	ctx := s.T().Context()
+	ns := s.GetUniqueNamespace("profile-tx-reads")
+	profile := s.ProvisionBillingProfile(ctx, ns, s.InstallSandboxApp(s.T(), ns).GetID())
+
+	sqlDB := s.TestDB.PGDriver.DB()
+	sqlDB.SetMaxOpenConns(1)
+	s.T().Cleanup(func() { sqlDB.SetMaxOpenConns(0) })
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	err := transaction.RunWithNoValue(ctx, s.BillingAdapter, func(ctx context.Context) error {
+		got, err := s.BillingAdapter.GetProfile(ctx, billing.GetProfileInput{Profile: profile.ProfileID()})
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), profile.ID, got.ID)
+
+		got, err = s.BillingAdapter.GetDefaultProfile(ctx, billing.GetDefaultProfileInput{Namespace: ns})
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), profile.ID, got.ID)
+
+		list, err := s.BillingAdapter.ListProfiles(ctx, billing.ListProfilesInput{Namespace: ns})
+		require.NoError(s.T(), err)
+		require.Len(s.T(), list.Items, 1)
+
+		return nil
+	})
+	require.NoError(s.T(), err)
 }

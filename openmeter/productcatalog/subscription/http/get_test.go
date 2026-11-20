@@ -10,7 +10,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	currenciestestutils "github.com/openmeterio/openmeter/openmeter/currencies/testutils"
 	customerhttp "github.com/openmeterio/openmeter/openmeter/customer/httpdriver"
@@ -18,6 +18,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	plansubscription "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription"
 	subscriptionhttp "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription/http"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	subscriptiontestutils "github.com/openmeterio/openmeter/openmeter/subscription/testutils"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
@@ -50,6 +51,7 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 			if kind == "mixed" {
 				meta.Currency = lo.ToPtr(managedCurrency.Reference())
 			}
+
 			return meta, nil
 		}))
 		input := subscriptiontestutils.BuildTestPlanInput(t).AddPhase(nil, card).Build()
@@ -57,9 +59,11 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 		if kind == "custom" {
 			input.Currency = managedCurrency.Reference()
 		}
+
 		if kind == "mixed" {
 			input.Phases[0].RateCards = append(input.Phases[0].RateCards, subscriptiontestutils.ExampleRateCard2.Clone())
 		}
+
 		view, err := deps.WorkflowService.CreateFromPlan(ctx, subscriptionworkflow.CreateSubscriptionWorkflowInput{
 			ChangeSubscriptionWorkflowInput: subscriptionworkflow.ChangeSubscriptionWorkflowInput{
 				Timing: subscription.Timing{Custom: lo.ToPtr(now.Add(-time.Second))},
@@ -72,12 +76,17 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 		require.Nil(t, view.Subscription.PlanRef, "visibility must use subscription items, including inline plans")
 		views[kind] = view
 	}
+
+	taxCodeResolver, err := taxcoderesolver.NewTransactional(deps.TaxCodeEnv.Service, deps.TaxCodeEnv.Adapter)
+	require.NoError(t, err)
+
 	decoder := namespacedriver.StaticNamespaceDecoder(ns)
 	handler := subscriptionhttp.NewHandler(subscriptionhttp.HandlerConfig{
 		SubscriptionService: deps.SubscriptionService,
 		CustomerService:     deps.CustomerService,
 		NamespaceDecoder:    decoder,
 		Logger:              testutils.NewLogger(t),
+		TaxCodeResolver:     taxCodeResolver,
 	})
 
 	t.Run("get", func(t *testing.T) {
@@ -102,10 +111,10 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 		for _, page := range []int{1, 2} {
 			rec := httptest.NewRecorder()
 			handler.ListCustomerSubscriptions().With(subscriptionhttp.ListCustomerSubscriptionsParams{
-				CustomerIDOrKey: cus.ID, Params: api.ListCustomerSubscriptionsParams{Page: &page, PageSize: lo.ToPtr(1)},
+				CustomerIDOrKey: cus.ID, Params: apiv1models.ListCustomerSubscriptionsParams{Page: &page, PageSize: lo.ToPtr(1)},
 			}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			var result pagination.Result[api.Subscription]
+			var result pagination.Result[apiv1models.Subscription]
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 			require.Equal(t, 1, result.TotalCount)
 			if page == 1 {
@@ -123,10 +132,10 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 		rec := httptest.NewRecorder()
 		customerHandler.GetCustomer().With(customerhttp.GetCustomerParams{
 			CustomerIDOrKey:   cus.ID,
-			GetCustomerParams: api.GetCustomerParams{Expand: lo.ToPtr([]api.CustomerExpand{api.CustomerExpandSubscriptions})},
+			GetCustomerParams: apiv1models.GetCustomerParams{Expand: lo.ToPtr([]apiv1models.CustomerExpand{apiv1models.CustomerExpandSubscriptions})},
 		}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		var result api.Customer
+		var result apiv1models.Customer
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 		require.NotNil(t, result.Subscriptions)
 		require.Len(t, *result.Subscriptions, 1)
@@ -136,9 +145,9 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 		// when: listing customers with the default subscription expansion.
 		// then: custom-currency subscriptions are omitted from the embedded list too.
 		rec := httptest.NewRecorder()
-		customerHandler.ListCustomers().With(api.ListCustomersParams{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		customerHandler.ListCustomers().With(apiv1models.ListCustomersParams{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		var result pagination.Result[api.Customer]
+		var result pagination.Result[apiv1models.Customer]
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 		require.Len(t, result.Items, 1)
 		require.NotNil(t, result.Items[0].Subscriptions)
@@ -163,10 +172,12 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 			require.NoError(t, replacement.RateCard.ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
 				meta.Key = replacement.ItemKey
 				meta.Currency = lo.ToPtr(currencies.NewCurrencyReference(currencyx.Code("USD")))
+
 				return meta, nil
 			}))
 			phase.ItemsByKey = map[string][]*subscription.SubscriptionItemSpec{replacement.ItemKey: {&replacement}}
 		}
+
 		// when: the service persists the replacement and soft-deletes the old item.
 		_, err := deps.SubscriptionService.Update(ctx, view.Subscription.NamespacedID, target)
 		require.NoError(t, err)
@@ -183,8 +194,8 @@ func TestV1SubscriptionReadsExcludeCustomCurrency(t *testing.T) {
 		rec = httptest.NewRecorder()
 		handler.ListCustomerSubscriptions().With(subscriptionhttp.ListCustomerSubscriptionsParams{CustomerIDOrKey: cus.ID}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		var result pagination.Result[api.Subscription]
+		var result pagination.Result[apiv1models.Subscription]
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
-		require.ElementsMatch(t, []string{views["fiat"].Subscription.ID, view.Subscription.ID}, lo.Map(result.Items, func(item api.Subscription, _ int) string { return item.Id }))
+		require.ElementsMatch(t, []string{views["fiat"].Subscription.ID, view.Subscription.ID}, lo.Map(result.Items, func(item apiv1models.Subscription, _ int) string { return item.Id }))
 	})
 }

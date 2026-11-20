@@ -42,24 +42,31 @@ func (c Config) Validate() error {
 	if c.Adapter == nil {
 		errs = append(errs, errors.New("adapter is required"))
 	}
+
 	if c.Ledger == nil {
 		errs = append(errs, errors.New("ledger is required"))
 	}
+
 	if c.Dependencies.AccountService == nil {
 		errs = append(errs, errors.New("account service is required"))
 	}
+
 	if c.Dependencies.AccountCatalog == nil {
 		errs = append(errs, errors.New("account catalog is required"))
 	}
+
 	if c.Dependencies.BalanceQuerier == nil {
 		errs = append(errs, errors.New("balance querier is required"))
 	}
+
 	if c.Breakage == nil {
 		errs = append(errs, errors.New("breakage service is required"))
 	}
+
 	if c.AccountLocker == nil {
 		errs = append(errs, errors.New("account locker is required"))
 	}
+
 	if c.TransactionManager == nil {
 		errs = append(errs, errors.New("transaction manager is required"))
 	}
@@ -138,30 +145,37 @@ func (i ListVoidedCreditImpactsInput) Validate() error {
 	if err := i.CustomerID.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer id: %w", err))
 	}
+
 	if i.Currency != nil {
 		if err := i.Currency.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("currency: %w", err))
 		}
 	}
+
 	if i.AsOf.IsZero() {
 		errs = append(errs, errors.New("as of is required"))
 	}
+
 	if i.After != nil {
 		if err := i.After.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("after: %w", err))
 		}
 	}
+
 	if i.Before != nil {
 		if err := i.Before.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("before: %w", err))
 		}
 	}
+
 	if i.After != nil && i.Before != nil {
 		errs = append(errs, errors.New("after and before cannot be set together"))
 	}
+
 	if err := breakage.ValidateExpiredRouteFilter(i.Route); err != nil {
 		errs = append(errs, fmt.Errorf("route: %w", err))
 	}
+
 	if i.Limit < 1 {
 		errs = append(errs, errors.New("limit must be greater than 0"))
 	}
@@ -288,7 +302,7 @@ func (s *service) planVoid(ctx context.Context, input VoidCreditPurchaseInput) (
 		expiryPlan, ok := openPlansBySubAccount[bucket.Address.SubAccountID()]
 		if ok {
 			if expiryPlan.OpenAmount.LessThan(slice.amount) {
-				return voidPlan{}, fmt.Errorf("open expiry breakage plan %s amount %s is less than voided amount %s", expiryPlan.ID.ID, expiryPlan.OpenAmount, slice.amount)
+				return voidPlan{}, models.NewError(ledger.ErrCodeVoidFailed, fmt.Sprintf("open expiry breakage plan %s amount %s is less than voided amount %s", expiryPlan.ID.ID, expiryPlan.OpenAmount, slice.amount), models.WithAttribute("reason", "ledger_void_exceeds_open_breakage"))
 			}
 
 			slice.expiryPlan = &expiryPlan
@@ -331,18 +345,18 @@ func (s *service) openExpiryPlansBySubAccount(ctx context.Context, input VoidCre
 func (s *service) executeVoid(ctx context.Context, input VoidCreditPurchaseInput, plan voidPlan) (VoidCreditPurchaseResult, error) {
 	var (
 		inputs             []ledger.TransactionInput
-		pendingBreakage    []breakage.PendingRecord
 		pendingVoidRecords []pendingVoidRecord
 	)
 	amount := alpacadecimal.Zero
+	groupID := ulid.Make().String()
 
 	for _, slice := range plan.slices {
-		voidTx, voidRecord, err := s.resolveVoidSlice(ctx, input, plan.voidedAt, slice)
+		voidTxs, voidRecord, err := s.resolveVoidSlice(ctx, input, plan.voidedAt, slice)
 		if err != nil {
 			return VoidCreditPurchaseResult{}, err
 		}
 
-		inputs = append(inputs, voidTx)
+		inputs = append(inputs, voidTxs...)
 		pendingVoidRecords = append(pendingVoidRecords, voidRecord)
 		amount = amount.Add(slice.amount)
 
@@ -350,7 +364,8 @@ func (s *service) executeVoid(ctx context.Context, input VoidCreditPurchaseInput
 			continue
 		}
 
-		releaseTx, releaseRecord, err := s.breakage.ReleasePlan(ctx, breakage.ReleasePlanInput{
+		releaseTx, err := s.breakage.ReleasePlan(ctx, breakage.ReleasePlanInput{
+			PostingInput:   breakage.PostingInput{TransactionGroupID: groupID, Annotations: input.Annotations},
 			Plan:           *slice.expiryPlan,
 			Amount:         slice.amount,
 			SourceKind:     breakage.SourceKindCreditPurchase,
@@ -361,7 +376,6 @@ func (s *service) executeVoid(ctx context.Context, input VoidCreditPurchaseInput
 		}
 
 		inputs = append(inputs, releaseTx)
-		pendingBreakage = append(pendingBreakage, releaseRecord)
 	}
 
 	for i, txInput := range inputs {
@@ -370,17 +384,13 @@ func (s *service) executeVoid(ctx context.Context, input VoidCreditPurchaseInput
 		}
 	}
 
-	transactionGroup, err := s.ledger.CommitGroup(ctx, transactions.GroupInputs(
+	transactionGroup, err := s.ledger.CommitGroup(ctx, ledger.WithGroupID(transactions.GroupInputs(
 		input.CustomerID.Namespace,
 		input.Annotations,
 		inputs...,
-	))
+	), groupID))
 	if err != nil {
 		return VoidCreditPurchaseResult{}, fmt.Errorf("commit ledger transaction group: %w", err)
-	}
-
-	if err := s.breakage.PersistCommittedRecords(ctx, pendingBreakage, transactionGroup); err != nil {
-		return VoidCreditPurchaseResult{}, fmt.Errorf("persist breakage records: %w", err)
 	}
 
 	if err := s.persistCommittedVoidRecords(ctx, pendingVoidRecords, transactionGroup); err != nil {
@@ -394,11 +404,11 @@ func (s *service) executeVoid(ctx context.Context, input VoidCreditPurchaseInput
 	}, nil
 }
 
-func (s *service) resolveVoidSlice(ctx context.Context, input VoidCreditPurchaseInput, voidedAt time.Time, slice voidSlice) (ledger.TransactionInput, pendingVoidRecord, error) {
+func (s *service) resolveVoidSlice(ctx context.Context, input VoidCreditPurchaseInput, voidedAt time.Time, slice voidSlice) ([]ledger.TransactionInput, pendingVoidRecord, error) {
 	recordID := newRecordID(input.CustomerID.Namespace)
 	route := slice.fboAddress.Route().Route()
 
-	issueTx, err := s.originalIssueTransaction(ctx, input, voidedAt, slice)
+	issuance, err := s.originalIssuance(ctx, input, voidedAt, slice)
 	if err != nil {
 		return nil, pendingVoidRecord{}, err
 	}
@@ -406,21 +416,23 @@ func (s *service) resolveVoidSlice(ctx context.Context, input VoidCreditPurchase
 	inputs, err := transactions.CorrectTransaction(ctx, s.deps, transactions.CorrectionInput{
 		At:                  voidedAt,
 		Amount:              slice.amount,
-		OriginalTransaction: issueTx,
+		OriginalTransaction: issuance.issue,
 	})
 	if err != nil {
 		return nil, pendingVoidRecord{}, fmt.Errorf("resolve issue correction: %w", err)
 	}
+
 	if len(inputs) != 1 {
-		return nil, pendingVoidRecord{}, fmt.Errorf("expected one issue correction transaction input, got %d", len(inputs))
+		return nil, pendingVoidRecord{}, models.NewError(ledger.ErrCodeVoidFailed, fmt.Sprintf("expected one issue correction transaction input, got %d", len(inputs)), models.WithAttribute("reason", "ledger_void_transaction_count_invalid"))
 	}
 
 	correctedFBO, correctedReceivable, err := correctionEntrySubAccounts(inputs[0])
 	if err != nil {
 		return nil, pendingVoidRecord{}, err
 	}
+
 	if correctedFBO != slice.fboAddress.SubAccountID() {
-		return nil, pendingVoidRecord{}, fmt.Errorf("issue correction FBO sub-account %s does not match voided FBO sub-account %s", correctedFBO, slice.fboAddress.SubAccountID())
+		return nil, pendingVoidRecord{}, models.NewError(ledger.ErrCodeVoidFailed, fmt.Sprintf("issue correction FBO sub-account %s does not match voided FBO sub-account %s", correctedFBO, slice.fboAddress.SubAccountID()), models.WithAttribute("reason", "ledger_void_source_account_mismatch"))
 	}
 
 	record := pendingVoidRecord{
@@ -434,10 +446,35 @@ func (s *service) resolveVoidSlice(ctx context.Context, input VoidCreditPurchase
 		ReceivableSubAccountID: correctedReceivable,
 	}
 
-	return transactions.WithAnnotations(inputs[0], creditVoidRecordAnnotations(recordID.ID)), record, nil
+	inputs[0] = transactions.WithAnnotations(inputs[0], creditVoidRecordAnnotations(recordID.ID))
+
+	// Promotional funding settles through wash in the issuance group. Reverse
+	// its two settlement legs for the unused amount in the same void group.
+	if issuance.settlement != nil {
+		for _, original := range []ledger.Transaction{issuance.settlement, issuance.authorization} {
+			corrections, err := transactions.CorrectTransaction(ctx, s.deps, transactions.CorrectionInput{
+				At:                  voidedAt,
+				Amount:              slice.amount,
+				OriginalTransaction: original,
+			})
+			if err != nil {
+				return nil, pendingVoidRecord{}, fmt.Errorf("correct promotional settlement: %w", err)
+			}
+
+			inputs = append(inputs, corrections...)
+		}
+	}
+
+	return inputs, record, nil
 }
 
-func (s *service) originalIssueTransaction(ctx context.Context, input VoidCreditPurchaseInput, voidedAt time.Time, slice voidSlice) (ledger.Transaction, error) {
+type issuanceTransactions struct {
+	issue         ledger.Transaction
+	authorization ledger.Transaction
+	settlement    ledger.Transaction
+}
+
+func (s *service) originalIssuance(ctx context.Context, input VoidCreditPurchaseInput, voidedAt time.Time, slice voidSlice) (issuanceTransactions, error) {
 	cursor := (*ledger.TransactionCursor)(nil)
 
 	for {
@@ -459,7 +496,7 @@ func (s *service) originalIssueTransaction(ctx context.Context, input VoidCredit
 			},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list issue transactions: %w", err)
+			return issuanceTransactions{}, fmt.Errorf("list issue transactions: %w", err)
 		}
 
 		for _, tx := range page.Items {
@@ -467,36 +504,64 @@ func (s *service) originalIssueTransaction(ctx context.Context, input VoidCredit
 				continue
 			}
 
-			fullTx, err := s.transactionByID(ctx, tx.ID())
+			group, err := s.ledger.GetTransactionGroup(ctx, tx.GroupID())
 			if err != nil {
-				return nil, err
+				return issuanceTransactions{}, fmt.Errorf("get issuance group: %w", err)
 			}
 
-			return fullTx, nil
+			return findIssuanceTransactions(group, tx.ID(), input.ChargeID)
 		}
 
 		if page.NextCursor == nil {
-			return nil, fmt.Errorf("issue transaction for charge %s FBO sub-account %s not found", input.ChargeID, slice.fboAddress.SubAccountID())
+			return issuanceTransactions{}, models.NewError(ledger.ErrCodeVoidFailed, fmt.Sprintf("issue transaction for charge %s FBO sub-account %s not found", input.ChargeID, slice.fboAddress.SubAccountID()), models.WithAttribute("reason", "ledger_void_original_transaction_missing"))
 		}
 
 		cursor = page.NextCursor
 	}
 }
 
-func (s *service) transactionByID(ctx context.Context, id models.NamespacedID) (ledger.Transaction, error) {
-	page, err := s.ledger.ListTransactions(ctx, ledger.ListTransactionsInput{
-		Namespace:     id.Namespace,
-		Limit:         1,
-		TransactionID: &id,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get transaction %s: %w", id.ID, err)
-	}
-	if len(page.Items) != 1 {
-		return nil, fmt.Errorf("transaction %s not found", id.ID)
+// Only promotional issuance includes payment legs for the same charge in
+// this group. External and invoice payments are posted in separate groups.
+func findIssuanceTransactions(group ledger.TransactionGroup, issueID models.NamespacedID, chargeID string) (issuanceTransactions, error) {
+	var out issuanceTransactions
+	for _, tx := range group.Transactions() {
+		if tx.ID() == issueID {
+			out.issue = tx
+			continue
+		}
+
+		annotations := tx.Annotations()
+		if annotations[ledger.AnnotationTransactionDirection] != string(ledger.TransactionDirectionForward) {
+			continue
+		}
+
+		var target *ledger.Transaction
+		switch annotations[ledger.AnnotationTransactionTemplateCode] {
+		case string(transactions.TemplateCodeAuthorizeCustomerReceivablePayment):
+			target = &out.authorization
+		case string(transactions.TemplateCodeSettleCustomerReceivableFromPayment):
+			target = &out.settlement
+		default:
+			continue
+		}
+
+		entries := tx.Entries()
+		if len(entries) == 0 || entries[0].Provenance().SourceChargeID == nil || *entries[0].Provenance().SourceChargeID != chargeID {
+			continue
+		}
+
+		if *target != nil {
+			return issuanceTransactions{}, fmt.Errorf("duplicate promotional settlement leg in issuance group %s", group.ID().ID)
+		}
+
+		*target = tx
 	}
 
-	return page.Items[0], nil
+	if out.issue == nil || (out.authorization == nil) != (out.settlement == nil) {
+		return issuanceTransactions{}, fmt.Errorf("incomplete issuance group %s", group.ID().ID)
+	}
+
+	return out, nil
 }
 
 func transactionIssuedFBOForSource(tx ledger.Transaction, sourceChargeID string, fboSubAccountID string) bool {
@@ -504,9 +569,11 @@ func transactionIssuedFBOForSource(tx ledger.Transaction, sourceChargeID string,
 		if entry.PostingAddress().AccountType() != ledger.AccountTypeCustomerFBO {
 			continue
 		}
+
 		if entry.PostingAddress().SubAccountID() != fboSubAccountID {
 			continue
 		}
+
 		if !entry.Amount().IsPositive() {
 			continue
 		}
@@ -531,11 +598,13 @@ func correctionEntrySubAccounts(input ledger.TransactionInput) (string, string, 
 			if !entry.Amount().IsNegative() {
 				continue
 			}
+
 			fboSubAccountID = entry.PostingAddress().SubAccountID()
 		case ledger.AccountTypeCustomerReceivable:
 			if !entry.Amount().IsPositive() {
 				continue
 			}
+
 			receivableSubAccountID = entry.PostingAddress().SubAccountID()
 		}
 	}
@@ -543,6 +612,7 @@ func correctionEntrySubAccounts(input ledger.TransactionInput) (string, string, 
 	if fboSubAccountID == "" {
 		return "", "", errors.New("issue correction FBO entry is required")
 	}
+
 	if receivableSubAccountID == "" {
 		return "", "", errors.New("issue correction receivable entry is required")
 	}
@@ -554,6 +624,7 @@ func (s *service) persistCommittedVoidRecords(ctx context.Context, pending []pen
 	if len(pending) == 0 {
 		return nil
 	}
+
 	if group == nil {
 		return errors.New("transaction group is required")
 	}
@@ -603,6 +674,7 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 	if err != nil {
 		return ListVoidedCreditImpactsResult{}, fmt.Errorf("list void records: %w", err)
 	}
+
 	if len(records) == 0 {
 		return ListVoidedCreditImpactsResult{
 			Items: []VoidImpact{},
@@ -614,6 +686,7 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 		if record.FBOSubAccountID == "" {
 			continue
 		}
+
 		if _, ok := currencyReferences[record.FBOSubAccountID]; ok {
 			continue
 		}
@@ -630,6 +703,7 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 		if reference.GetCode() != record.Currency {
 			return ListVoidedCreditImpactsResult{}, fmt.Errorf("void FBO sub-account %s currency %s does not match record currency %s", record.FBOSubAccountID, reference.GetCode(), record.Currency)
 		}
+
 		currencyReferences[record.FBOSubAccountID] = reference
 	}
 
@@ -639,6 +713,7 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 		if record.FBOSubAccountID != "" {
 			currencyReference = currencyReferences[record.FBOSubAccountID].Clone()
 		}
+
 		key := voidImpactGroupKey{
 			voidedAt:           record.VoidedAt,
 			currencyIdentity:   currencyReference.IdentityKey(),
@@ -662,12 +737,15 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 		if group.id.ID == "" || record.ID.ID < group.id.ID {
 			group.id = record.ID
 		}
+
 		if group.createdAt.IsZero() || record.CreatedAt.Before(group.createdAt) {
 			group.createdAt = record.CreatedAt
 		}
+
 		for k, v := range record.Annotations {
 			group.annotations[k] = v
 		}
+
 		group.annotations[ledger.AnnotationChargeID] = record.SourceChargeID
 	}
 
@@ -676,6 +754,7 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 		if group.amount.IsZero() {
 			continue
 		}
+
 		if group.amount.IsNegative() {
 			return ListVoidedCreditImpactsResult{}, fmt.Errorf("void amount is negative for %s %s", group.voidedAt, group.currency)
 		}
@@ -713,6 +792,7 @@ func (s *service) ListVoidedCreditImpacts(ctx context.Context, input ListVoidedC
 			selected = append(selected, item)
 		}
 	}
+
 	items = selected
 	hasMore := len(items) > input.Limit
 	if hasMore {
@@ -735,6 +815,7 @@ func voidImpactMatchesCursorWindow(item VoidImpact, after, before *ledger.Transa
 	if after != nil && cursor.Compare(*after) >= 0 {
 		return false
 	}
+
 	if before != nil && cursor.Compare(*before) <= 0 {
 		return false
 	}

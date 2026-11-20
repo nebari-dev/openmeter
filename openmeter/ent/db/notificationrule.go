@@ -4,6 +4,7 @@ package db
 
 import (
 	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"strings"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/notificationrule"
-	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
@@ -32,14 +32,14 @@ type NotificationRule struct {
 	Annotations models.Annotations `json:"annotations,omitempty"`
 	// Metadata holds the value of the "metadata" field.
 	Metadata map[string]string `json:"metadata,omitempty"`
-	// The event type the rule associated with
-	Type notification.EventType `json:"type,omitempty"`
+	// The event type emitted by the Rule.
+	Type string `json:"type,omitempty"`
 	// The name of the rule
 	Name string `json:"name,omitempty"`
 	// Whether the rule is disabled or not
 	Disabled bool `json:"disabled,omitempty"`
 	// Config holds the value of the "config" field.
-	Config notification.RuleConfig `json:"config,omitempty"`
+	Config jsontext.Value `json:"config,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the NotificationRuleQuery when eager-loading is set.
 	Edges        NotificationRuleEdges `json:"edges"`
@@ -156,7 +156,7 @@ func (_m *NotificationRule) assignValues(columns []string, values []any) error {
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field type", values[i])
 			} else if value.Valid {
-				_m.Type = notification.EventType(value.String)
+				_m.Type = value.String
 			}
 		case notificationrule.FieldName:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -243,7 +243,7 @@ func (_m *NotificationRule) String() string {
 	builder.WriteString(fmt.Sprintf("%v", _m.Metadata))
 	builder.WriteString(", ")
 	builder.WriteString("type=")
-	builder.WriteString(fmt.Sprintf("%v", _m.Type))
+	builder.WriteString(_m.Type)
 	builder.WriteString(", ")
 	builder.WriteString("name=")
 	builder.WriteString(_m.Name)

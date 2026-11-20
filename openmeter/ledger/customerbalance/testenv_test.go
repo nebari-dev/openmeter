@@ -9,6 +9,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/openmeterio/openmeter/openmeter/app"
 	"github.com/openmeterio/openmeter/openmeter/billing"
@@ -45,6 +46,7 @@ import (
 	ledgercollector "github.com/openmeterio/openmeter/openmeter/ledger/collector"
 	"github.com/openmeterio/openmeter/openmeter/ledger/creditvoid"
 	creditvoidadapter "github.com/openmeterio/openmeter/openmeter/ledger/creditvoid/adapter"
+	fbotestutils "github.com/openmeterio/openmeter/openmeter/ledger/fbo/testutils"
 	ledgertestutils "github.com/openmeterio/openmeter/openmeter/ledger/testutils"
 	"github.com/openmeterio/openmeter/openmeter/ledger/transactions"
 	"github.com/openmeterio/openmeter/openmeter/meter"
@@ -139,6 +141,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		publisher,
 		namespaceManager,
 		nil,
+		streaming,
 	)
 
 	featureRepo := pcadapter.NewPostgresFeatureRepo(base.DB, logger)
@@ -251,6 +254,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	advanceService := advancetestutils.NewService(t, base.Deps, breakageService)
 
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:   metricnoop.NewMeterProvider().Meter("test"),
 		Logger:  logger,
 		Advance: advanceService,
 		Ledger:  base.Deps.HistoricalLedger,
@@ -370,8 +374,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	require.NoError(t, err)
 
 	service, err := New(Config{
-		AccountResolver:   base.Deps.ResolversService,
-		SubAccountService: base.Deps.AccountService,
+		AccountResolver: base.Deps.ResolversService,
+		FBO:             fbotestutils.NewService(t, base.Deps, breakageService),
 		ChargesService: chargeStore{
 			search:                searchAdapter,
 			creditPurchaseService: creditPurchaseService,
@@ -779,9 +783,11 @@ func (l chargeStore) GetByIDs(ctx context.Context, input charges.GetByIDsInput) 
 	for _, charge := range creditPurchaseCharges {
 		chargesByID[charge.ID] = charges.NewCharge(charge)
 	}
+
 	for _, charge := range flatFeeCharges {
 		chargesByID[charge.ID] = charges.NewCharge(charge)
 	}
+
 	for _, charge := range usageBasedCharges {
 		chargesByID[charge.ID] = charges.NewCharge(charge)
 	}
@@ -850,9 +856,11 @@ func (l chargeStore) ListCharges(ctx context.Context, input charges.ListChargesI
 	for _, charge := range creditPurchaseCharges {
 		chargesByID[charge.ID] = charges.NewCharge(charge)
 	}
+
 	for _, charge := range flatFeeCharges {
 		chargesByID[charge.ID] = charges.NewCharge(charge)
 	}
+
 	for _, charge := range usageBasedCharges {
 		chargesByID[charge.ID] = charges.NewCharge(charge)
 	}
@@ -880,16 +888,16 @@ type mockCustomerOverrideService struct {
 	customer customer.Customer
 }
 
-func (s mockCustomerOverrideService) UpsertCustomerOverride(context.Context, billing.UpsertCustomerOverrideInput) (billing.CustomerOverrideWithDetails, error) {
-	return billing.CustomerOverrideWithDetails{}, nil
+func (s mockCustomerOverrideService) SetCustomerBillingProfile(context.Context, billing.SetCustomerBillingProfileInput) (billing.CustomerBillingProfile, error) {
+	return billing.CustomerBillingProfile{}, nil
 }
 
-func (s mockCustomerOverrideService) DeleteCustomerOverride(context.Context, billing.DeleteCustomerOverrideInput) error {
+func (s mockCustomerOverrideService) ClearCustomerBillingProfile(context.Context, billing.ClearCustomerBillingProfileInput) error {
 	return nil
 }
 
-func (s mockCustomerOverrideService) GetCustomerOverride(context.Context, billing.GetCustomerOverrideInput) (billing.CustomerOverrideWithDetails, error) {
-	return billing.CustomerOverrideWithDetails{
+func (s mockCustomerOverrideService) GetCustomerBillingProfile(context.Context, billing.GetCustomerBillingProfileInput) (billing.CustomerBillingProfile, error) {
+	return billing.CustomerBillingProfile{
 		Customer: &s.customer,
 	}, nil
 }
@@ -898,8 +906,8 @@ func (s mockCustomerOverrideService) GetCustomerApp(context.Context, billing.Get
 	return nil, nil
 }
 
-func (s mockCustomerOverrideService) ListCustomerOverrides(context.Context, billing.ListCustomerOverridesInput) (billing.ListCustomerOverridesResult, error) {
-	return billing.ListCustomerOverridesResult{}, nil
+func (s mockCustomerOverrideService) ListCustomerBillingProfiles(context.Context, billing.ListCustomerBillingProfilesInput) (billing.ListCustomerBillingProfilesResult, error) {
+	return billing.ListCustomerBillingProfilesResult{}, nil
 }
 
 func (s mockCustomerOverrideService) SetGatheringLineSubscriptionReferenceByChargeID(context.Context, billing.SetLineSubscriptionReferenceByChargeIDInput) error {

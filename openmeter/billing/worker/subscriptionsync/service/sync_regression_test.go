@@ -1,6 +1,7 @@
 package service
 
 import (
+	"maps"
 	"testing"
 	"time"
 
@@ -9,16 +10,24 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
+	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges"
 	chargesmeta "github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
+	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
+	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
+	productcatalogsubscription "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
+	subscriptionrepo "github.com/openmeterio/openmeter/openmeter/subscription/repo"
+	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
+	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
 
@@ -108,7 +117,7 @@ func (s *CreditThenInvoiceTestSuite) TestCancellationReconcilesPeriodsByServiceD
 			var updated cancellationRegressionChargeSnapshot
 
 			s.Run("given", func() {
-				// Given an annual subscription whose single charge has been synchronized.
+				// Given an annual subscription whose single item has been synchronized.
 				rateCard := cancellationRegressionRateCard(
 					s.T(),
 					tc.chargeType,
@@ -124,6 +133,7 @@ func (s *CreditThenInvoiceTestSuite) TestCancellationReconcilesPeriodsByServiceD
 				if tc.disableProRating {
 					proRatingConfig = productcatalog.ProRatingConfig{}
 				}
+
 				subsView = s.createSubscriptionFromPlan(plan.CreatePlanInput{
 					NamespacedModel: models.NamespacedModel{
 						Namespace: s.Namespace,
@@ -152,15 +162,32 @@ func (s *CreditThenInvoiceTestSuite) TestCancellationReconcilesPeriodsByServiceD
 					s.MockStreamingConnector.AddSimpleEvent(*s.APIRequestsTotalFeature.MeterSlug, 0, start)
 				}
 
-				s.Require().NoError(s.Service.SyncByView(ctx, subsView, start.Add(time.Minute)))
+				s.Require().NoError(s.Service.SyncByID(ctx, subsView.Subscription.NamespacedID, start.Add(time.Minute)))
 				chargePage, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
-					Namespace:       subsView.Subscription.Namespace,
-					SubscriptionIDs: []string{subsView.Subscription.ID},
+					Namespace:      subsView.Subscription.Namespace,
+					SubscriptionID: filter.NewULIDIn(subsView.Subscription.ID),
 				})
 				s.Require().NoError(err)
-				s.Require().Len(chargePage.Items, 1)
 
-				initial = cancellationRegressionSnapshot(s.T(), chargePage.Items[0], tc.chargeType)
+				// Recurring items also get the next annual billing period's charge; the one-time
+				// in-advance fee only exists once. The scenario follows the first period's charge.
+				expectedBillingPeriods := []timeutil.ClosedPeriod{{From: start, To: billingPeriodEnd}}
+				if tc.chargeType == chargesmeta.ChargeTypeUsageBased || tc.flatFeePaymentTerm == productcatalog.InArrearsPaymentTerm {
+					expectedBillingPeriods = append(expectedBillingPeriods, timeutil.ClosedPeriod{From: billingPeriodEnd, To: billingPeriodEnd.AddDate(1, 0, 0)})
+				}
+
+				snapshots := lo.Map(chargePage.Items, func(charge charges.Charge, _ int) cancellationRegressionChargeSnapshot {
+					return cancellationRegressionSnapshot(s.T(), charge, tc.chargeType)
+				})
+				s.Require().ElementsMatch(expectedBillingPeriods, lo.Map(snapshots, func(snapshot cancellationRegressionChargeSnapshot, _ int) timeutil.ClosedPeriod {
+					return snapshot.BillingPeriod
+				}))
+
+				var found bool
+				initial, found = lo.Find(snapshots, func(snapshot cancellationRegressionChargeSnapshot) bool {
+					return snapshot.BillingPeriod.From.Equal(start)
+				})
+				s.Require().True(found, "first billing period charge")
 				s.Equal(tc.settlementMode, initial.SettlementMode)
 				s.Equal(timeutil.ClosedPeriod{From: start, To: billingPeriodEnd}, initial.BillingPeriod)
 
@@ -194,7 +221,7 @@ func (s *CreditThenInvoiceTestSuite) TestCancellationReconcilesPeriodsByServiceD
 
 				canceledView, err = s.SubscriptionService.GetView(ctx, subscriptionModel.NamespacedID)
 				s.Require().NoError(err)
-				s.Require().NoError(s.Service.SyncByView(ctx, canceledView, cancelAt.Add(time.Minute)))
+				s.Require().NoError(s.Service.SyncByID(ctx, canceledView.Subscription.NamespacedID, cancelAt.Add(time.Minute)))
 
 				updatedGeneric, err := s.Charges.GetByID(ctx, charges.GetByIDInput{ChargeID: initial.ID})
 				s.Require().NoError(err)
@@ -220,8 +247,16 @@ func (s *CreditThenInvoiceTestSuite) TestCancellationReconcilesPeriodsByServiceD
 					s.Equal(cancelAt, updated.InvoiceAt)
 				}
 
+				// And no charge is left for the next billing period, which starts after the cancellation.
+				remainingCharges, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
+					Namespace:      subsView.Subscription.Namespace,
+					SubscriptionID: filter.NewULIDIn(subsView.Subscription.ID),
+				})
+				s.Require().NoError(err)
+				s.Len(remainingCharges.Items, 1)
+
 				// And retrying the same synchronization is an idempotent no-op.
-				s.Require().NoError(s.Service.SyncByView(ctx, canceledView, cancelAt.Add(time.Minute)))
+				s.Require().NoError(s.Service.SyncByID(ctx, canceledView.Subscription.NamespacedID, cancelAt.Add(time.Minute)))
 				retriedGeneric, err := s.Charges.GetByID(ctx, charges.GetByIDInput{ChargeID: initial.ID})
 				s.Require().NoError(err)
 				retried := cancellationRegressionSnapshot(s.T(), retriedGeneric, tc.chargeType)
@@ -306,4 +341,468 @@ func cancellationRegressionSnapshot(t *testing.T, charge charges.Charge, wantTyp
 		require.FailNow(t, "unsupported cancellation regression charge type", "charge type: %s", wantType)
 		return cancellationRegressionChargeSnapshot{}
 	}
+}
+
+type paidCancellationRegressionInput struct {
+	legacyAnnotationDrift bool
+}
+
+type paidCancellationPeriod struct {
+	chargeID  string
+	invoiceID billing.InvoiceID
+	lineID    string
+	period    timeutil.ClosedPeriod
+	totals    totals.Totals
+}
+
+type paidCancellationHistorySnapshot struct {
+	chargeIDs []string
+	lineIDs   []string
+}
+
+func (s *CreditThenInvoiceTestSuite) TestCancellationRetainsPaidMonthlyFlatFeesWithoutAnnotationDrift() {
+	s.testCancellationRetainsPaidMonthlyFlatFees(paidCancellationRegressionInput{})
+}
+
+func (s *CreditThenInvoiceTestSuite) TestCancellationRetainsPaidMonthlyFlatFeesWithLegacyAnnotationDrift() {
+	s.testCancellationRetainsPaidMonthlyFlatFees(paidCancellationRegressionInput{legacyAnnotationDrift: true})
+}
+
+func (s *CreditThenInvoiceTestSuite) testCancellationRetainsPaidMonthlyFlatFees(input paidCancellationRegressionInput) {
+	// given: a mid-month subscription has three paid monthly in-advance periods.
+	// when: cancellation rematerializes its item, with or without historical annotation drift.
+	// then: paid periods retain their charges and invoice lines without new collectible work.
+	ctx := s.T().Context()
+	start := s.mustParseTime("2024-01-21T00:00:00Z")
+	boundaries := []time.Time{
+		start,
+		s.mustParseTime("2024-02-01T00:00:00Z"),
+		s.mustParseTime("2024-03-01T00:00:00Z"),
+		s.mustParseTime("2024-04-01T00:00:00Z"),
+	}
+	const itemKey = "monthly-flat-fee"
+	const migrationAnnotation = "dbmigration:backfill_subscription_item_currencies"
+	clock.FreezeTime(start)
+	defer clock.UnFreeze()
+
+	paid := make([]paidCancellationPeriod, 0, 3)
+	var view subscription.SubscriptionView
+	var canceledView subscription.SubscriptionView
+	var oldItemID, newItemID string
+	var itemAnnotations models.Annotations
+
+	// given: a monthly in-advance subscription starts mid-month and three periods are invoiced and paid.
+	s.RequireRun("setup plan and start subscription", func() {
+		planEntity, err := s.PlanService.CreatePlan(ctx, plan.CreatePlanInput{
+			NamespacedModel: models.NamespacedModel{Namespace: s.Namespace},
+			Plan: productcatalog.Plan{
+				PlanMeta: productcatalog.PlanMeta{
+					Name:           "Monthly flat fee",
+					Key:            "monthly-flat-fee",
+					Version:        1,
+					Currency:       currencies.NewCurrencyReference(currencyx.Code(currency.USD)),
+					SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+					BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+					ProRatingConfig: productcatalog.ProRatingConfig{
+						Enabled: true,
+						Mode:    productcatalog.ProRatingModeProratePrices,
+					},
+				},
+				Phases: []productcatalog.Phase{{
+					PhaseMeta: s.phaseMeta("service", ""),
+					RateCards: productcatalog.RateCards{&productcatalog.FlatFeeRateCard{
+						RateCardMeta: productcatalog.RateCardMeta{
+							Key:  itemKey,
+							Name: "Monthly flat fee",
+							Price: productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+								Amount:      alpacadecimal.NewFromInt(30),
+								PaymentTerm: productcatalog.InAdvancePaymentTerm,
+							}),
+						},
+						BillingCadence: lo.ToPtr(datetime.MustParseDuration(s.T(), "P1M")),
+					}},
+				}},
+			},
+		})
+		s.Require().NoError(err)
+
+		subscriptionPlan, err := s.SubscriptionPlanAdapter.GetVersion(ctx, s.Namespace, productcatalogsubscription.PlanRefInput{
+			Key:     planEntity.Key,
+			Version: lo.ToPtr(1),
+		})
+		s.Require().NoError(err)
+
+		view, err = s.SubscriptionWorkflowService.CreateFromPlan(ctx, subscriptionworkflow.CreateSubscriptionWorkflowInput{
+			ChangeSubscriptionWorkflowInput: subscriptionworkflow.ChangeSubscriptionWorkflowInput{
+				Timing: subscription.Timing{Custom: lo.ToPtr(start)},
+				Name:   "monthly-service",
+			},
+			Namespace:     s.Namespace,
+			CustomerID:    s.Customer.ID,
+			BillingAnchor: lo.ToPtr(s.mustParseTime("2024-01-01T00:00:00Z")),
+		}, subscriptionPlan)
+		s.Require().NoError(err)
+		s.Require().Len(view.Phases, 1)
+		s.Require().Len(view.Phases[0].ItemsByKey[itemKey], 1)
+		oldItemID = view.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem.ID
+	})
+
+	s.RequireRun("bill three monthly periods", func() {
+		for i := 0; i < 3; i++ {
+			clock.FreezeTime(boundaries[i].Add(time.Minute))
+			s.Require().NoError(s.Service.SyncByID(ctx, view.Subscription.NamespacedID, boundaries[i+1]))
+
+			invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+				Customer: s.Customer.GetID(),
+				AsOf:     lo.ToPtr(clock.Now()),
+			})
+			s.Require().NoError(err)
+			s.Require().Len(invoices, 1)
+			s.Require().Len(invoices[0].Lines.OrEmpty(), 1)
+			line := invoices[0].Lines.OrEmpty()[0]
+			s.Require().Equal(timeutil.ClosedPeriod{From: boundaries[i], To: boundaries[i+1]}, line.Period)
+			s.Require().NotNil(line.ChargeID)
+
+			approved, err := s.BillingService.ApproveInvoice(ctx, invoices[0].GetInvoiceID())
+			s.Require().NoError(err)
+			s.Require().Equal(billing.StandardInvoiceStatusPaid, approved.Status)
+			paidInvoice, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+				Invoice: approved.GetInvoiceID(),
+				Expand:  billing.StandardInvoiceExpandAll,
+			})
+			s.Require().NoError(err)
+			s.Require().Len(paidInvoice.Lines.OrEmpty(), 1)
+			paidLine := paidInvoice.Lines.OrEmpty()[0]
+			s.Require().Equal(line.ID, paidLine.ID)
+			s.Require().Equal(timeutil.ClosedPeriod{From: boundaries[i], To: boundaries[i+1]}, paidLine.Period)
+			s.Require().False(paidLine.Totals.IsZero())
+			paid = append(paid, paidCancellationPeriod{
+				chargeID:  *line.ChargeID,
+				invoiceID: approved.GetInvoiceID(),
+				lineID:    line.ID,
+				period:    paidLine.Period,
+				totals:    paidLine.Totals,
+			})
+		}
+	})
+
+	// when: cancellation follows either unchanged annotations or legacy annotation drift.
+	if input.legacyAnnotationDrift {
+		s.RequireRun("update annotations", func() {
+			// A historical migration marked the item without changing its existing charges.
+			itemAnnotations = maps.Clone(view.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem.Annotations)
+			s.Require().Contains(itemAnnotations, subscription.AnnotationOwnerSubSystem)
+			itemAnnotations[migrationAnnotation] = "2024-03-19T00:00:00.000000Z"
+			s.Require().NoError(s.DBClient.SubscriptionItem.UpdateOneID(oldItemID).SetAnnotations(itemAnnotations).Exec(ctx))
+			for _, original := range paid {
+				charge, err := s.Charges.GetByID(ctx, charges.GetByIDInput{
+					ChargeID: chargesmeta.ChargeID{Namespace: s.Namespace, ID: original.chargeID},
+				})
+				s.Require().NoError(err)
+				flatFee, err := charge.AsFlatFeeCharge()
+				s.Require().NoError(err)
+				chargeAnnotations := maps.Clone(flatFee.Intent.GetBaseIntent().Annotations)
+				s.Require().NotContains(chargeAnnotations, migrationAnnotation)
+				delete(chargeAnnotations, subscription.AnnotationOwnerSubSystem)
+				s.Require().NoError(s.DBClient.ChargeFlatFee.UpdateOneID(original.chargeID).SetAnnotations(chargeAnnotations).Exec(ctx))
+			}
+		})
+	}
+
+	s.RequireRun("cancel at next boundary and sync", func() {
+		clock.FreezeTime(s.mustParseTime("2024-03-20T00:00:00Z"))
+		_, err := s.SubscriptionService.Cancel(ctx, view.Subscription.NamespacedID, subscription.Timing{
+			Custom: lo.ToPtr(boundaries[3]),
+		})
+		s.Require().NoError(err)
+		canceledView, err = s.SubscriptionService.GetView(ctx, view.Subscription.NamespacedID)
+		s.Require().NoError(err)
+		s.Require().Len(canceledView.Phases, 1)
+		s.Require().Len(canceledView.Phases[0].ItemsByKey[itemKey], 1)
+		newItemID = canceledView.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem.ID
+		s.Require().NotEqual(oldItemID, newItemID)
+		if input.legacyAnnotationDrift {
+			s.Require().Equal(itemAnnotations[migrationAnnotation], canceledView.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem.Annotations[migrationAnnotation])
+		}
+
+		s.Require().NoError(s.Service.SyncByID(ctx, canceledView.Subscription.NamespacedID, boundaries[3], subscriptionsync.
+
+			// then: paid history remains attached to the recreated item, with no duplicate collectible work.
+			WithInvoicePendingLines()))
+	})
+
+	var first paidCancellationHistorySnapshot
+	s.Run("preserve paid charge and invoice history", func() {
+		first = s.assertPaidCancellationHistory(view.Subscription.ID, newItemID, paid)
+	})
+	s.Run("repeat reconciliation without new work", func() {
+		s.Require().NoError(s.Service.SyncByID(ctx, canceledView.Subscription.NamespacedID, boundaries[3], subscriptionsync.WithInvoicePendingLines()))
+		second := s.assertPaidCancellationHistory(view.Subscription.ID, newItemID, paid)
+		s.ElementsMatch(first.chargeIDs, second.chargeIDs, "a repeated sync must not create more charges")
+		s.ElementsMatch(first.lineIDs, second.lineIDs, "a repeated collection must not create more lines")
+	})
+}
+
+func (s *CreditThenInvoiceTestSuite) assertPaidCancellationHistory(subscriptionID, itemID string, paid []paidCancellationPeriod) paidCancellationHistorySnapshot {
+	s.T().Helper()
+	ctx := s.T().Context()
+	activeCharges, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
+		Page:           pagination.Page{PageSize: 20, PageNumber: 1},
+		Namespace:      s.Namespace,
+		SubscriptionID: filter.NewULIDIn(subscriptionID),
+		ChargeTypes:    []chargesmeta.ChargeType{chargesmeta.ChargeTypeFlatFee},
+	})
+	s.Require().NoError(err)
+	s.Require().Len(activeCharges.Items, len(paid), "no extra collectible historical or future charges")
+	snapshot := paidCancellationHistorySnapshot{
+		chargeIDs: make([]string, 0, len(activeCharges.Items)),
+	}
+	originalChargeIDs := make([]string, 0, len(paid))
+	for _, charge := range activeCharges.Items {
+		snapshot.chargeIDs = append(snapshot.chargeIDs, charge.GetID())
+	}
+
+	for _, original := range paid {
+		originalChargeIDs = append(originalChargeIDs, original.chargeID)
+	}
+
+	s.ElementsMatch(originalChargeIDs, snapshot.chargeIDs, "paid charge identities must survive cancellation")
+
+	for _, original := range paid {
+		charge, err := s.Charges.GetByID(ctx, charges.GetByIDInput{
+			ChargeID: chargesmeta.ChargeID{Namespace: s.Namespace, ID: original.chargeID},
+		})
+		s.Require().NoError(err)
+		flatFee, err := charge.AsFlatFeeCharge()
+		s.Require().NoError(err)
+		s.Require().NotNil(flatFee.Intent.GetSubscription())
+		s.Equal(itemID, flatFee.Intent.GetSubscription().ItemID)
+
+		invoice, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+			Invoice: original.invoiceID,
+			Expand:  billing.StandardInvoiceExpandAll,
+		})
+		s.Require().NoError(err)
+		s.Equal(billing.StandardInvoiceStatusPaid, invoice.Status)
+		s.Require().Len(invoice.Lines.OrEmpty(), 1)
+		line := invoice.Lines.OrEmpty()[0]
+		s.Equal(original.lineID, line.ID)
+		s.Equal(original.period, line.Period)
+		s.True(original.totals.Equal(line.Totals), "paid line totals changed: before=%+v after=%+v", original.totals, line.Totals)
+	}
+
+	invoices, err := s.BillingService.ListInvoices(ctx, billing.ListInvoicesInput{
+		Page:         pagination.Page{PageSize: 20, PageNumber: 1},
+		Namespace:    s.Namespace,
+		CustomerID:   &filter.FilterULID{FilterString: filter.FilterString{Eq: &s.Customer.ID}},
+		OnlyStandard: true,
+		Expand:       billing.InvoiceExpandAll,
+	})
+	s.Require().NoError(err)
+	snapshot.lineIDs = make([]string, 0, len(paid))
+	for _, invoice := range invoices.Items {
+		standard, err := invoice.AsStandardInvoice()
+		s.Require().NoError(err)
+		for _, line := range standard.Lines.OrEmpty() {
+			snapshot.lineIDs = append(snapshot.lineIDs, line.ID)
+		}
+	}
+
+	originalLineIDs := make([]string, 0, len(paid))
+	for _, original := range paid {
+		originalLineIDs = append(originalLineIDs, original.lineID)
+	}
+
+	s.ElementsMatch(originalLineIDs, snapshot.lineIDs, "no second collectible line for a paid period")
+	s.expectNoGatheringInvoice(ctx, s.Namespace, s.Customer.ID)
+
+	return snapshot
+}
+
+func (s *CreditThenInvoiceTestSuite) TestChargeReplacementRejectsPaidFlatFeeWithoutNewCollection() {
+	ctx := s.T().Context()
+	start := s.mustParseTime("2024-01-01T00:00:00Z")
+	clock.FreezeTime(start)
+	defer clock.UnFreeze()
+
+	const itemKey = "replacement-guard-flat-fee"
+	const referenceOnlyItemKey = "a-reference-only-flat-fee"
+	var chargeID chargesmeta.ChargeID
+	var referenceOnlyChargeID chargesmeta.ChargeID
+	var invoiceID billing.InvoiceID
+	var lineID string
+	var originalAmount alpacadecimal.Decimal
+	var oldItemID string
+	var referenceOnlyItemID string
+	var subscriptionID models.NamespacedID
+	var originalChargeIDs []string
+
+	// given: an in-advance flat fee has a paid invoice alongside a separate in-arrears charge.
+	s.RequireRun("bill the original flat fee", func() {
+		view := s.createSubscriptionFromPlan(plan.CreatePlanInput{
+			NamespacedModel: models.NamespacedModel{Namespace: s.Namespace},
+			Plan: productcatalog.Plan{
+				PlanMeta: productcatalog.PlanMeta{
+					Name:           "Guarded flat fee",
+					Key:            "guarded-flat-fee",
+					Version:        1,
+					Currency:       currencies.NewCurrencyReference(currencyx.Code(currency.USD)),
+					SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+					BillingCadence: datetime.MustParseDuration(s.T(), "P1M"),
+				},
+				Phases: []productcatalog.Phase{{
+					PhaseMeta: s.phaseMeta("service", ""),
+					RateCards: productcatalog.RateCards{
+						&productcatalog.FlatFeeRateCard{
+							RateCardMeta: productcatalog.RateCardMeta{
+								Key:  itemKey,
+								Name: "Monthly flat fee",
+								Price: productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+									Amount:      alpacadecimal.NewFromInt(30),
+									PaymentTerm: productcatalog.InAdvancePaymentTerm,
+								}),
+							},
+							BillingCadence: lo.ToPtr(datetime.MustParseDuration(s.T(), "P1M")),
+						},
+						&productcatalog.FlatFeeRateCard{
+							RateCardMeta: productcatalog.RateCardMeta{
+								Key:  referenceOnlyItemKey,
+								Name: "Reference-only flat fee",
+								Price: productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+									Amount:      alpacadecimal.NewFromInt(5),
+									PaymentTerm: productcatalog.InArrearsPaymentTerm,
+								}),
+							},
+							BillingCadence: lo.ToPtr(datetime.MustParseDuration(s.T(), "P1M")),
+						},
+					},
+				}},
+			},
+		})
+		oldItemID = view.Phases[0].ItemsByKey[itemKey][0].SubscriptionItem.ID
+		referenceOnlyItemID = view.Phases[0].ItemsByKey[referenceOnlyItemKey][0].SubscriptionItem.ID
+		subscriptionID = view.Subscription.NamespacedID
+		s.Require().NoError(s.Service.SyncByID(ctx, view.Subscription.NamespacedID, start.AddDate(0, 1, 0)))
+
+		invoices, err := s.BillingService.InvoicePendingLines(ctx, billing.InvoicePendingLinesInput{
+			Customer: s.Customer.GetID(),
+			AsOf:     lo.ToPtr(start),
+		})
+		s.Require().NoError(err)
+		s.Require().Len(invoices, 1)
+		s.Require().Len(invoices[0].Lines.OrEmpty(), 1)
+		line := invoices[0].Lines.OrEmpty()[0]
+		s.Require().NotNil(line.ChargeID)
+		chargeID = chargesmeta.ChargeID{Namespace: s.Namespace, ID: *line.ChargeID}
+		lineID = line.ID
+
+		approved, err := s.BillingService.ApproveInvoice(ctx, invoices[0].GetInvoiceID())
+		s.Require().NoError(err)
+		invoiceID = approved.GetInvoiceID()
+		paidInvoice, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+			Invoice: invoiceID,
+			Expand:  billing.StandardInvoiceExpandAll,
+		})
+		s.Require().NoError(err)
+		s.Require().Equal(billing.StandardInvoiceStatusPaid, paidInvoice.Status)
+		s.Require().True(paidInvoice.StatusDetails.Immutable)
+		s.Require().Len(paidInvoice.Lines.OrEmpty(), 1)
+		originalAmount = paidInvoice.Lines.OrEmpty()[0].Totals.Total
+
+		allCharges, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
+			Page:           pagination.Page{PageNumber: 1, PageSize: 20},
+			Namespace:      s.Namespace,
+			SubscriptionID: filter.NewULIDIn(subscriptionID.ID),
+			IncludeDeleted: true,
+		})
+		s.Require().NoError(err)
+		for _, charge := range allCharges.Items {
+			originalChargeIDs = append(originalChargeIDs, charge.GetID())
+			flatFee, err := charge.AsFlatFeeCharge()
+			s.Require().NoError(err)
+			s.Require().NotNil(flatFee.Intent.GetSubscription())
+			if flatFee.Intent.GetSubscription().ItemID == referenceOnlyItemID && flatFee.Intent.GetBaseIntent().ServicePeriod.From.Equal(start) {
+				referenceOnlyChargeID = chargesmeta.ChargeID{Namespace: s.Namespace, ID: charge.GetID()}
+			}
+		}
+
+		s.Require().Contains(originalChargeIDs, chargeID.ID)
+		s.Require().NotEmpty(referenceOnlyChargeID.ID)
+	})
+
+	// when: a reference repair is planned before the paid item's new physical ID and price are checked.
+	s.RequireRun("reject the changed item", func() {
+		revised, err := s.SubscriptionService.GetView(ctx, subscriptionID)
+		s.Require().NoError(err)
+		itemRepo := subscriptionrepo.NewSubscriptionItemRepo(s.DBClient)
+		// Persist replacement rows: SyncByID must reload them instead of accepting a
+		// fabricated view. The repository lets this test exercise sync's own guard.
+		for _, key := range []string{itemKey, referenceOnlyItemKey} {
+			originalItem := revised.Phases[0].ItemsByKey[key][0].SubscriptionItem
+			replacement := originalItem.AsEntityInput()
+			replacement.RateCard = originalItem.RateCard.Clone()
+			if key == itemKey {
+				changedRateCard, ok := replacement.RateCard.(*productcatalog.FlatFeeRateCard)
+				s.Require().True(ok)
+				changedRateCard.Price = productcatalog.NewPriceFrom(productcatalog.FlatPrice{
+					Amount:      alpacadecimal.NewFromInt(40),
+					PaymentTerm: productcatalog.InAdvancePaymentTerm,
+				})
+			}
+
+			s.Require().NoError(itemRepo.Delete(ctx, originalItem.NamespacedID))
+			recreatedItem, err := itemRepo.Create(ctx, replacement)
+			s.Require().NoError(err)
+			s.Require().NotEqual(originalItem.ID, recreatedItem.ID)
+		}
+
+		err = s.Service.SyncByID(ctx, revised.Subscription.NamespacedID, start.AddDate(0, 1, 0), subscriptionsync.WithInvoicePendingLines())
+		s.Require().ErrorContains(err, "immutable")
+	})
+
+	// then: neither the reference repair nor charge replacement is applied.
+	s.Run("preserve the invoiced charge", func() {
+		charge, err := s.Charges.GetByID(ctx, charges.GetByIDInput{ChargeID: chargeID})
+		s.Require().NoError(err)
+		flatFee, err := charge.AsFlatFeeCharge()
+		s.Require().NoError(err)
+		s.Require().NotNil(flatFee.Intent.GetSubscription())
+		s.Equal(oldItemID, flatFee.Intent.GetSubscription().ItemID)
+		s.Equal(alpacadecimal.NewFromInt(30), flatFee.Intent.GetBaseIntent().AmountBeforeProration)
+
+		allCharges, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
+			Page:           pagination.Page{PageNumber: 1, PageSize: 20},
+			Namespace:      s.Namespace,
+			SubscriptionID: filter.NewULIDIn(subscriptionID.ID),
+			IncludeDeleted: true,
+		})
+		s.Require().NoError(err)
+		chargeIDsAfter := make([]string, 0, len(allCharges.Items))
+		for _, charge := range allCharges.Items {
+			chargeIDsAfter = append(chargeIDsAfter, charge.GetID())
+		}
+
+		s.ElementsMatch(originalChargeIDs, chargeIDsAfter)
+		referenceOnlyCharge, err := s.Charges.GetByID(ctx, charges.GetByIDInput{ChargeID: referenceOnlyChargeID})
+		s.Require().NoError(err)
+		referenceOnlyFlatFee, err := referenceOnlyCharge.AsFlatFeeCharge()
+		s.Require().NoError(err)
+		s.Equal(referenceOnlyItemID, referenceOnlyFlatFee.Intent.GetSubscription().ItemID)
+
+		invoice, err := s.BillingService.GetStandardInvoiceById(ctx, billing.GetStandardInvoiceByIdInput{
+			Invoice: invoiceID,
+			Expand:  billing.StandardInvoiceExpandAll,
+		})
+		s.Require().NoError(err)
+		s.Require().Len(invoice.Lines.OrEmpty(), 1)
+		s.Equal(lineID, invoice.Lines.OrEmpty()[0].ID)
+		s.Equal(originalAmount, invoice.Lines.OrEmpty()[0].Totals.Total)
+
+		allInvoices, err := s.BillingService.ListStandardInvoices(ctx, billing.ListStandardInvoicesInput{
+			Namespace: s.Namespace,
+		})
+		s.Require().NoError(err)
+		s.Require().Len(allInvoices.Items, 1)
+		s.Equal(invoiceID.ID, allInvoices.Items[0].ID)
+	})
 }

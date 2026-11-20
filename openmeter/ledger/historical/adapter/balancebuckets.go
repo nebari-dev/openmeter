@@ -45,31 +45,48 @@ func (r *repo) GetBalanceBuckets(ctx context.Context, query ledger.BalanceBucket
 			return nil, err
 		}
 
-		rows, err := tx.db.QueryContext(ctx, sqlQuery, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query ledger balance buckets: %w", err)
-		}
-		defer rows.Close()
-
-		buckets := make([]ledger.BalanceBucket, 0)
-		for rows.Next() {
-			row := balanceBucketRow{}
-			if err := rows.Scan(row.destinations()...); err != nil {
-				return nil, fmt.Errorf("failed to scan ledger balance bucket: %w", err)
-			}
-
-			bucket, err := row.toBalanceBucket(query.GroupBy)
-			if err != nil {
-				return nil, err
-			}
-			buckets = append(buckets, bucket)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("ledger balance bucket rows: %w", err)
-		}
-
-		return buckets, nil
+		return tx.queryBalanceBuckets(ctx, sqlQuery, args, query.GroupBy)
 	})
+}
+
+func (r *repo) GetMinimumBalanceBuckets(ctx context.Context, query ledger.MinimumBalanceBucketQuery) ([]ledger.BalanceBucket, error) {
+	return entutils.TransactingRepo(ctx, r, func(ctx context.Context, tx *repo) ([]ledger.BalanceBucket, error) {
+		sqlQuery, args, err := minimumBalanceBucketsQuery{query: query}.SQL()
+		if err != nil {
+			return nil, err
+		}
+
+		return tx.queryBalanceBuckets(ctx, sqlQuery, args, query.GroupBy)
+	})
+}
+
+func (r *repo) queryBalanceBuckets(ctx context.Context, sqlQuery string, args []any, groupBy []string) ([]ledger.BalanceBucket, error) {
+	rows, err := r.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query ledger balance buckets: %w", err)
+	}
+	defer rows.Close()
+
+	buckets := make([]ledger.BalanceBucket, 0)
+	for rows.Next() {
+		row := balanceBucketRow{}
+		if err := rows.Scan(row.destinations()...); err != nil {
+			return nil, fmt.Errorf("failed to scan ledger balance bucket: %w", err)
+		}
+
+		bucket, err := row.toBalanceBucket(groupBy)
+		if err != nil {
+			return nil, err
+		}
+
+		buckets = append(buckets, bucket)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ledger balance bucket rows: %w", err)
+	}
+
+	return buckets, nil
 }
 
 func (r *balanceBucketRow) destinations() []any {
@@ -110,6 +127,7 @@ func (r balanceBucketRow) toBalanceBucket(groupBy []string) (ledger.BalanceBucke
 	if err := json.Unmarshal([]byte(r.Filters), &filters); err != nil {
 		return ledger.BalanceBucket{}, fmt.Errorf("decode route filters: %w", err)
 	}
+
 	costBasis, err := nullableDecimalValue(r.CostBasis)
 	if err != nil {
 		return ledger.BalanceBucket{}, fmt.Errorf("sub-account %s cost basis: %w", r.SubAccountID, err)

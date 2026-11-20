@@ -230,7 +230,7 @@ func newUsageBasedRealizationRun(id string, typ usagebased.RealizationRunType, s
 			StoredAtLT:      servicePeriodTo,
 			ServicePeriodTo: servicePeriodTo,
 			MeteredQuantity: alpacadecimal.NewFromInt(meteredQuantity),
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount: alpacadecimal.NewFromInt(meteredQuantity),
 				Total:  alpacadecimal.NewFromInt(meteredQuantity),
 			},
@@ -266,6 +266,7 @@ func TestResolveUsageBasedRealizations(t *testing.T) {
 	newDeletedRun := func(id string, prior usagebased.RealizationRun, servicePeriodTo time.Time, meteredQuantity int64) usagebased.RealizationRun {
 		run := chainAfter(newUsageBasedRealizationRun(id, usagebased.RealizationRunTypePartialInvoice, servicePeriodTo, meteredQuantity), prior)
 		run.DeletedAt = &deletedAt
+
 		return run
 	}
 
@@ -307,7 +308,7 @@ func TestResolveUsageBasedRealizations(t *testing.T) {
 		require.Nil(t, resolved[3].Run, "the outstanding projection is not a persisted run")
 		require.Equal(t, timeutil.ClosedPeriod{From: periodStart.Add(48 * time.Hour), To: servicePeriod.To}, resolved[3].ServicePeriod,
 			"outstanding starts at the last live run's end; voided history does not cover the period")
-		require.Equal(t, float64(0), resolved[3].Quantity.InexactFloat64())
+		require.Nil(t, resolved[3].Quantity)
 		require.False(t, resolved[3].Voided)
 	})
 

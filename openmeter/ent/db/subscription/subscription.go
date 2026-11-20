@@ -47,6 +47,8 @@ const (
 	FieldCostBasisMode = "cost_basis_mode"
 	// FieldBillingAnchor holds the string denoting the billing_anchor field in the database.
 	FieldBillingAnchor = "billing_anchor"
+	// FieldBillingStartsAt holds the string denoting the billing_starts_at field in the database.
+	FieldBillingStartsAt = "billing_starts_at"
 	// FieldBillingCadence holds the string denoting the billing_cadence field in the database.
 	FieldBillingCadence = "billing_cadence"
 	// FieldProRatingConfig holds the string denoting the pro_rating_config field in the database.
@@ -73,8 +75,8 @@ const (
 	EdgeChargesFlatFee = "charges_flat_fee"
 	// EdgeAddons holds the string denoting the addons edge name in mutations.
 	EdgeAddons = "addons"
-	// EdgeBillingSyncState holds the string denoting the billing_sync_state edge name in mutations.
-	EdgeBillingSyncState = "billing_sync_state"
+	// EdgeSyncState holds the string denoting the sync_state edge name in mutations.
+	EdgeSyncState = "sync_state"
 	// EdgeCostBasisPins holds the string denoting the cost_basis_pins edge name in mutations.
 	EdgeCostBasisPins = "cost_basis_pins"
 	// Table holds the table name of the subscription in the database.
@@ -149,13 +151,13 @@ const (
 	AddonsInverseTable = "subscription_addons"
 	// AddonsColumn is the table column denoting the addons relation/edge.
 	AddonsColumn = "subscription_id"
-	// BillingSyncStateTable is the table that holds the billing_sync_state relation/edge.
-	BillingSyncStateTable = "subscription_billing_sync_states"
-	// BillingSyncStateInverseTable is the table name for the SubscriptionBillingSyncState entity.
-	// It exists in this package in order to avoid circular dependency with the "subscriptionbillingsyncstate" package.
-	BillingSyncStateInverseTable = "subscription_billing_sync_states"
-	// BillingSyncStateColumn is the table column denoting the billing_sync_state relation/edge.
-	BillingSyncStateColumn = "subscription_id"
+	// SyncStateTable is the table that holds the sync_state relation/edge.
+	SyncStateTable = "subscription_sync_states_v2"
+	// SyncStateInverseTable is the table name for the SubscriptionSyncState entity.
+	// It exists in this package in order to avoid circular dependency with the "subscriptionsyncstate" package.
+	SyncStateInverseTable = "subscription_sync_states_v2"
+	// SyncStateColumn is the table column denoting the sync_state relation/edge.
+	SyncStateColumn = "subscription_id"
 	// CostBasisPinsTable is the table that holds the cost_basis_pins relation/edge.
 	CostBasisPinsTable = "subscription_cost_basis_pins"
 	// CostBasisPinsInverseTable is the table name for the SubscriptionCostBasisPin entity.
@@ -183,6 +185,7 @@ var Columns = []string{
 	FieldInvoiceCurrency,
 	FieldCostBasisMode,
 	FieldBillingAnchor,
+	FieldBillingStartsAt,
 	FieldBillingCadence,
 	FieldProRatingConfig,
 	FieldSettlementMode,
@@ -336,6 +339,11 @@ func ByBillingAnchor(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldBillingAnchor, opts...).ToFunc()
 }
 
+// ByBillingStartsAt orders the results by the billing_starts_at field.
+func ByBillingStartsAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBillingStartsAt, opts...).ToFunc()
+}
+
 // ByBillingCadence orders the results by the billing_cadence field.
 func ByBillingCadence(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldBillingCadence, opts...).ToFunc()
@@ -477,10 +485,10 @@ func ByAddons(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 	}
 }
 
-// ByBillingSyncStateField orders the results by billing_sync_state field.
-func ByBillingSyncStateField(field string, opts ...sql.OrderTermOption) OrderOption {
+// BySyncStateField orders the results by sync_state field.
+func BySyncStateField(field string, opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
-		sqlgraph.OrderByNeighborTerms(s, newBillingSyncStateStep(), sql.OrderByField(field, opts...))
+		sqlgraph.OrderByNeighborTerms(s, newSyncStateStep(), sql.OrderByField(field, opts...))
 	}
 }
 
@@ -567,11 +575,11 @@ func newAddonsStep() *sqlgraph.Step {
 		sqlgraph.Edge(sqlgraph.O2M, false, AddonsTable, AddonsColumn),
 	)
 }
-func newBillingSyncStateStep() *sqlgraph.Step {
+func newSyncStateStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
-		sqlgraph.To(BillingSyncStateInverseTable, FieldID),
-		sqlgraph.Edge(sqlgraph.O2O, false, BillingSyncStateTable, BillingSyncStateColumn),
+		sqlgraph.To(SyncStateInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, SyncStateTable, SyncStateColumn),
 	)
 }
 func newCostBasisPinsStep() *sqlgraph.Step {

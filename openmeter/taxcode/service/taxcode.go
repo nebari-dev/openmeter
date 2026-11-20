@@ -35,6 +35,17 @@ func (s *Service) UpdateTaxCode(ctx context.Context, input taxcode.UpdateTaxCode
 			return taxcode.TaxCode{}, models.NewGenericConflictError(taxcode.ErrTaxCodeManagedBySystem)
 		}
 
+		if !input.AllowAppMappingOverride {
+			// The guard keeps existing app references and auto-derived keys meaningful:
+			// a mapping change is how orphaned keys appear. Adding a new app type is fine.
+			for _, mapping := range existing.AppMappings {
+				incoming, ok := input.AppMappings.GetAppMapping(mapping.AppType)
+				if !ok || incoming.TaxCode != mapping.TaxCode {
+					return taxcode.TaxCode{}, models.NewGenericConflictError(taxcode.ErrTaxCodeAppMappingImmutable)
+				}
+			}
+		}
+
 		return s.adapter.UpdateTaxCode(ctx, input)
 	})
 }
@@ -118,8 +129,10 @@ func (s *Service) GetOrCreateByAppMapping(ctx context.Context, input taxcode.Get
 						// after auto-creation (orphaned key). Avoid poisoning the pg tx.
 						return taxcode.TaxCode{}, fmt.Errorf("resolving orphaned tax code key for %q: %w", input.TaxCode, taxcode.ErrTaxCodeOrphanedKey)
 					}
+
 					return taxcode.TaxCode{}, retryErr
 				}
+
 				return tc, nil
 			}
 

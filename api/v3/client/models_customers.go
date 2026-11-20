@@ -1123,7 +1123,7 @@ type CreateVersionFilter struct {
 	// Match this exact version.
 	Eq *int32 `json:"eq,omitempty"`
 	// Match one of these versions.
-	In *[]int32 `json:"in,omitempty"`
+	Oeq *[]int32 `json:"oeq,omitempty"`
 	// Match this version and later versions.
 	Gte *int32 `json:"gte,omitempty"`
 	// Match this version and earlier versions.
@@ -1173,13 +1173,22 @@ type CreditBalance struct {
 	Currency BillingCurrencyCode `json:"currency"`
 	// Managed currency reference. Present only for custom currencies.
 	CustomCurrency *CurrencyCustomReference `json:"custom_currency,omitempty"`
-	// Credits available after applying currently live charge impacts.
+	// Spendable balance after applying currently live, unbooked charge impacts. Can be
+	// negative when usage exceeds available credit.
 	//
 	// Always zero for historical balance queries using the `timestamp` parameter
 	// because live charge impacts cannot be reconstructed historically.
 	Live Numeric `json:"live"`
-	// Credits that have been booked on the ledger as of the balance timestamp.
+	// Credits that have been booked on the ledger as of the balance timestamp,
+	// including credit-only advance debt. Can be negative.
+	Booked Numeric `json:"booked"`
+	// Deprecated alias for `booked`. Always returns the same value.
 	Settled Numeric `json:"settled"`
+	// Spendable credit at the balance timestamp, including any credit-only advance
+	// debt. Preserves credit already committed to later usage. Future grants cannot be
+	// spent early; scheduled expiry reduces availability when it takes effect. Can be
+	// negative when advance debt exceeds spendable credit.
+	Spendable Numeric `json:"spendable"`
 	// Credits that have been granted but are not yet written to the ledger, or are
 	// written to the ledger with a future booked time.
 	Pending Numeric `json:"pending"`
@@ -1244,6 +1253,8 @@ type CreditGrant struct {
 	// Funded custom-currency grants must define `purchase.cost_basis` to settle in a
 	// fiat currency.
 	Currency BillingCurrencyCode `json:"currency"`
+	// Managed currency reference. Present only for custom currencies.
+	CustomCurrency *CurrencyCustomReference `json:"custom_currency,omitempty"`
 	// Granted credit amount.
 	Amount Numeric `json:"amount"`
 	// Present when a funding workflow applies (funding_method is not `none`).
@@ -1450,7 +1461,8 @@ type CreditTransaction struct {
 	// Signed amount of the credit movement. Positive values add balance, negative
 	// values reduce balance.
 	Amount Numeric `json:"amount"`
-	// The available balance before and after the transaction.
+	// The booked credit balance before and after the transaction, including
+	// credit-only advance debt.
 	AvailableBalance CreditTransactionAvailableBalance `json:"available_balance"`
 }
 
@@ -1469,20 +1481,22 @@ type CreditTransactionPaginatedResponse struct {
 //
 // - `funded`: Credit granted and available for consumption.
 // - `consumed`: Credit consumed by usage or fees.
+// - `correction`: A balance adjustment reversing previously recorded usage.
 // - `expired`: Credit removed because it expired before being used.
 // - `voided`: Credit removed because the grant was voided before being used.
 type CreditTransactionType string
 
 const (
-	CreditTransactionTypeFunded   CreditTransactionType = "funded"
-	CreditTransactionTypeConsumed CreditTransactionType = "consumed"
-	CreditTransactionTypeExpired  CreditTransactionType = "expired"
-	CreditTransactionTypeVoided   CreditTransactionType = "voided"
+	CreditTransactionTypeFunded     CreditTransactionType = "funded"
+	CreditTransactionTypeConsumed   CreditTransactionType = "consumed"
+	CreditTransactionTypeCorrection CreditTransactionType = "correction"
+	CreditTransactionTypeExpired    CreditTransactionType = "expired"
+	CreditTransactionTypeVoided     CreditTransactionType = "voided"
 )
 
 func (value CreditTransactionType) Valid() bool {
 	switch value {
-	case CreditTransactionTypeFunded, CreditTransactionTypeConsumed, CreditTransactionTypeExpired, CreditTransactionTypeVoided:
+	case CreditTransactionTypeFunded, CreditTransactionTypeConsumed, CreditTransactionTypeCorrection, CreditTransactionTypeExpired, CreditTransactionTypeVoided:
 		return true
 	default:
 		return false
@@ -1494,12 +1508,26 @@ type CurrencyCustomReference struct {
 	ID string `json:"id"`
 }
 
+// Determines which page of the collection to retrieve.
+type CursorPaginationQueryPage struct {
+	// The number of items to include per page.
+	Size *int64 `json:"size,omitempty"`
+	// Request the next page of data, starting with the item after this parameter.
+	After *string `json:"after,omitempty"`
+	// Request the previous page of data, starting with the item before this parameter.
+	Before *string `json:"before,omitempty"`
+}
+
 // Billing customer data.
 type CustomerData struct {
-	// The billing profile for the customer.
+	// The billing profile explicitly selected for the customer.
 	//
-	// If not provided, the default billing profile will be used.
-	BillingProfile *ProfileReference `json:"billing_profile,omitempty"`
+	// Unpinned customers use the current namespace default. Selecting the current
+	// default explicitly pins the customer to that profile.
+	BillingProfile Nullable[ProfileReference] `json:"billing_profile,omitempty"`
+	// The effective billing profile for the customer. Uses the explicitly selected
+	// billing profile when pinned, otherwise the current default billing profile.
+	EffectiveBillingProfile ProfileReference `json:"effective_billing_profile"`
 	// App customer data.
 	AppData *AppCustomerData `json:"app_data,omitempty"`
 }
@@ -1508,6 +1536,18 @@ type CustomerData struct {
 type CustomerPagePaginatedResponse struct {
 	Data []Customer    `json:"data"`
 	Meta PaginatedMeta `json:"meta"`
+}
+
+// Customer billing profile selection.
+type CustomerProfile struct {
+	// The billing profile explicitly selected for the customer.
+	//
+	// Unpinned customers use the current namespace default. Selecting the current
+	// default explicitly pins the customer to that profile.
+	BillingProfile Nullable[ProfileReference] `json:"billing_profile,omitempty"`
+	// The effective billing profile for the customer. Uses the explicitly selected
+	// billing profile when pinned, otherwise the current default billing profile.
+	EffectiveBillingProfile ProfileReference `json:"effective_billing_profile"`
 }
 
 // Request to create a Stripe Checkout Session for the customer.
@@ -1725,6 +1765,21 @@ func (value EntitlementMeasureUsageFromPreset) Valid() bool {
 	}
 }
 
+// Options for manually collecting a customer's pending lines into invoices.
+type InvoiceCustomerChargesInput struct {
+	// Collection cutoff. Defaults to the current time and cannot be in the future.
+	AsOf *time.Time `json:"as_of,omitempty"`
+	// Override the customer's progressive billing setting for this collection. When
+	// enabled, eligible usage-based lines can be collected for a partial period.
+	ProgressiveBillingOverride *bool `json:"progressive_billing_override,omitempty"`
+}
+
+// Result of manually collecting a customer's pending lines into invoices.
+type InvoiceCustomerChargesResult struct {
+	// Created standard invoices, one per collected currency.
+	Invoices []Invoice `json:"invoices"`
+}
+
 // Recurring period input. The anchor is optional; the owning resource defines the
 // default, typically its creation time.
 type RecurringPeriodInput struct {
@@ -1770,12 +1825,22 @@ type UpsertAppCustomerDataRequest struct {
 
 // CustomerBillingData upsert request.
 type UpsertCustomerBillingDataRequest struct {
-	// The billing profile for the customer.
+	// The billing profile explicitly selected for the customer.
 	//
-	// If not provided, the default billing profile will be used.
-	BillingProfile *ProfileReference `json:"billing_profile,omitempty"`
+	// Unpinned customers use the current namespace default. Selecting the current
+	// default explicitly pins the customer to that profile.
+	BillingProfile Nullable[ProfileReference] `json:"billing_profile,omitempty"`
 	// App customer data.
 	AppData *AppCustomerDataInput `json:"app_data,omitempty"`
+}
+
+// CustomerBillingProfile upsert request.
+type UpsertCustomerBillingProfileRequest struct {
+	// The billing profile explicitly selected for the customer.
+	//
+	// Unpinned customers use the current namespace default. Selecting the current
+	// default explicitly pins the customer to that profile.
+	BillingProfile Nullable[ProfileReference] `json:"billing_profile,omitempty"`
 }
 
 // Customer upsert request.
@@ -1804,7 +1869,7 @@ type VersionFilter struct {
 	// Match this exact version.
 	Eq *int32 `json:"eq,omitempty"`
 	// Match one of these versions.
-	In []int32 `json:"in,omitempty"`
+	Oeq []int32 `json:"oeq,omitempty"`
 	// Match this version and later versions.
 	Gte *int32 `json:"gte,omitempty"`
 	// Match this version and earlier versions.

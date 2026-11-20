@@ -20,6 +20,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	billingadapter "github.com/openmeterio/openmeter/openmeter/billing/adapter"
 	featuremeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	splitlinegrouptestutils "github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup/testutils"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	billingratingservice "github.com/openmeterio/openmeter/openmeter/billing/rating/service"
 	billingsequenceadapter "github.com/openmeterio/openmeter/openmeter/billing/sequence/adapter"
@@ -30,12 +31,12 @@ import (
 	customerservice "github.com/openmeterio/openmeter/openmeter/customer/service"
 	"github.com/openmeterio/openmeter/openmeter/ent/db"
 	meteradapter "github.com/openmeterio/openmeter/openmeter/meter/mockadapter"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	registrybuilder "github.com/openmeterio/openmeter/openmeter/registry/builder"
 	secretadapter "github.com/openmeterio/openmeter/openmeter/secret/adapter"
 	secretservice "github.com/openmeterio/openmeter/openmeter/secret/service"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
-	taxcodeservice "github.com/openmeterio/openmeter/openmeter/taxcode/service"
+	taxcodetestutils "github.com/openmeterio/openmeter/openmeter/taxcode/testutils"
 	"github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/datetime"
@@ -251,17 +252,7 @@ func InitBillingService(t *testing.T, ctx context.Context, in InitBillingService
 	featureService := entitlementRegistry.Feature
 
 	// TaxCode
-	taxCodeAdapter, err := taxcodeadapter.New(taxcodeadapter.Config{
-		Client: in.DBClient,
-		Logger: slog.Default(),
-	})
-	require.NoError(t, err)
-
-	taxCodeService, err := taxcodeservice.New(taxcodeservice.Config{
-		Adapter: taxCodeAdapter,
-		Logger:  slog.Default(),
-	})
-	require.NoError(t, err)
+	taxCodeEnv := taxcodetestutils.NewTestEnvFromClient(t, in.DBClient, slog.Default())
 
 	// Billing
 	billingAdapter, err := billingadapter.New(billingadapter.Config{
@@ -295,7 +286,7 @@ func InitBillingService(t *testing.T, ctx context.Context, in InitBillingService
 	require.NoError(t, err)
 
 	legacyBillingLineEngine, err := billinglineengine.New(billinglineengine.Config{
-		SplitLineGroupAdapter:        billingAdapter,
+		SplitLineGroupService:        splitlinegrouptestutils.NewTestEnv(t, in.DBClient, slog.Default()),
 		RatingService:                billingRatingService,
 		FeatureMeterResolver:         featureMeterResolver,
 		StreamingConnector:           mockStreamingConnector,
@@ -303,10 +294,12 @@ func InitBillingService(t *testing.T, ctx context.Context, in InitBillingService
 	})
 	require.NoError(t, err)
 
+	taxCodeResolver, err := taxcoderesolver.New(taxCodeEnv.Service)
+	require.NoError(t, err)
+
 	return billingservice.New(billingservice.Config{
 		Adapter:                 billingAdapter,
 		SequenceService:         billingSequenceService,
-		RatingService:           billingRatingService,
 		LegacyBillingLineEngine: legacyBillingLineEngine,
 		CustomerService:         in.CustomerService,
 		AppService:              in.AppService,
@@ -314,6 +307,7 @@ func InitBillingService(t *testing.T, ctx context.Context, in InitBillingService
 		FeatureMeterResolver:    featureMeterResolver,
 		Publisher:               eventbus.NewMock(t),
 		AdvancementStrategy:     billing.ForegroundAdvancementStrategy,
-		TaxCodeService:          taxCodeService,
+		TaxCodeService:          taxCodeEnv.Service,
+		TaxCodeResolver:         taxCodeResolver,
 	})
 }

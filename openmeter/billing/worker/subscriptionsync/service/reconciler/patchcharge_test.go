@@ -281,6 +281,7 @@ func newChargePatchTestFlatFeeItem(t *testing.T, target targetstate.StateItem, i
 	t.Helper()
 
 	existingIntent := newChargePatchTestExistingFlatFeeIntent(target)
+
 	return newChargePatchTestFlatFeeItemWithIntent(t, target, id, existingIntent)
 }
 
@@ -500,8 +501,8 @@ func newChargePatchTestUsageRateCard() productcatalog.RateCard {
 			Key:     "usage-rate-card",
 			Name:    "Usage Rate Card",
 			Feature: productcatalog.NewFeatureReference(nil, ptr("feature-key")),
-			TaxConfig: &productcatalog.TaxConfig{
-				TaxCodeID: ptr("tax-code-id"),
+			TaxConfig: &productcatalog.TaxCodeConfig{
+				TaxCodeID: "tax-code-id",
 			},
 			Price: productcatalog.NewPriceFrom(productcatalog.UnitPrice{
 				Amount: alpacadecimal.NewFromInt(1),
@@ -513,12 +514,13 @@ func newChargePatchTestUsageRateCard() productcatalog.RateCard {
 
 func newChargePatchTestFlatRateCard() productcatalog.RateCard {
 	billingCadence := datetime.NewISODuration(0, 1, 0, 0, 0, 0, 0)
+
 	return &productcatalog.FlatFeeRateCard{
 		RateCardMeta: productcatalog.RateCardMeta{
 			Key:  "flat-rate-card",
 			Name: "Flat Rate Card",
-			TaxConfig: &productcatalog.TaxConfig{
-				TaxCodeID: ptr("tax-code-id"),
+			TaxConfig: &productcatalog.TaxCodeConfig{
+				TaxCodeID: "tax-code-id",
 			},
 			Price: productcatalog.NewPriceFrom(productcatalog.FlatPrice{
 				Amount:      alpacadecimal.NewFromInt(10),

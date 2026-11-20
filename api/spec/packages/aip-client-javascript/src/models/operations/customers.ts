@@ -23,6 +23,7 @@ import type {
   Customer,
   CustomerData,
   CustomerPagePaginatedResponse,
+  CustomerProfile,
   CustomerStripeCreateCheckoutSessionRequestInput,
   CustomerStripeCreateCustomerPortalSessionRequest,
   Entitlement,
@@ -33,6 +34,8 @@ import type {
   EntitlementHistoryWindowSize,
   EntitlementPagePaginatedResponse,
   GetCreditBalanceParamsFilter,
+  InvoiceCustomerChargesInput,
+  InvoiceCustomerChargesResult,
   ListCreditGrantsParamsFilter,
   ListCreditTransactionsParamsFilter,
   ListCustomerChargesParamsFilter,
@@ -43,6 +46,7 @@ import type {
   UpdateCreditGrantExternalSettlementRequest as UpdateCreditGrantExternalSettlementRequestBody,
   UpsertAppCustomerDataRequest,
   UpsertCustomerBillingDataRequest,
+  UpsertCustomerBillingProfileRequest,
   UpsertCustomerRequest as UpsertCustomerRequestBody,
   VoidCreditGrantRequestInput,
 } from '../types.js'
@@ -101,6 +105,12 @@ export type UpdateCustomerBillingRequest = AcceptDateStrings<{
   body: UpsertCustomerBillingDataRequest
 }>
 export type UpdateCustomerBillingResponse = CustomerData
+
+export type UpdateCustomerBillingProfileRequest = AcceptDateStrings<{
+  customerId: string
+  body: UpsertCustomerBillingProfileRequest
+}>
+export type UpdateCustomerBillingProfileResponse = CustomerProfile
 
 export type UpdateCustomerBillingAppDataRequest = AcceptDateStrings<{
   customerId: string
@@ -196,7 +206,7 @@ export type ListCustomerEntitlementsResponse = EntitlementPagePaginatedResponse
 export type ResetCustomerEntitlementUsageRequest = AcceptDateStrings<{
   customerId: string
   entitlementId: string
-  body: ResetCustomerEntitlementUsageRequestInput
+  body?: ResetCustomerEntitlementUsageRequestInput
 }>
 export type ResetCustomerEntitlementUsageResponse = void
 
@@ -256,6 +266,12 @@ export type GetCreditGrantResponse = CreditGrant
 export interface ListCreditGrantsQuery {
   /** Determines which page of the collection to retrieve. */
   page?: { size?: number; number?: number }
+  /**
+   * Sort credit grants by `created_at`, `updated_at`, `name`, or `id`. Defaults to
+   * `created_at desc`. The `asc` suffix is optional when a sort attribute is
+   * supplied. Supports one attribute; ties are broken by `id` in the same direction.
+   */
+  sort?: SortQueryInput
   /** Filter credit grants returned in the response. */
   filter?: ListCreditGrantsParamsFilter
 }
@@ -267,7 +283,9 @@ export type ListCreditGrantsResponse = CreditGrantPagePaginatedResponse
 
 export interface GetCustomerCreditBalanceQuery {
   /**
-   * Return the credit balance as of this timestamp.
+   * Return credit balances at this timestamp using all currently recorded postings,
+   * including corrections recorded later. This is not a snapshot of what was known
+   * at the requested time.
    *
    * Defaults to the current time. Historical responses return `live` as zero because
    * live charge impacts are only available for current balances.
@@ -290,7 +308,7 @@ export type CreateCreditAdjustmentResponse = CreditAdjustment
 export type VoidCreditGrantRequest = AcceptDateStrings<{
   customerId: string
   creditGrantId: string
-  body: VoidCreditGrantRequestInput
+  body?: VoidCreditGrantRequestInput
 }>
 export type VoidCreditGrantResponse = CreditGrant
 
@@ -344,8 +362,10 @@ export interface ListCustomerChargesQuery {
    *
    * Supported values are:
    *
-   * - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage`
-   * and the `totals.realtime` fields.
+   * - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based
+   * charges and created usage-based charges whose effective service period
+   * contains the current time (inclusive start, exclusive end). Deleted charges
+   * are skipped.
    * - `customer`: Expand the charge's customer to the complete entity.
    * - `feature`: Expand the charge's feature to the complete entity.
    * - `subscription`: Expand the charge's subscription to the complete entity.
@@ -375,3 +395,9 @@ export type CreateCustomerChargesRequest = AcceptDateStrings<{
   body: CreateChargeRequestInput
 }>
 export type CreateCustomerChargesResponse = Charge
+
+export type InvoiceCustomerChargesRequest = AcceptDateStrings<{
+  customerId: string
+  body?: InvoiceCustomerChargesInput
+}>
+export type InvoiceCustomerChargesResponse = InvoiceCustomerChargesResult

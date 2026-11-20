@@ -41,7 +41,7 @@ spec:
             - name: SVIX_CACHE_TYPE
               value: "redis"
             - name: SVIX_JWT_SECRET
-              value: {{ .Values.svix.signingSecret | quote }}
+              value: {{ required "svix.signingSecret is required when svix.enabled is true" .Values.svix.signingSecret | quote }}
             - name: SVIX_LOG_LEVEL
               value: "debug"
             - name: SVIX_QUEUE_TYPE
@@ -51,16 +51,16 @@ spec:
               containerPort: 8071
               protocol: TCP
           resources:
-            {{- toYaml .Values.svix.resources | nindent 12 }}
-      {{- with .Values.nodeSelector }}
+            {{- toYaml (.Values.svix.resources | default .Values.resources) | nindent 12 }}
+      {{- with (.Values.svix.nodeSelector | default .Values.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- with (.Values.svix.affinity | default .Values.affinity) }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with (.Values.svix.tolerations | default .Values.tolerations) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -54,6 +54,7 @@ type CreateSubscriptionCustomerInput struct {
 	ActiveFrom      time.Time          `json:"activeFrom,omitempty"`
 	ActiveTo        *time.Time         `json:"activeTo,omitempty"`
 	BillingAnchor   time.Time          `json:"billingAnchor,omitempty"`
+	BillingStartsAt *time.Time         `json:"billingStartsAt,omitempty"`
 	Annotations     models.Annotations `json:"annotations"`
 }
 
@@ -104,6 +105,7 @@ func (s *SubscriptionSpec) ToCreateSubscriptionEntityInput(ns string) CreateSubs
 		ProRatingConfig: s.ProRatingConfig,
 		SettlementMode:  s.SettlementMode,
 		BillingAnchor:   s.BillingAnchor,
+		BillingStartsAt: s.BillingStartsAt,
 		MetadataModel:   s.MetadataModel,
 		Annotations:     s.Annotations,
 		Name:            s.Name,
@@ -133,6 +135,7 @@ func (s *SubscriptionSpec) GetPhaseCadence(phaseKey string) (models.CadencedMode
 			nextPhase := sortedPhaseSpecs[i+1]
 			et, _ := nextPhase.StartAfter.AddTo(s.ActiveFrom)
 			phaseEndTime = &et
+
 			break
 		}
 	}
@@ -153,6 +156,7 @@ func (s *SubscriptionSpec) GetPhaseCadence(phaseKey string) (models.CadencedMode
 			if t.Before(phaseStartTime) {
 				t = phaseStartTime
 			}
+
 			return lo.ToPtr(t.UTC())
 		}),
 	}
@@ -212,6 +216,7 @@ func (s *SubscriptionSpec) GetCurrentPhaseAt(t time.Time) (*SubscriptionPhaseSpe
 	if current == nil {
 		return nil, false
 	}
+
 	return current, true
 }
 
@@ -264,6 +269,7 @@ func (s *SubscriptionSpec) GetAlignedBillingPeriodAt(at time.Time) (timeutil.Clo
 		if !ok {
 			return def, fmt.Errorf("no active phase found for active subscription at %s", at)
 		}
+
 		phase = p
 	case at.Before(subCad.ActiveFrom):
 		return def, NewErrSubscriptionBillingPeriodQueriedBeforeSubscriptionStart(at, subCad.ActiveFrom)
@@ -340,6 +346,7 @@ func (s *SubscriptionSpec) Validate() error {
 	if err := s.validateCurrencies(); err != nil {
 		errs = append(errs, err)
 	}
+
 	if duration, _ := s.BillingCadence.Duration(); duration < 24*time.Hour {
 		errs = append(errs, ErrSubscriptionBillingCadenceTooShort)
 	}
@@ -348,6 +355,10 @@ func (s *SubscriptionSpec) Validate() error {
 	// - is present
 	if s.BillingAnchor.IsZero() {
 		errs = append(errs, ErrSubscriptionBillingAnchorIsRequired)
+	}
+
+	if s.BillingStartsAt != nil && s.BillingStartsAt.Before(s.ActiveFrom) {
+		errs = append(errs, ErrSubscriptionBillingStartsAtBeforeSubscriptionStart)
 	}
 
 	sortedPhases := s.GetSortedPhases()
@@ -388,6 +399,7 @@ func (s *SubscriptionSpec) validateCurrencies() error {
 	if err := s.CostBasisMode.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("costBasisMode: %w", err))
 	}
+
 	if s.CostBasisMode.IsPinned() && s.SettlementMode == productcatalog.CreditOnlySettlementMode {
 		errs = append(errs, errors.New("costBasisMode: pinned cost basis is not supported for credit-only subscriptions"))
 	}
@@ -416,6 +428,7 @@ func (s *SubscriptionSpec) validateCurrencies() error {
 					if meta.Currency != nil {
 						errs = append(errs, models.ErrorWithFieldPrefix(fieldSelector, productcatalog.ErrRateCardCurrencyRequiresPrice))
 					}
+
 					continue
 				}
 
@@ -423,6 +436,7 @@ func (s *SubscriptionSpec) validateCurrencies() error {
 					errs = append(errs, models.ErrorWithFieldPrefix(fieldSelector, productcatalog.ErrCurrencyInvalid))
 					continue
 				}
+
 				if err := meta.Currency.Validate(); err != nil {
 					errs = append(errs, models.ErrorWithFieldPrefix(fieldSelector, productcatalog.ErrCurrencyInvalid))
 					continue
@@ -473,6 +487,26 @@ func (s *SubscriptionSpec) ValidateAlignment() error {
 	return errors.Join(errs...)
 }
 
+// IsBillingStartsAtAligned reports whether BillingStartsAt is a billing period boundary counted from the
+// billing anchor. A phase start that is off that grid does not count as a boundary.
+func (s *SubscriptionSpec) IsBillingStartsAtAligned() (bool, error) {
+	if s.BillingStartsAt == nil {
+		return true, nil
+	}
+
+	billingRecurrence, err := timeutil.NewRecurrenceFromISODuration(s.BillingCadence, s.BillingAnchor)
+	if err != nil {
+		return false, fmt.Errorf("failed to get billing recurrence: %w", err)
+	}
+
+	period, err := billingRecurrence.GetPeriodAt(*s.BillingStartsAt)
+	if err != nil {
+		return false, fmt.Errorf("failed to get billing period at %s: %w", s.BillingStartsAt, err)
+	}
+
+	return period.From.Equal(*s.BillingStartsAt), nil
+}
+
 var _ models.CadenceComparable = SubscriptionSpec{}
 
 func (s SubscriptionSpec) GetCadence() models.CadencedModel {
@@ -494,9 +528,11 @@ func (i CreateSubscriptionPhasePlanInput) Validate() error {
 	if i.PhaseKey == "" {
 		return fmt.Errorf("phase key is required")
 	}
+
 	if i.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+
 	return nil
 }
 
@@ -515,6 +551,7 @@ func (s RemoveSubscriptionPhaseShifting) Validate() error {
 	if s != RemoveSubscriptionPhaseShiftNext && s != RemoveSubscriptionPhaseShiftPrev {
 		return fmt.Errorf("invalid RemoveSubscriptionPhaseShifting value %d", s)
 	}
+
 	return nil
 }
 
@@ -574,10 +611,12 @@ func (s SubscriptionPhaseSpec) GetBillableItemsByKey() map[string][]*Subscriptio
 				if res[key] == nil {
 					res[key] = make([]*SubscriptionItemSpec, 0)
 				}
+
 				res[key] = append(res[key], item)
 			}
 		}
 	}
+
 	return res
 }
 
@@ -811,6 +850,7 @@ func (i *CreateSubscriptionItemCustomerInput) UnmarshalJSON(b []byte) error {
 		if err != nil {
 			return fmt.Errorf("failed to parse active from override relative to phase start: %w", err)
 		}
+
 		def.ActiveFromOverrideRelativeToPhaseStart = &activeFrom
 	}
 
@@ -819,6 +859,7 @@ func (i *CreateSubscriptionItemCustomerInput) UnmarshalJSON(b []byte) error {
 		if err != nil {
 			return fmt.Errorf("failed to parse active to override relative to phase start: %w", err)
 		}
+
 		def.ActiveToOverrideRelativeToPhaseStart = &activeTo
 	}
 
@@ -877,9 +918,11 @@ func (s *SubscriptionItemSpec) MaterializeRateCardCurrency(defaultCurrency curre
 	if meta.Price == nil || meta.Currency != nil {
 		return nil
 	}
+
 	if defaultCurrency.GetCode() == "" {
 		return errors.New("default currency is required for a priced rate card")
 	}
+
 	if err := defaultCurrency.Validate(); err != nil {
 		return fmt.Errorf("invalid default currency: %w", err)
 	}
@@ -1072,12 +1115,14 @@ func (s SubscriptionItemSpec) ToScheduleSubscriptionEntitlementInput(
 		if err != nil {
 			return def, true, fmt.Errorf("failed to get boolean entitlement template: %w", err)
 		}
+
 		scheduleInput.Metadata = tpl.Metadata
 	case entitlement.EntitlementTypeStatic:
 		tpl, err := meta.EntitlementTemplate.AsStatic()
 		if err != nil {
 			return def, true, fmt.Errorf("failed to get static entitlement template: %w", err)
 		}
+
 		scheduleInput.Metadata = tpl.Metadata
 
 		var configJSON string
@@ -1110,6 +1155,7 @@ func (s SubscriptionItemSpec) ToScheduleSubscriptionEntitlementInput(
 		if err != nil {
 			return def, true, fmt.Errorf("failed to get recurrence from ISO duration: %w", err)
 		}
+
 		scheduleInput.UsagePeriod = lo.ToPtr(timeutil.AsTimed(func(r timeutil.Recurrence) time.Time {
 			return r.Anchor
 		})(rec))
@@ -1118,6 +1164,7 @@ func (s SubscriptionItemSpec) ToScheduleSubscriptionEntitlementInput(
 		if err != nil {
 			return def, true, fmt.Errorf("failed to get measure usage from time: %w", err)
 		}
+
 		scheduleInput.MeasureUsageFrom = mu
 
 		// Snapshot the rate card's UnitConfig onto the entitlement so balance checks
@@ -1224,6 +1271,7 @@ func NewSpecFromPlan(p Plan, c CreateSubscriptionCustomerInput) (SubscriptionSpe
 		if i == 0 {
 			continue
 		}
+
 		if diff, err := planPhases[i].ToCreateSubscriptionPhasePlanInput().StartAfter.Subtract(planPhases[i-1].ToCreateSubscriptionPhasePlanInput().StartAfter); err != nil || diff.IsNegative() {
 			return spec, fmt.Errorf("phases %s and %s of %s are in the wrong order", planPhases[i].GetKey(), planPhases[i-1].GetKey(), planRefName)
 		}
@@ -1255,6 +1303,7 @@ func NewSpecFromPlan(p Plan, c CreateSubscriptionCustomerInput) (SubscriptionSpe
 			if _, ok := rcByKey[rateCard.GetKey()]; ok {
 				return spec, fmt.Errorf("rate card %s of phase %s of %s is duplicated", rateCard.GetKey(), phase.PhaseKey, planRefName)
 			}
+
 			rcByKey[rateCard.GetKey()] = struct{}{}
 
 			createSubscriptionItemPlanInput := rateCard.ToCreateSubscriptionItemPlanInput()
@@ -1278,6 +1327,7 @@ func NewSpecFromPlan(p Plan, c CreateSubscriptionCustomerInput) (SubscriptionSpe
 			if phase.ItemsByKey[rateCard.GetKey()] == nil {
 				phase.ItemsByKey[rateCard.GetKey()] = make([]*SubscriptionItemSpec, 0)
 			}
+
 			phase.ItemsByKey[rateCard.GetKey()] = append(phase.ItemsByKey[rateCard.GetKey()], &itemSpec)
 		}
 

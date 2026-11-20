@@ -8,7 +8,10 @@ OPENMETER_ADDRESS ?= http://localhost:38888
 BENCHTIME ?= 20x
 # Number of times to repeat the whole benchmark (feed >1 into benchstat for variance).
 COUNT ?= 1
+export OPENMETER_E2E_EXPECTED_COMMIT_SHA ?= $(shell git rev-parse HEAD)
+export OPENMETER_E2E_EXPECTED_VERSION ?= v0.0.0-e2e
 OPENMETER_E2E_EXTRA_COMPOSE_FILES ?=
+OPENMETER_E2E_POSTGRES_URL ?= postgres://postgres:postgres@127.0.0.1:35432/postgres?sslmode=disable
 
 .PHONY: bench-entitlement-access
 bench-entitlement-access: ## Benchmark entitlement access query latency (1x1 baseline + 10/50/100 diagonal)
@@ -60,13 +63,20 @@ test-credits-disabled: ## Run e2e tests that require credits.enabled=false
 .PHONY: test-base
 test-base: ## Run the default e2e test package
 	$(call print-target)
+	$(MAKE) test-http-errors
 	TZ=UTC OPENMETER_ADDRESS=$(OPENMETER_ADDRESS) go test -count=1 -v ./
+
+.PHONY: test-http-errors
+test-http-errors: ## Run HTTP error handling scenarios with real HTTP, gRPC, and PostgreSQL connections
+	$(call print-target)
+	TZ=UTC OPENMETER_E2E_POSTGRES_URL='$(OPENMETER_E2E_POSTGRES_URL)' go test -race -count=1 -v ./httperrors
 
 .PHONY: wait-local
 wait-local:
 	$(call print-target)
 	curl --fail --retry 10 --retry-max-time 120 --retry-all-errors http://localhost:30000/healthz
 	curl --fail --retry 10 --retry-max-time 120 --retry-all-errors http://localhost:30001/healthz
+	curl --fail --retry 10 --retry-max-time 120 --retry-all-errors http://localhost:30001/healthz/subscriptions
 
 .PHONY: env-local-down
 env-local-down:

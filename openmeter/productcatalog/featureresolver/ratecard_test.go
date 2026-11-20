@@ -57,6 +57,7 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 
 		features = append(features, feat)
 	}
+
 	require.NotEmptyf(t, features, "list of Features must not be empty")
 	require.Lenf(t, features, len(meters), "list of Features must have the same length as the list of Meters")
 
@@ -77,10 +78,8 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 						Description: lo.ToPtr("RateCard 1"),
 						Metadata:    models.Metadata{"name": features[0].Name},
 						Feature:     productcatalog.NewFeatureReference(nil, lo.ToPtr(features[0].Key)),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
 						},
 						Price: productcatalog.NewPriceFrom(
 							productcatalog.FlatPrice{
@@ -102,10 +101,8 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 						Description: lo.ToPtr("RateCard 2"),
 						Metadata:    models.Metadata{"name": features[1].Name},
 						Feature:     productcatalog.NewFeatureReference(lo.ToPtr(features[1].ID), nil),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
 						},
 						Price: productcatalog.NewPriceFrom(
 							productcatalog.TieredPrice{
@@ -145,10 +142,8 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 						Description: lo.ToPtr("RateCard 3"),
 						Metadata:    models.Metadata{"name": features[2].Name},
 						Feature:     productcatalog.NewFeatureReference(nil, lo.ToPtr(features[2].Key)),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
 						},
 						Price: productcatalog.NewPriceFrom(
 							productcatalog.FlatPrice{
@@ -170,10 +165,8 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 						Description: lo.ToPtr("RateCard 4"),
 						Metadata:    models.Metadata{"name": "abracadabra"},
 						Feature:     productcatalog.NewFeatureReference(nil, lo.ToPtr("abracadabra")),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
 						},
 						Price: productcatalog.NewPriceFrom(
 							productcatalog.FlatPrice{
@@ -190,10 +183,8 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 						Description: lo.ToPtr("RateCard 4"),
 						Metadata:    models.Metadata{"name": "abracadabra-2"},
 						Feature:     productcatalog.NewFeatureReference(lo.ToPtr("abracadabra-2"), nil),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
 						},
 						Price: productcatalog.NewPriceFrom(
 							productcatalog.FlatPrice{
@@ -216,10 +207,8 @@ func Test_ResolveFeaturesForRateCards(t *testing.T) {
 						Description: lo.ToPtr("RateCard 4"),
 						Metadata:    models.Metadata{"name": features[0].Name},
 						Feature:     productcatalog.NewFeatureReference(lo.ToPtr(features[1].ID), lo.ToPtr(features[0].Key)),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							Behavior: lo.ToPtr(productcatalog.ExclusiveTaxBehavior),
 						},
 						Price: productcatalog.NewPriceFrom(
 							productcatalog.FlatPrice{

@@ -10,7 +10,6 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
 	"github.com/openmeterio/openmeter/pkg/convert"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -22,6 +21,7 @@ func MapDBSubscription(sub *db.Subscription) (subscription.Subscription, error) 
 	}
 
 	var ref *subscription.PlanRef
+	var planCurrency *currencies.CurrencyReference
 
 	if sub.Edges.Plan != nil {
 		ref = &subscription.PlanRef{
@@ -30,6 +30,10 @@ func MapDBSubscription(sub *db.Subscription) (subscription.Subscription, error) 
 			Version: sub.Edges.Plan.Version,
 		}
 		ref.Id = sub.Edges.Plan.ID
+		planCurrency = &currencies.CurrencyReference{
+			Code:             currencyx.Code(sub.Edges.Plan.CurrencyCode),
+			CustomCurrencyID: sub.Edges.Plan.CustomCurrencyID,
+		}
 	}
 
 	billingCadence, err := sub.BillingCadence.Parse()
@@ -50,6 +54,7 @@ func MapDBSubscription(sub *db.Subscription) (subscription.Subscription, error) 
 		if err != nil {
 			return subscription.Subscription{}, fmt.Errorf("mapping subscription cost basis pin: %w", err)
 		}
+
 		costBasisPins = append(costBasisPins, mapped)
 	}
 
@@ -75,6 +80,7 @@ func MapDBSubscription(sub *db.Subscription) (subscription.Subscription, error) 
 		Name:            sub.Name,
 		Description:     sub.Description,
 		CustomerId:      sub.CustomerID,
+		Currency:        planCurrency,
 		InvoiceCurrency: sub.InvoiceCurrency,
 		CostBasisMode:   subscription.CostBasisMode(sub.CostBasisMode),
 		CostBasisPins:   costBasisPins,
@@ -82,6 +88,7 @@ func MapDBSubscription(sub *db.Subscription) (subscription.Subscription, error) 
 		ProRatingConfig: sub.ProRatingConfig,
 		SettlementMode:  sub.SettlementMode,
 		BillingAnchor:   sub.BillingAnchor.UTC(),
+		BillingStartsAt: convert.SafeToUTC(sub.BillingStartsAt),
 	}, nil
 }
 
@@ -196,6 +203,7 @@ func MapDBSubscriptionItem(item *db.SubscriptionItem) (subscription.Subscription
 			if err != nil {
 				return subscription.SubscriptionItem{}, fmt.Errorf("invalid subscription item currency: %w", err)
 			}
+
 			if customCurrency.Namespace != item.Namespace {
 				return subscription.SubscriptionItem{}, fmt.Errorf(
 					"invalid subscription item currency: namespace mismatch [subscription_item.namespace=%s currency.namespace=%s currency.id=%s]",
@@ -220,7 +228,7 @@ func MapDBSubscriptionItem(item *db.SubscriptionItem) (subscription.Subscription
 		Description:         item.Description,
 		Feature:             productcatalog.NewFeatureReference(nil, item.FeatureKey),
 		EntitlementTemplate: item.EntitlementTemplate,
-		TaxConfig:           item.TaxConfig,
+		TaxConfig:           productcatalog.FromDBTaxColumns(item.TaxCodeID, item.TaxBehavior),
 		Price:               item.Price,
 		Discounts:           lo.FromPtr(item.Discounts),
 		UnitConfig:          item.UnitConfig,
@@ -228,19 +236,6 @@ func MapDBSubscriptionItem(item *db.SubscriptionItem) (subscription.Subscription
 		// NOTE: resolving feature is done on service level as there is no direct relationship between subscription items and features.
 		Currency: itemCurrency,
 	}
-
-	// Map TaxCode if eagerly loaded.
-	if taxCodeRow, err := item.Edges.TaxCodeOrErr(); err == nil {
-		tc, err := taxcodeadapter.MapTaxCodeFromEntity(taxCodeRow)
-		if err != nil {
-			return subscription.SubscriptionItem{}, fmt.Errorf("invalid tax code for subscription item %s: %w", item.ID, err)
-		}
-
-		rcMeta.TaxCode = &tc
-	}
-
-	// Backfill legacy TaxConfig fields from new normalized columns.
-	rcMeta.TaxConfig = productcatalog.BackfillTaxConfig(rcMeta.TaxConfig, item.TaxBehavior, rcMeta.TaxCode)
 
 	switch {
 	case item.Price == nil:
@@ -257,6 +252,7 @@ func MapDBSubscriptionItem(item *db.SubscriptionItem) (subscription.Subscription
 		if cadence == nil {
 			return subscription.SubscriptionItem{}, fmt.Errorf("billing cadence is required for usage based rate cards")
 		}
+
 		rc = &productcatalog.UsageBasedRateCard{
 			BillingCadence: *cadence,
 			RateCardMeta:   rcMeta,

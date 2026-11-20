@@ -18,13 +18,13 @@ import (
 	"github.com/openmeterio/openmeter/pkg/sortx"
 )
 
-func TestListGrantsBreaksSortTiesByID(t *testing.T) {
+func TestListGrantsMapsCustomerIDAndBreaksSortTiesByID(t *testing.T) {
 	// given:
 	// - grants of one entitlement that share the same effective time
 	// when:
 	// - they are listed one per page, sorted by effective time
 	// then:
-	// - every grant appears exactly once, with ties ordered by ID in the requested direction
+	// - every grant includes its customer and appears exactly once, with ties ordered by ID in the requested direction
 	testDB := testutils.InitPostgresDB(t, testutils.PostgresDBStateEntMigrated)
 	dbClient := testDB.EntDriver.Client()
 	t.Cleanup(func() {
@@ -66,6 +66,7 @@ func TestListGrantsBreaksSortTiesByID(t *testing.T) {
 		require.NoError(t, err)
 		ids = append(ids, g.ID)
 	}
+
 	slices.Sort(ids)
 
 	listPaged := func(t *testing.T, order sortx.Order) []string {
@@ -80,8 +81,11 @@ func TestListGrantsBreaksSortTiesByID(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Len(t, res.Items, 1)
+			require.NotNil(t, res.Items[0].CustomerID)
+			require.Equal(t, customer.ID, *res.Items[0].CustomerID)
 			listed = append(listed, res.Items[0].ID)
 		}
+
 		return listed
 	}
 

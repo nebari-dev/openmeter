@@ -8,8 +8,8 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
@@ -22,7 +22,7 @@ import (
 
 type (
 	CreateSubscriptionRequest  = plansubscription.CreateSubscriptionRequest
-	CreateSubscriptionResponse = api.BillingSubscription
+	CreateSubscriptionResponse = apiv3models.BillingSubscription
 	CreateSubscriptionHandler  = httptransport.Handler[CreateSubscriptionRequest, CreateSubscriptionResponse]
 )
 
@@ -31,7 +31,7 @@ func (h *handler) CreateSubscription() CreateSubscriptionHandler {
 	return httptransport.NewHandler(
 		func(ctx context.Context, r *http.Request) (plansubscription.CreateSubscriptionRequest, error) {
 			// Parse the request body
-			body := api.BillingSubscriptionCreate{}
+			body := apiv3models.BillingSubscriptionCreate{}
 			if err := request.ParseBody(r, &body); err != nil {
 				return CreateSubscriptionRequest{}, err
 			}
@@ -50,6 +50,7 @@ func (h *handler) CreateSubscription() CreateSubscriptionHandler {
 			// Validate that either customer ID or customer key is provided
 			if body.Customer.Id == nil && body.Customer.Key == nil {
 				reason := "one of customer.id or customer.key is required"
+
 				return CreateSubscriptionRequest{}, apierrors.NewBadRequestError(
 					ctx,
 					errors.New(reason),
@@ -88,6 +89,7 @@ func (h *handler) CreateSubscription() CreateSubscriptionHandler {
 				if err != nil {
 					return CreateSubscriptionRequest{}, err
 				}
+
 				planInput.FromInput(&customPlan)
 				subscriptionName = customPlan.Name
 			}
@@ -98,6 +100,7 @@ func (h *handler) CreateSubscription() CreateSubscriptionHandler {
 				if err != nil {
 					return CreateSubscriptionRequest{}, fmt.Errorf("failed to get plan: %w", err)
 				}
+
 				planInput.FromRef(&plansubscription.PlanRefInput{
 					Key:     planEntity.Key,
 					Version: &planEntity.Version,

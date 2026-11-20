@@ -11,9 +11,8 @@ import (
 
 type Adapter interface {
 	ProfileAdapter
-	CustomerOverrideAdapter
+	CustomerBillingProfileAdapter
 	InvoiceLineAdapter
-	InvoiceSplitLineGroupAdapter
 	InvoiceAdapter
 	GatheringInvoiceAdapter
 	StandardInvoiceAdapter
@@ -37,21 +36,17 @@ type ProfileAdapter interface {
 	GetUnpinnedCustomerIDsWithPaidSubscription(ctx context.Context, input GetUnpinnedCustomerIDsWithPaidSubscriptionInput) ([]customer.CustomerID, error)
 }
 
-type CustomerOverrideAdapter interface {
-	CreateCustomerOverride(ctx context.Context, input UpdateCustomerOverrideAdapterInput) (*CustomerOverride, error)
-	GetCustomerOverride(ctx context.Context, input GetCustomerOverrideAdapterInput) (*CustomerOverride, error)
-	UpdateCustomerOverride(ctx context.Context, input UpdateCustomerOverrideAdapterInput) (*CustomerOverride, error)
-	DeleteCustomerOverride(ctx context.Context, input DeleteCustomerOverrideInput) error
-	ListCustomerOverrides(ctx context.Context, input ListCustomerOverridesInput) (ListCustomerOverridesAdapterResult, error)
-
+type CustomerBillingProfileAdapter interface {
+	SetCustomerBillingProfile(ctx context.Context, input SetCustomerBillingProfileInput) (CustomerBillingProfileAdapterResult, error)
+	GetCustomerBillingProfile(ctx context.Context, input GetCustomerBillingProfileInput) (CustomerBillingProfileAdapterResult, error)
+	ClearCustomerBillingProfile(ctx context.Context, input ClearCustomerBillingProfileInput) error
+	ListCustomerBillingProfiles(ctx context.Context, input ListCustomerBillingProfilesInput) (ListCustomerBillingProfilesAdapterResult, error)
 	BulkAssignCustomersToProfile(ctx context.Context, input BulkAssignCustomersToProfileInput) error
-
-	GetCustomerOverrideReferencingProfile(ctx context.Context, input HasCustomerOverrideReferencingProfileAdapterInput) ([]customer.CustomerID, error)
+	GetCustomersReferencingProfile(ctx context.Context, input ProfileID) ([]customer.CustomerID, error)
 }
 
 type CustomerSynchronizationAdapter interface {
-	// UpsertCustomerOverride upserts a customer override ignoring the transactional context, the override
-	// will be empty.
+	// UpsertCustomerLock creates the customer synchronization row outside the transactional context.
 	UpsertCustomerLock(ctx context.Context, input UpsertCustomerLockAdapterInput) error
 	LockCustomerForUpdate(ctx context.Context, input LockCustomerForUpdateAdapterInput) error
 }
@@ -94,19 +89,11 @@ type GatheringInvoiceAdapter interface {
 	HardDeleteGatheringInvoiceLines(ctx context.Context, invoiceID InvoiceID, lineIDs []string) error
 }
 
-type InvoiceSplitLineGroupAdapter interface {
-	GetSplitLineGroupsForSubscription(ctx context.Context, input GetLinesForSubscriptionInput) ([]SplitLineHierarchy, error)
-	CreateSplitLineGroup(ctx context.Context, input CreateSplitLineGroupAdapterInput) (SplitLineGroup, error)
-	UpdateSplitLineGroup(ctx context.Context, input UpdateSplitLineGroupInput) (SplitLineGroup, error)
-	DeleteSplitLineGroup(ctx context.Context, input DeleteSplitLineGroupInput) error
-	GetSplitLineGroup(ctx context.Context, input GetSplitLineGroupInput) (SplitLineHierarchy, error)
-	GetSplitLineGroupHeaders(ctx context.Context, input GetSplitLineGroupHeadersInput) (SplitLineGroupHeaders, error)
-}
-
 type InvoiceAppAdapter interface {
 	UpdateInvoiceFields(ctx context.Context, input UpdateInvoiceFieldsInput) error
 }
 
+// TODO: Remove the schema-level adapter once all data migrations are complete.
 type SchemaLevelAdapter interface {
 	// GetInvoiceDefaultSchemaLevel returns the current default schema level for invoices.
 	GetInvoiceDefaultSchemaLevel(ctx context.Context) (int, error)

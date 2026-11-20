@@ -8,49 +8,61 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/creditpurchase"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/costbasis"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	currenciestestutils "github.com/openmeterio/openmeter/openmeter/currencies/testutils"
+	"github.com/openmeterio/openmeter/openmeter/ledger/customerbalance"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
 type staticCreditBalance struct {
-	settled alpacadecimal.Decimal
-	live    alpacadecimal.Decimal
-	pending alpacadecimal.Decimal
+	spendable alpacadecimal.Decimal
+	booked    alpacadecimal.Decimal
+	live      alpacadecimal.Decimal
+	pending   alpacadecimal.Decimal
 }
 
-func (b staticCreditBalance) Settled() alpacadecimal.Decimal { return b.settled }
-func (b staticCreditBalance) Live() alpacadecimal.Decimal    { return b.live }
-func (b staticCreditBalance) Pending() alpacadecimal.Decimal { return b.pending }
+var _ customerbalance.Balance = staticCreditBalance{}
+
+func (b staticCreditBalance) Booked() alpacadecimal.Decimal    { return b.booked }
+func (b staticCreditBalance) Spendable() alpacadecimal.Decimal { return b.spendable }
+func (b staticCreditBalance) Live() alpacadecimal.Decimal      { return b.live }
+func (b staticCreditBalance) Pending() alpacadecimal.Decimal   { return b.pending }
 
 func TestToAPICreditBalanceCustomCurrencyIdentity(t *testing.T) {
 	currency := currenciestestutils.NewCustomCurrency(t, "CREDITS", 2)
 
 	result := toAPICreditBalance(currency.Reference(), staticCreditBalance{
-		settled: alpacadecimal.NewFromInt(10),
-		live:    alpacadecimal.NewFromInt(8),
-		pending: alpacadecimal.NewFromInt(2),
+		booked:    alpacadecimal.NewFromInt(10),
+		spendable: alpacadecimal.NewFromInt(9),
+		live:      alpacadecimal.NewFromInt(8),
+		pending:   alpacadecimal.NewFromInt(2),
 	})
 
-	require.Equal(t, api.BillingCurrencyCode("CREDITS"), result.Currency)
-	require.Equal(t, &api.CurrencyCustomReference{Id: currency.ID}, result.CustomCurrency)
-	require.Equal(t, api.Numeric("10"), result.Settled)
-	require.Equal(t, api.Numeric("8"), result.Live)
-	require.Equal(t, api.Numeric("2"), result.Pending)
+	require.Equal(t, apiv3models.BillingCurrencyCode("CREDITS"), result.Currency)
+	require.Equal(t, &apiv3models.CurrencyCustomReference{Id: currency.ID}, result.CustomCurrency)
+	require.Equal(t, apiv3models.Numeric("10"), result.Booked)
+	require.Equal(t, result.Booked, result.Settled)
+	require.Equal(t, apiv3models.Numeric("9"), result.Spendable)
+	require.Equal(t, apiv3models.Numeric("8"), result.Live)
+	require.Equal(t, apiv3models.Numeric("2"), result.Pending)
 }
 
 func TestToAPICreditBalanceFiatOmitsCustomCurrencyIdentity(t *testing.T) {
-	result := toAPICreditBalance(currenciestestutils.NewFiatCurrency(t, "USD").Reference(), staticCreditBalance{})
+	result := toAPICreditBalance(currenciestestutils.NewFiatCurrency(t, "USD").Reference(), staticCreditBalance{
+		booked: alpacadecimal.NewFromInt(-3),
+	})
 
-	require.Equal(t, api.BillingCurrencyCode("USD"), result.Currency)
+	require.Equal(t, apiv3models.BillingCurrencyCode("USD"), result.Currency)
 	require.Nil(t, result.CustomCurrency)
+	require.Equal(t, apiv3models.Numeric("-3"), result.Booked)
+	require.Equal(t, result.Booked, result.Settled)
 }
 
 func TestToAPIBillingCreditGrantPromotional(t *testing.T) {
@@ -96,20 +108,33 @@ func TestToAPIBillingCreditGrantPromotional(t *testing.T) {
 
 	grant, err := toAPIBillingCreditGrant(charge)
 	require.NoError(t, err)
-	require.Equal(t, api.BillingCreditFundingMethodNone, grant.FundingMethod)
+	require.Equal(t, apiv3models.BillingCreditFundingMethodNone, grant.FundingMethod)
 	require.Nil(t, grant.Purchase)
+	require.Nil(t, grant.CustomCurrency)
 	require.Equal(t, "25", grant.Amount)
-	require.Equal(t, api.BillingCreditGrantStatusActive, grant.Status)
+	require.Equal(t, apiv3models.BillingCreditGrantStatusActive, grant.Status)
 	require.Nil(t, grant.VoidedAt)
-	require.Equal(t, &[]api.BillingValidationIssue{
+	require.Equal(t, &[]apiv3models.BillingValidationIssue{
 		{
-			Severity:   api.BillingValidationIssueSeverityWarning,
+			Severity:   apiv3models.BillingValidationIssueSeverityWarning,
 			Message:    "grant needs attention",
 			Code:       "grant_context",
 			Component:  lo.ToPtr("openmeter.creditgrant"),
 			Attributes: &map[string]any{"invoice": "invoice-1", "line": "line-1"},
 		},
 	}, grant.ValidationIssues)
+
+	t.Run("custom grant exposes its managed currency identity", func(t *testing.T) {
+		customCurrency := currenciestestutils.NewCustomCurrency(t, "TOKENS", 3)
+		customCharge := charge
+		customCharge.Intent.Currency = customCurrency
+
+		grant, err := toAPIBillingCreditGrant(customCharge)
+		require.NoError(t, err)
+		require.Equal(t, apiv3models.BillingCurrencyCode("TOKENS"), grant.Currency)
+		require.Equal(t, &apiv3models.CurrencyCustomReference{Id: customCurrency.ID}, grant.CustomCurrency)
+		require.Nil(t, grant.Purchase)
+	})
 
 	t.Run("ledger-derived voiding overrides the charge status", func(t *testing.T) {
 		voidedAt := now.Add(time.Hour)
@@ -119,7 +144,7 @@ func TestToAPIBillingCreditGrantPromotional(t *testing.T) {
 
 		grant, err := toAPIBillingCreditGrant(voidedCharge)
 		require.NoError(t, err)
-		require.Equal(t, api.BillingCreditGrantStatusVoided, grant.Status)
+		require.Equal(t, apiv3models.BillingCreditGrantStatusVoided, grant.Status)
 		require.Equal(t, lo.ToPtr(voidedAt), grant.VoidedAt)
 	})
 }
@@ -152,7 +177,7 @@ func TestToAPIBillingCreditGrantStatusUsesExpiry(t *testing.T) {
 
 		grant, err := toAPIBillingCreditGrant(expiredCharge)
 		require.NoError(t, err)
-		require.Equal(t, api.BillingCreditGrantStatusExpired, grant.Status)
+		require.Equal(t, apiv3models.BillingCreditGrantStatusExpired, grant.Status)
 	})
 
 	t.Run("expiry at now is public expired", func(t *testing.T) {
@@ -161,7 +186,7 @@ func TestToAPIBillingCreditGrantStatusUsesExpiry(t *testing.T) {
 
 		grant, err := toAPIBillingCreditGrant(expiredCharge)
 		require.NoError(t, err)
-		require.Equal(t, api.BillingCreditGrantStatusExpired, grant.Status)
+		require.Equal(t, apiv3models.BillingCreditGrantStatusExpired, grant.Status)
 	})
 
 	t.Run("future expiry stays active", func(t *testing.T) {
@@ -171,7 +196,7 @@ func TestToAPIBillingCreditGrantStatusUsesExpiry(t *testing.T) {
 
 		grant, err := toAPIBillingCreditGrant(activeCharge)
 		require.NoError(t, err)
-		require.Equal(t, api.BillingCreditGrantStatusActive, grant.Status)
+		require.Equal(t, apiv3models.BillingCreditGrantStatusActive, grant.Status)
 	})
 
 	t.Run("voided wins over expired", func(t *testing.T) {
@@ -183,7 +208,7 @@ func TestToAPIBillingCreditGrantStatusUsesExpiry(t *testing.T) {
 
 		grant, err := toAPIBillingCreditGrant(voidedCharge)
 		require.NoError(t, err)
-		require.Equal(t, api.BillingCreditGrantStatusVoided, grant.Status)
+		require.Equal(t, apiv3models.BillingCreditGrantStatusVoided, grant.Status)
 	})
 }
 
@@ -236,12 +261,12 @@ func TestToAPIBillingCreditGrantKey(t *testing.T) {
 }
 
 func TestFromAPICreateChargeCostBasis(t *testing.T) {
-	usd := api.CurrencyCode("USD")
+	usd := apiv3models.CurrencyCode("USD")
 
-	manual := func(fiatCurrency *api.CurrencyCode) *api.CreateChargeCostBasis {
-		var out api.CreateChargeCostBasis
-		require.NoError(t, out.FromCreateChargeCostBasisManual(api.CreateChargeCostBasisManual{
-			Type:         api.CreateChargeCostBasisManualTypeManual,
+	manual := func(fiatCurrency *apiv3models.CurrencyCode) *apiv3models.CreateChargeCostBasis {
+		var out apiv3models.CreateChargeCostBasis
+		require.NoError(t, out.FromCreateChargeCostBasisManual(apiv3models.CreateChargeCostBasisManual{
+			Type:         apiv3models.CreateChargeCostBasisManualTypeManual,
 			FiatCurrency: fiatCurrency,
 			Rate:         "0.5",
 		}))
@@ -280,9 +305,9 @@ func TestFromAPICreateChargeCostBasis(t *testing.T) {
 	})
 
 	t.Run("dynamic keeps the intent", func(t *testing.T) {
-		var in api.CreateChargeCostBasis
-		require.NoError(t, in.FromCreateChargeCostBasisDynamic(api.CreateChargeCostBasisDynamic{
-			Type:         api.CreateChargeCostBasisDynamicTypeDynamic,
+		var in apiv3models.CreateChargeCostBasis
+		require.NoError(t, in.FromCreateChargeCostBasisDynamic(apiv3models.CreateChargeCostBasisDynamic{
+			Type:         apiv3models.CreateChargeCostBasisDynamicTypeDynamic,
 			FiatCurrency: usd,
 		}))
 
@@ -292,9 +317,9 @@ func TestFromAPICreateChargeCostBasis(t *testing.T) {
 	})
 
 	t.Run("invalid rate", func(t *testing.T) {
-		var in api.CreateChargeCostBasis
-		require.NoError(t, in.FromCreateChargeCostBasisManual(api.CreateChargeCostBasisManual{
-			Type: api.CreateChargeCostBasisManualTypeManual,
+		var in apiv3models.CreateChargeCostBasis
+		require.NoError(t, in.FromCreateChargeCostBasisManual(apiv3models.CreateChargeCostBasisManual{
+			Type: apiv3models.CreateChargeCostBasisManualTypeManual,
 			Rate: "not-a-number",
 		}))
 
@@ -337,10 +362,12 @@ func TestToAPICreditGrantPurchase(t *testing.T) {
 		rate := alpacadecimal.NewFromFloat(0.5)
 		charge := newCharge(currenciestestutils.NewFiatCurrency(t, "USD"), creditpurchase.NewCostBasis(creditpurchase.FiatCostBasis{Rate: rate}), rate)
 
-		purchase, err := toAPICreditGrantPurchase(charge)
+		grant, err := toAPIBillingCreditGrant(charge)
 		require.NoError(t, err)
+		require.Nil(t, grant.CustomCurrency)
+		purchase := grant.Purchase
 		require.NotNil(t, purchase)
-		require.Equal(t, api.CurrencyCode("USD"), purchase.Currency)
+		require.Equal(t, apiv3models.CurrencyCode("USD"), purchase.Currency)
 		require.Equal(t, lo.ToPtr("50"), purchase.Amount)
 		require.Equal(t, lo.ToPtr("0.5"), purchase.PerUnitCostBasis)
 		require.NotNil(t, purchase.ResolvedCostBasis)
@@ -355,47 +382,50 @@ func TestToAPICreditGrantPurchase(t *testing.T) {
 			rate,
 		)
 
-		purchase, err := toAPICreditGrantPurchase(charge)
+		grant, err := toAPIBillingCreditGrant(charge)
 		require.NoError(t, err)
+		require.Equal(t, &apiv3models.CurrencyCustomReference{Id: charge.Intent.Currency.ID}, grant.CustomCurrency)
+		purchase := grant.Purchase
 		require.NotNil(t, purchase)
-		require.Equal(t, api.CurrencyCode("USD"), purchase.Currency)
+		require.Equal(t, apiv3models.CurrencyCode("USD"), purchase.Currency)
 		require.Equal(t, lo.ToPtr("25"), purchase.Amount)
 		require.Nil(t, purchase.PerUnitCostBasis)
 		require.NotNil(t, purchase.ResolvedCostBasis)
-		require.Equal(t, api.CurrencyCode("USD"), purchase.ResolvedCostBasis.FiatCurrency)
+		require.Equal(t, apiv3models.CurrencyCode("USD"), purchase.ResolvedCostBasis.FiatCurrency)
 		require.Equal(t, "0.25", purchase.ResolvedCostBasis.Rate)
 	})
 }
 
 func TestCreditGrantPlanFilterMapping(t *testing.T) {
-	for _, version := range []*api.CreateVersionFilter{
-		nil, {Eq: lo.ToPtr(int32(2))}, {In: lo.ToPtr([]int32{2, 3})}, {Gte: lo.ToPtr(int32(2))}, {Lte: lo.ToPtr(int32(3))},
+	for _, version := range []*apiv3models.CreateVersionFilter{
+		nil, {Eq: lo.ToPtr(int32(2))}, {Oeq: lo.ToPtr([]int32{2, 3})}, {Gte: lo.ToPtr(int32(2))}, {Lte: lo.ToPtr(int32(3))},
 	} {
-		filters, err := fromAPIBillingCreditGrantFilters(&api.CreateCreditGrantFilters{
-			Features: lo.ToPtr([]api.ResourceKey{"api-calls"}),
-			Plans:    lo.ToPtr([]api.CreateCreditGrantPlanFilter{{Key: "pro", Version: version}}),
+		filters, err := fromAPIBillingCreditGrantFilters(&apiv3models.CreateCreditGrantFilters{
+			Features: lo.ToPtr([]apiv3models.ResourceKey{"api-calls"}),
+			Plans:    lo.ToPtr([]apiv3models.CreateCreditGrantPlanFilter{{Key: "pro", Version: version}}),
 		})
 		require.NoError(t, err)
 		require.NoError(t, filters.Validate())
 		mapped := toAPIBillingCreditGrantFilters(*filters)
-		require.Equal(t, []api.ResourceKey{"api-calls"}, *mapped.Features)
+		require.Equal(t, []apiv3models.ResourceKey{"api-calls"}, *mapped.Features)
 		require.Len(t, *mapped.Plans, 1)
-		require.Equal(t, api.ResourceKey("pro"), (*mapped.Plans)[0].Key)
+		require.Equal(t, apiv3models.ResourceKey("pro"), (*mapped.Plans)[0].Key)
 		if version == nil {
 			require.Nil(t, (*mapped.Plans)[0].Version)
 		} else {
 			actual := (*mapped.Plans)[0].Version
 			require.Equal(t, version.Eq, actual.Eq)
-			require.Equal(t, version.In, actual.In)
+			require.Equal(t, version.Oeq, actual.Oeq)
 			require.Equal(t, version.Gte, actual.Gte)
 			require.Equal(t, version.Lte, actual.Lte)
 		}
 	}
-	for _, version := range []*api.CreateVersionFilter{
-		{}, {In: lo.ToPtr([]int32{})}, {Eq: lo.ToPtr(int32(0))}, {In: lo.ToPtr([]int32{-1})}, {Eq: lo.ToPtr(int32(2)), Gte: lo.ToPtr(int32(1))},
+
+	for _, version := range []*apiv3models.CreateVersionFilter{
+		{}, {Oeq: lo.ToPtr([]int32{})}, {Eq: lo.ToPtr(int32(0))}, {Oeq: lo.ToPtr([]int32{-1})}, {Eq: lo.ToPtr(int32(2)), Gte: lo.ToPtr(int32(1))},
 	} {
-		filters, err := fromAPIBillingCreditGrantFilters(&api.CreateCreditGrantFilters{
-			Plans: lo.ToPtr([]api.CreateCreditGrantPlanFilter{{Key: "pro", Version: version}}),
+		filters, err := fromAPIBillingCreditGrantFilters(&apiv3models.CreateCreditGrantFilters{
+			Plans: lo.ToPtr([]apiv3models.CreateCreditGrantPlanFilter{{Key: "pro", Version: version}}),
 		})
 		require.NoError(t, err)
 		require.Error(t, filters.Validate())

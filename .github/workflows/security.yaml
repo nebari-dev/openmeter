@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: Kong/public-shared-actions/security-actions/secret-scan@eb651af2c2f7ed987a3a8176d0ac32172e1d50e4 # 1.1.1
+      - uses: Kong/public-shared-actions/security-actions/secret-scan@98b3fa71ae25e87d9b07e7022ea13b5bf70fc17d # 1.1.1
         name: Running Secret Scan using Trufflehog
         with:
           fail_on_findings: "true"
@@ -45,7 +45,7 @@ jobs:
     name: Repository Scan
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
       - name: Scan Repository
         id: sca_repo
-        uses: Kong/public-shared-actions/security-actions/sca@eb651af2c2f7ed987a3a8176d0ac32172e1d50e4 # 6.0.0
+        uses: Kong/public-shared-actions/security-actions/sca@98b3fa71ae25e87d9b07e7022ea13b5bf70fc17d # 6.0.0
         with:
           asset_prefix: openmeter-cloud
           dir: "."
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
       - name: Scan GitHub Workflows
         id: scan_gh_workflows
-        uses: Kong/public-shared-actions/security-actions/scan-gh-workflows@eb651af2c2f7ed987a3a8176d0ac32172e1d50e4 # 5.0.2
+        uses: Kong/public-shared-actions/security-actions/scan-gh-workflows@98b3fa71ae25e87d9b07e7022ea13b5bf70fc17d # 5.0.2
         with:
           fail_on_findings: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}

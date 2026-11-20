@@ -10,8 +10,8 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	chargeshandler "github.com/openmeterio/openmeter/api/v3/handlers/customers/charges"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
@@ -27,18 +27,18 @@ import (
 // Decoding through a minimal struct keeps the assertions anchored to the raw
 // JSON contract (snake_case field names) rather than to SDK conveniences.
 type wireCharge struct {
-	ID            string                         `json:"id"`
-	Type          string                         `json:"type"`
-	Status        string                         `json:"status"`
-	ServicePeriod api.ClosedPeriod               `json:"service_period"`
-	Realizations  []api.BillingChargeRealization `json:"realizations"`
-	Usage         *string                        `json:"usage"`
+	ID            string                                 `json:"id"`
+	Type          string                                 `json:"type"`
+	Status        string                                 `json:"status"`
+	ServicePeriod apiv3models.ClosedPeriod               `json:"service_period"`
+	Realizations  []apiv3models.BillingChargeRealization `json:"realizations"`
+	Usage         *string                                `json:"usage"`
 }
 
 // mustListChargeWireOverHTTP serves a real list-customer-charges request through
 // the production v3 HTTP handler (router mounting mirrors
 // api/v3/server/routes.go) and returns the single charge owned by the customer.
-func (s *CreditThenInvoiceTestSuite) mustListChargeWireOverHTTP(ns string, customerID string, expands ...api.BillingChargesExpand) wireCharge {
+func (s *CreditThenInvoiceTestSuite) mustListChargeWireOverHTTP(ns string, customerID string, expands ...apiv3models.BillingChargesExpand) wireCharge {
 	s.T().Helper()
 
 	handler := chargeshandler.New(
@@ -50,7 +50,7 @@ func (s *CreditThenInvoiceTestSuite) mustListChargeWireOverHTTP(ns string, custo
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v3/customers/"+customerID+"/charges", nil)
 
-	params := api.ListCustomerChargesParams{}
+	params := apiv3models.ListCustomerChargesParams{}
 	if len(expands) > 0 {
 		params.Expand = &expands
 	}
@@ -75,14 +75,13 @@ func (s *CreditThenInvoiceTestSuite) mustListChargeWireOverHTTP(ns string, custo
 	return envelope.Data[0]
 }
 
-func (s *CreditThenInvoiceTestSuite) requireWireRealization(realization api.BillingChargeRealization, realizationType api.BillingChargeRealizationType, servicePeriod timeutil.ClosedPeriod, usage string) {
+func (s *CreditThenInvoiceTestSuite) requireWireRealization(realization apiv3models.BillingChargeRealization, realizationType apiv3models.BillingChargeRealizationType, servicePeriod timeutil.ClosedPeriod, usage *string) {
 	s.T().Helper()
 
 	s.Equal(realizationType, realization.Type)
 	s.True(servicePeriod.From.Equal(realization.ServicePeriod.From), "service_period.from: want %v, got %v", servicePeriod.From, realization.ServicePeriod.From)
 	s.True(servicePeriod.To.Equal(realization.ServicePeriod.To), "service_period.to: want %v, got %v", servicePeriod.To, realization.ServicePeriod.To)
-	s.Require().NotNil(realization.Usage, "usage-based realizations always carry a usage field")
-	s.Equal(usage, *realization.Usage)
+	s.Equal(usage, realization.Usage)
 }
 
 // TestUsageBasedRealizationsWireShapeAcrossLifecycle drives a single
@@ -96,7 +95,7 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedRealizationsWireShapeAcrossLi
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credits-usagebased-api-realizations-wire")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -178,11 +177,11 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedRealizationsWireShapeAcrossLi
 
 		wire := s.mustListChargeWireOverHTTP(ns, cust.ID)
 		s.Equal(usageBasedChargeID.ID, wire.ID)
-		s.Equal(string(api.BillingChargeUsageBasedTypeUsageBased), wire.Type)
-		s.Equal(string(api.BillingChargeStatusCreated), wire.Status)
+		s.Equal(string(apiv3models.BillingChargeUsageBasedTypeUsageBased), wire.Type)
+		s.Equal(string(apiv3models.BillingChargeStatusCreated), wire.Status)
 
 		s.Require().Len(wire.Realizations, 1)
-		s.requireWireRealization(wire.Realizations[0], api.BillingChargeRealizationTypeOutstanding, servicePeriod, "0")
+		s.requireWireRealization(wire.Realizations[0], apiv3models.BillingChargeRealizationTypeOutstanding, servicePeriod, nil)
 		s.Nil(wire.Realizations[0].Id)
 		s.Nil(wire.Realizations[0].LineId)
 		s.Nil(wire.Realizations[0].Invoice)
@@ -221,17 +220,17 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedRealizationsWireShapeAcrossLi
 		s.RequireChargeStatus(usageBasedChargeID, usagebased.StatusActive)
 
 		wire := s.mustListChargeWireOverHTTP(ns, cust.ID)
-		s.Equal(string(api.BillingChargeStatusActive), wire.Status)
+		s.Equal(string(apiv3models.BillingChargeStatusActive), wire.Status)
 
 		s.Require().Len(wire.Realizations, 2)
 
-		s.requireWireRealization(wire.Realizations[0], api.BillingChargeRealizationTypeVoided, servicePeriod, "5")
+		s.requireWireRealization(wire.Realizations[0], apiv3models.BillingChargeRealizationTypeVoided, servicePeriod, lo.ToPtr("5"))
 		s.Equal(lo.ToPtr(voidedRunID), wire.Realizations[0].Id, "the voided run keeps its identity on the wire")
 
-		s.requireWireRealization(wire.Realizations[1], api.BillingChargeRealizationTypeOutstanding, timeutil.ClosedPeriod{
+		s.requireWireRealization(wire.Realizations[1], apiv3models.BillingChargeRealizationTypeOutstanding, timeutil.ClosedPeriod{
 			From: servicePeriod.From,
 			To:   firstExtendedTo,
-		}, "0")
+		}, nil)
 		s.Nil(wire.Realizations[1].Id)
 	})
 
@@ -270,17 +269,17 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedRealizationsWireShapeAcrossLi
 		s.RequireChargeStatus(usageBasedChargeID, usagebased.StatusFinal)
 
 		wire := s.mustListChargeWireOverHTTP(ns, cust.ID)
-		s.Equal(string(api.BillingChargeStatusFinal), wire.Status)
+		s.Equal(string(apiv3models.BillingChargeStatusFinal), wire.Status)
 
 		s.Require().Len(wire.Realizations, 2)
 
-		s.requireWireRealization(wire.Realizations[0], api.BillingChargeRealizationTypeVoided, servicePeriod, "5")
+		s.requireWireRealization(wire.Realizations[0], apiv3models.BillingChargeRealizationTypeVoided, servicePeriod, lo.ToPtr("5"))
 		s.Equal(lo.ToPtr(voidedRunID), wire.Realizations[0].Id)
 
-		s.requireWireRealization(wire.Realizations[1], api.BillingChargeRealizationTypeFinalRealization, timeutil.ClosedPeriod{
+		s.requireWireRealization(wire.Realizations[1], apiv3models.BillingChargeRealizationTypeFinalRealization, timeutil.ClosedPeriod{
 			From: servicePeriod.From,
 			To:   firstExtendedTo,
-		}, "8")
+		}, lo.ToPtr("8"))
 		s.Require().NotNil(wire.Realizations[1].Id)
 		partialRunID = *wire.Realizations[1].Id
 		s.NotEqual(voidedRunID, partialRunID, "the voided run must not resurface as the booked run")
@@ -303,23 +302,28 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedRealizationsWireShapeAcrossLi
 		s.RequireChargeStatus(usageBasedChargeID, usagebased.StatusActive)
 
 		wire := s.mustListChargeWireOverHTTP(ns, cust.ID)
-		s.Equal(string(api.BillingChargeStatusActive), wire.Status)
+		s.Equal(string(apiv3models.BillingChargeStatusActive), wire.Status)
 
 		s.Require().Len(wire.Realizations, 3)
 
-		s.requireWireRealization(wire.Realizations[0], api.BillingChargeRealizationTypeVoided, servicePeriod, "5")
+		s.requireWireRealization(wire.Realizations[0], apiv3models.BillingChargeRealizationTypeVoided, servicePeriod, lo.ToPtr("5"))
 
-		s.requireWireRealization(wire.Realizations[1], api.BillingChargeRealizationTypePartialInvoice, timeutil.ClosedPeriod{
+		s.requireWireRealization(wire.Realizations[1], apiv3models.BillingChargeRealizationTypePartialInvoice, timeutil.ClosedPeriod{
 			From: servicePeriod.From,
 			To:   firstExtendedTo,
-		}, "8")
+		}, lo.ToPtr("8"))
 		s.Equal(lo.ToPtr(partialRunID), wire.Realizations[1].Id, "reclassification must keep the run identity")
 
-		s.requireWireRealization(wire.Realizations[2], api.BillingChargeRealizationTypeOutstanding, timeutil.ClosedPeriod{
+		s.requireWireRealization(wire.Realizations[2], apiv3models.BillingChargeRealizationTypeOutstanding, timeutil.ClosedPeriod{
 			From: firstExtendedTo,
 			To:   secondExtendedTo,
-		}, "0")
+		}, nil)
 		s.Nil(wire.Realizations[2].Id)
+
+		// All eight units are already booked, so a live read reports a measured zero.
+		live := s.mustListChargeWireOverHTTP(ns, cust.ID, apiv3models.BillingChargesExpandRealTimeUsage)
+		s.Require().Len(live.Realizations, 3)
+		s.Equal(lo.ToPtr("0"), live.Realizations[2].Usage)
 	})
 
 	s.Run("when the tail is invoiced, the wire carries partial and final runs with per-run usage", func() {
@@ -355,44 +359,44 @@ func (s *CreditThenInvoiceTestSuite) TestUsageBasedRealizationsWireShapeAcrossLi
 		s.RequireChargeStatus(usageBasedChargeID, usagebased.StatusFinal)
 
 		wire := s.mustListChargeWireOverHTTP(ns, cust.ID)
-		s.Equal(string(api.BillingChargeStatusFinal), wire.Status)
+		s.Equal(string(apiv3models.BillingChargeStatusFinal), wire.Status)
 
 		s.Require().Len(wire.Realizations, 3)
 
-		s.requireWireRealization(wire.Realizations[0], api.BillingChargeRealizationTypeVoided, servicePeriod, "5")
+		s.requireWireRealization(wire.Realizations[0], apiv3models.BillingChargeRealizationTypeVoided, servicePeriod, lo.ToPtr("5"))
 
-		s.requireWireRealization(wire.Realizations[1], api.BillingChargeRealizationTypePartialInvoice, timeutil.ClosedPeriod{
+		s.requireWireRealization(wire.Realizations[1], apiv3models.BillingChargeRealizationTypePartialInvoice, timeutil.ClosedPeriod{
 			From: servicePeriod.From,
 			To:   firstExtendedTo,
-		}, "8")
+		}, lo.ToPtr("8"))
 		s.Equal(lo.ToPtr(partialRunID), wire.Realizations[1].Id)
 
-		s.requireWireRealization(wire.Realizations[2], api.BillingChargeRealizationTypeFinalRealization, timeutil.ClosedPeriod{
+		s.requireWireRealization(wire.Realizations[2], apiv3models.BillingChargeRealizationTypeFinalRealization, timeutil.ClosedPeriod{
 			From: firstExtendedTo,
 			To:   secondExtendedTo,
-		}, "2")
+		}, lo.ToPtr("2"))
 		s.Require().NotNil(wire.Realizations[2].Id)
 		s.NotEqual(partialRunID, *wire.Realizations[2].Id)
 		s.NotEqual(voidedRunID, *wire.Realizations[2].Id)
 	})
 
-	s.Run("expands hydrate invoice headers and the live usage on the wire", func() {
+	s.Run("expands hydrate invoice headers and skip the live usage of a final charge", func() {
 		// given:
 		// - the finalized charge carries a voided run plus two booked runs, each
 		//   realized into an approved invoice
 		// when:
 		// - the wire is read with the realization.invoice and real_time_usage expands
 		// then:
-		// - the charge-level usage reports the live cumulative read (5+3+2)
+		// - the charge-level usage stays empty: a final charge is fully booked,
+		//   so real_time_usage skips the live read
 		// - every booked realization embeds the invoice header of its booked
 		//   line: the invoice entity without its lines
 		wire := s.mustListChargeWireOverHTTP(ns, cust.ID,
-			api.BillingChargesExpandRealizationInvoice,
-			api.BillingChargesExpandRealTimeUsage,
+			apiv3models.BillingChargesExpandRealizationInvoice,
+			apiv3models.BillingChargesExpandRealTimeUsage,
 		)
 
-		s.Require().NotNil(wire.Usage, "real_time_usage fills the charge-level usage")
-		s.Equal("10", *wire.Usage)
+		s.Nil(wire.Usage, "real_time_usage skips final charges")
 
 		s.Require().Len(wire.Realizations, 3)
 		for _, idx := range []int{1, 2} {

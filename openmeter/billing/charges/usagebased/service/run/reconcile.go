@@ -10,6 +10,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/creditreconciliation"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
 	usagebasedrating "github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased/service/rating"
+	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -126,7 +127,7 @@ func (s *Service) ReconcileRatedRun(
 		noFiatTransactionRequired = fiatOverage.Amount.IsZero()
 	}
 
-	run.Totals = runTotals
+	run.Totals = totals.DeltaTotals{Totals: runTotals}
 	detailedLines := in.Rating.DetailedLines
 	detailedLinesIncludeCreditAllocations := settlementMode == productcatalog.CreditThenInvoiceSettlementMode
 	if detailedLinesIncludeCreditAllocations {
@@ -149,6 +150,7 @@ func (s *Service) ReconcileRatedRun(
 	}); err != nil {
 		return ReconcileRatedRunResult{}, fmt.Errorf("upsert run detailed lines: %w", err)
 	}
+
 	run.DetailedLines = mo.Some(detailedLines)
 	run.DetailedLinesIncludeCreditAllocations = detailedLinesIncludeCreditAllocations
 
@@ -156,7 +158,7 @@ func (s *Service) ReconcileRatedRun(
 		ID:                        run.ID,
 		StoredAtLT:                mo.Some(run.StoredAtLT),
 		MeteredQuantity:           mo.Some(in.Rating.Quantity),
-		Totals:                    mo.Some(runTotals),
+		Totals:                    mo.Some(totals.DeltaTotals{Totals: runTotals}),
 		NoFiatTransactionRequired: mo.Some(noFiatTransactionRequired),
 	})
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
+	"github.com/openmeterio/openmeter/openmeter/billing/models/externalid"
 	"github.com/openmeterio/openmeter/openmeter/billing/models/stddetailedline"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
@@ -93,6 +94,7 @@ func TestStandardInvoiceLinesReplaceExact(t *testing.T) {
 	newLine := func(id string) *StandardLine {
 		line := validStandardLineForValidation()
 		line.ID = id
+
 		return &line
 	}
 
@@ -125,6 +127,7 @@ func TestStandardInvoiceLinesReplaceExactRejectsInvalidReplacement(t *testing.T)
 	newLine := func(id string) *StandardLine {
 		line := validStandardLineForValidation()
 		line.ID = id
+
 		return &line
 	}
 
@@ -151,6 +154,7 @@ func TestStandardInvoiceLinesReplaceExactRejectsInvalidReplacement(t *testing.T)
 				Replacement: StandardLines{func() *StandardLine {
 					line := newLine("line-1")
 					line.UsageBased = nil
+
 					return line
 				}()},
 			},
@@ -203,4 +207,45 @@ func TestStandardInvoiceLinesReplaceExactRejectsInvalidReplacement(t *testing.T)
 			require.ErrorContains(t, err, tt.errorContains)
 		})
 	}
+}
+
+func TestStandardInvoiceClearInvoicingAppReferences(t *testing.T) {
+	stripeReference := externalid.LineExternalIDs{Invoicing: "il_123"}
+
+	// given: an invoice with invoicing references on every level
+	invoice := StandardInvoice{
+		StandardInvoiceBase: StandardInvoiceBase{
+			ExternalIDs: externalid.InvoiceExternalIDs{Invoicing: "in_123", Payment: "pi_123"},
+		},
+		Lines: NewStandardInvoiceLines(StandardLines{
+			{
+				StandardLineBase: StandardLineBase{ExternalIDs: stripeReference},
+				Discounts: StandardLineDiscounts{
+					Usage: UsageLineDiscountsManaged{
+						{UsageLineDiscount: UsageLineDiscount{LineDiscountBase: LineDiscountBase{ExternalIDs: stripeReference}}},
+					},
+				},
+				DetailedLines: DetailedLines{
+					{
+						DetailedLineBase: DetailedLineBase{Base: stddetailedline.Base{ExternalIDs: stripeReference}},
+						AmountDiscounts: AmountLineDiscountsManaged{
+							{AmountLineDiscount: AmountLineDiscount{LineDiscountBase: LineDiscountBase{ExternalIDs: stripeReference}}},
+						},
+					},
+				},
+			},
+		}),
+	}
+
+	// when: the invoicing app references are cleared
+	invoice.ClearInvoicingAppReferences()
+
+	// then: only the invoicing references are gone, on every level
+	require.Equal(t, externalid.InvoiceExternalIDs{Payment: "pi_123"}, invoice.ExternalIDs)
+
+	line := invoice.Lines.OrEmpty()[0]
+	require.Empty(t, line.ExternalIDs.Invoicing)
+	require.Empty(t, line.Discounts.Usage[0].ExternalIDs.Invoicing)
+	require.Empty(t, line.DetailedLines[0].ExternalIDs.Invoicing)
+	require.Empty(t, line.DetailedLines[0].AmountDiscounts[0].ExternalIDs.Invoicing)
 }

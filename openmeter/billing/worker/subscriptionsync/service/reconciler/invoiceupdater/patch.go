@@ -10,6 +10,7 @@ import (
 	"github.com/samber/mo"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
@@ -110,28 +111,6 @@ func (p PatchLineUpdate) Apply(line billing.GenericInvoiceLine) (billing.Generic
 		return nil, fmt.Errorf("cloning line: %w", err)
 	}
 
-	if line.AsInvoiceLine().Type() == billing.InvoiceLineTypeGathering {
-		existingGatheringLine, err := line.AsInvoiceLine().AsGatheringLine()
-		if err != nil {
-			return nil, fmt.Errorf("converting existing line to gathering line: %w", err)
-		}
-
-		if existingGatheringLine.SplitLineHierarchy != nil {
-			hierarchy, err := existingGatheringLine.SplitLineHierarchy.Clone()
-			if err != nil {
-				return nil, fmt.Errorf("cloning split line hierarchy: %w", err)
-			}
-
-			updatedGatheringLine, err := updatedLine.AsInvoiceLine().AsGatheringLine()
-			if err != nil {
-				return nil, fmt.Errorf("converting updated line to gathering line: %w", err)
-			}
-
-			updatedGatheringLine.SplitLineHierarchy = &hierarchy
-			updatedLine = updatedGatheringLine.AsGenericLine()
-		}
-	}
-
 	if period, ok := p.ServicePeriod.Get(); ok {
 		updatedLine.UpdateServicePeriod(func(current *timeutil.ClosedPeriod) {
 			*current = period
@@ -165,7 +144,7 @@ type PatchSplitLineGroupDelete struct {
 }
 
 type PatchSplitLineGroupUpdate struct {
-	TargetState billing.SplitLineGroupUpdate
+	TargetState splitlinegroup.SplitLineGroupUpdate
 }
 
 type Patch struct {
@@ -255,7 +234,7 @@ func NewDeleteSplitLineGroupPatch(groupID models.NamespacedID) Patch {
 	}
 }
 
-func NewUpdateSplitLineGroupPatch(group billing.SplitLineGroupUpdate) Patch {
+func NewUpdateSplitLineGroupPatch(group splitlinegroup.SplitLineGroupUpdate) Patch {
 	return Patch{
 		op: PatchOpSplitLineGroupUpdate,
 		updateSplitLineGroupPatch: PatchSplitLineGroupUpdate{

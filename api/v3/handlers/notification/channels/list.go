@@ -7,9 +7,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/notification"
@@ -20,8 +20,8 @@ import (
 
 type (
 	ListNotificationChannelsRequest  = notification.ListChannelsInput
-	ListNotificationChannelsResponse = response.PagePaginationResponse[api.NotificationChannel]
-	ListNotificationChannelsParams   = api.ListNotificationChannelsParams
+	ListNotificationChannelsResponse = response.PagePaginationResponse[apiv3models.BillingNotificationChannel]
+	ListNotificationChannelsParams   = apiv3models.ListBillingNotificationChannelsParams
 	ListNotificationChannelsHandler  = httptransport.HandlerWithArgs[ListNotificationChannelsRequest, ListNotificationChannelsResponse, ListNotificationChannelsParams]
 )
 
@@ -72,6 +72,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 				if err != nil {
 					return ListNotificationChannelsRequest{}, err
 				}
+
 				req.OrderBy = orderBy
 				req.Order = sort.Order.ToSortxOrder()
 			}
@@ -83,6 +84,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 						{Field: "filter[id]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.ID = id
 
 				name, err := filters.FromAPIFilterString(params.Filter.Name)
@@ -91,6 +93,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 						{Field: "filter[name]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Name = name
 
 				typeFilter, err := filters.FromAPIFilterStringExact(params.Filter.Type)
@@ -99,14 +102,15 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 						{Field: "filter[type]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
-				// Translate the wire-format type value(s) ("webhook") into the
-				// domain/DB value ("WEBHOOK") before this reaches the adapter.
+
+				// Reject unsupported channel types before querying the adapter.
 				typeFilter, err = mapAPIChannelTypeFilter(typeFilter)
 				if err != nil {
 					return ListNotificationChannelsRequest{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
 						{Field: "filter[type]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Type = typeFilter
 
 				disabled, err := filters.FromAPIFilterBoolean(params.Filter.Disabled)
@@ -115,6 +119,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 						{Field: "filter[disabled]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Disabled = disabled
 
 				createdAt, err := filters.FromAPIFilterDateTime(params.Filter.CreatedAt)
@@ -123,6 +128,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 						{Field: "filter[created_at]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.CreatedAt = createdAt
 
 				updatedAt, err := filters.FromAPIFilterDateTime(params.Filter.UpdatedAt)
@@ -131,6 +137,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 						{Field: "filter[updated_at]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.UpdatedAt = updatedAt
 			}
 
@@ -142,12 +149,13 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 				return ListNotificationChannelsResponse{}, fmt.Errorf("failed to list notification channels: %w", err)
 			}
 
-			items := make([]api.NotificationChannel, 0, len(result.Items))
+			items := make([]apiv3models.BillingNotificationChannel, 0, len(result.Items))
 			for _, item := range result.Items {
 				apiChannel, err := ToAPIChannel(item)
 				if err != nil {
 					return ListNotificationChannelsResponse{}, err
 				}
+
 				items = append(items, apiChannel)
 			}
 
@@ -160,7 +168,7 @@ func (h *handler) ListNotificationChannels() ListNotificationChannelsHandler {
 		commonhttp.JSONResponseEncoderWithStatus[ListNotificationChannelsResponse](http.StatusOK),
 		httptransport.AppendOptions(
 			h.options,
-			httptransport.WithOperationName("list-notification-channels"),
+			httptransport.WithOperationName("list-billing-notification-channels"),
 			httptransport.WithErrorEncoder(apierrors.GenericErrorEncoder()),
 			httptransport.WithErrorEncoder(errorEncoder()),
 		)...,

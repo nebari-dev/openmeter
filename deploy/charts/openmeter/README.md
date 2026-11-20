@@ -50,16 +50,13 @@ See [values.example.yaml](values.example.yaml) for more details.
 
 ## Running OpenMeter in production
 
-This Helm chart comes with a default setups for Kafka, ClickHouse, Postgres, Redis and Svix.
+This Helm chart comes with a default setups for Kafka, ClickHouse, Postgres and Redis.
 
 **It is highly recommended to use your own dependencies in production.**
 
 You can disable installing the above dependencies to bring your own:
 
 ```yaml
-svix:
-  enabled: false
-
 redis:
   enabled: false
 
@@ -93,9 +90,60 @@ config:
       autoMigrate: migration
 
     svix:
-      apiKey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdml4LXNlcnZlciIsInN1YiI6Im9yZ18yM3JiOFlkR3FNVDBxSXpwZ0d3ZFhmSGlyTXUiLCJleHAiOjE4OTM0NTYwMDAsIm5iZiI6MTcwNDA2NzIwMCwiaWF0IjoxNzIzNTUzMTQ0fQ.JVOFgHymisTD-Zw_p03qD4iUXXXw-VwABda2Q3f1wfs
+      apiKey: SVIX_JWT
       serverURL: http://127.0.0.1:8071/
       debug: true
+```
+
+## Notifications with a bundled Svix server
+
+Webhook notifications need a [Svix](https://github.com/svix/svix-webhooks) server. The chart can install one for development, but it is disabled by default because it needs a secret pair you generate:
+
+```yaml
+svix:
+  enabled: true
+  signingSecret: SVIX_JWT_SECRET
+  signedJwt: SVIX_JWT
+```
+
+Generate the token with `SVIX_JWT_SECRET=<signingSecret> svix-server jwt generate`.
+
+## Per-component scheduling and resources
+
+Each OpenMeter component reads its own `resources`, `nodeSelector`, `tolerations`, and `affinity` values. A component value replaces the equivalent chart-wide value. If you do not set a component value, the chart-wide value applies.
+
+The components are `api`, `balanceWorker`, `notificationService`, `sinkWorker`, `billingWorker`, `svix`, `jobs.subscriptionSync`, `jobs.billingCollectInvoices`, and `jobs.billingAdvanceInvoices`.
+
+```yaml
+# Chart-wide default for every component.
+nodeSelector:
+  workload: openmeter
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# The sink worker needs more memory and a dedicated node pool.
+sinkWorker:
+  nodeSelector:
+    workload: openmeter-sink
+  tolerations:
+    - key: openmeter-sink
+      operator: Exists
+      effect: NoSchedule
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+
+# The cron jobs run on spot nodes.
+jobs:
+  billingCollectInvoices:
+    nodeSelector:
+      workload: openmeter-batch
 ```
 
 ## Values
@@ -114,8 +162,8 @@ config:
 | serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | podAnnotations | object | `{}` | Annotations to be added to pods. |
 | podLabels | object | `{}` | Labels to be added to pods. |
-| podSecurityContext | object | `{}` | Pod [security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod). See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#security-context) for details. |
-| securityContext | object | `{}` | Container [security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-container). See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#security-context-1) for details. |
+| podSecurityContext | object | `{"fsGroup":10001}` | Pod [security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod). See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#security-context) for details. |
+| securityContext | object | `{}` | Container [security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-container). See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#security-context-1) for details. OpenMeter containers default to runAsNonRoot, disable privilege escalation, and drop all capabilities. |
 | service.type | string | `"ClusterIP"` | Kubernetes [service type](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types). |
 | service.port | int | `80` | Service port. |
 | ingress.enabled | bool | `false` | Enable [ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/). |
@@ -130,6 +178,10 @@ config:
 | config | object | `{}` | OpenMeter configuration |
 | init | object | `{"busybox":{"tag":"1.37.0"}}` | Defines parameters for the InitContainers |
 | kafka.enabled | bool | `true` | Specifies whether Kafka (using the [Bitnami Kafka](oci://registry-1.docker.io/bitnamicharts)) should be installed. **Not recommended for production environments.** |
+| kafka.image.repository | string | `"bitnamilegacy/kafka"` |  |
+| kafka.externalAccess.autoDiscovery.image.repository | string | `"bitnamilegacy/kubectl"` |  |
+| kafka.volumePermissions.image.repository | string | `"bitnamilegacy/os-shell"` |  |
+| kafka.metrics.jmx.image.repository | string | `"bitnamilegacy/jmx-exporter"` |  |
 | kafka.listeners.client.name | string | `"plain"` |  |
 | kafka.listeners.client.containerPort | int | `9092` |  |
 | kafka.listeners.client.protocol | string | `"PLAINTEXT"` |  |
@@ -140,9 +192,9 @@ config:
 | kafka.listeners.controller.sslClientAuth | string | `""` |  |
 | clickhouse.enabled | bool | `true` | Specifies whether Clickhouse (using the [Clickhouse Operator](https://github.com/Altinity/clickhouse-operator)) should be installed. **Not recommended for production environments.** |
 | clickhouse.operator.install | bool | `true` | Specifies whether [Clickhouse Operator](https://github.com/Altinity/clickhouse-operator) should be installed. **Not recommended for production environments.** |
-| svix.enabled | bool | `true` |  |
-| svix.signingSecret | string | `"CeRc6WK8KjzRXrKkd9YFnSWcNyqLSIY8JwiaCeRc6WK4UkM"` | Specifies the JWT secret SVIX uses for authentication. For details, [see](https://github.com/svix/svix-webhooks?tab=readme-ov-file#authentication). **It is recommended to change this before deployment.** |
-| svix.signedJwt | string | `"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdml4LXNlcnZlciIsImlhdCI6MTczMDk4NzU0MywiZXhwIjoyMjM1OTA5MDAwLCJhdWQiOiIiLCJzdWIiOiJvcmdfMjNyYjhZZEdxTVQwcUl6cGdHd2RYZkhpck11In0.J90SzVuNwecyCtWAQlOoWplJaK4rnIb3rCWXrHQPqJY"` | Specifies the JWT OpenMeter uses to authenticate with Svix. This is an example Token intended for development purposes. You should create your own using the instructions in [svix documentation](https://github.com/svix/svix-webhooks?tab=readme-ov-file#authentication). |
+| svix.enabled | bool | `false` | Install a self-hosted Svix server. Requires `signingSecret` and `signedJwt`. **Not recommended for production environments.** |
+| svix.signingSecret | string | `""` | JWT secret the Svix server uses to verify API tokens. Required when `enabled` is true. For details, [see](https://github.com/svix/svix-webhooks?tab=readme-ov-file#authentication). |
+| svix.signedJwt | string | `""` | JWT OpenMeter uses to authenticate with Svix, signed with `signingSecret`. Required when `enabled` is true. Generate one with `svix-server jwt generate` (run with `SVIX_JWT_SECRET` set to `signingSecret`). |
 | svix.database | object | `{"dsn":""}` | External database configuration for Svix |
 | svix.database.dsn | string | `""` | External PostgreSQL DSN for Svix. If not provided, uses internal PostgreSQL. |
 | svix.redis | object | `{"dsn":""}` | External Redis configuration for Svix |
@@ -150,18 +202,69 @@ config:
 | svix.replicaCount | int | `1` | Number of replicas (pods) to launch. |
 | svix.image.repository | string | `"docker.io/svix/svix-server"` | Name of the image repository to pull the container image from. |
 | svix.image.pullPolicy | string | `"IfNotPresent"` | [Image pull policy](https://kubernetes.io/docs/concepts/containers/images/#updating-images) for updating already existing images on a node. |
-| svix.image.tag | string | `"v1.37"` | Image tag to use |
+| svix.image.tag | string | `"v1.105.0"` | Image tag to use |
 | svix.service.type | string | `"ClusterIP"` | Kubernetes [service type](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types). |
 | svix.service.port | int | `80` | Service port. |
-| svix.resources | object | No requests or limits. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/). See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#resources) for details. |
+| svix.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the Svix component. See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#resources) for details. |
+| svix.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the Svix component. |
+| svix.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the Svix component. |
+| svix.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the Svix component. |
 | redis.enabled | bool | `true` | Specifies whether Redis (using the [Bitnami Redis](oci://registry-1.docker.io/bitnamicharts/redis) chart) should be installed. **Not recommended for production environments.** All further values can be configured in the `redis` section. |
 | redis.auth.enabled | bool | `false` |  |
 | redis.nameOverride | string | `"redis"` |  |
-| postgresql.enabled | bool | `true` | Specifies whether Postgres (using the [Bitnami Chart](https://github.com/bitnami/charts/tree/main/bitnami/postgresql) should be installed. **Not recommended for production environments.** All further values can be configured in the `postgres` section. |
+| redis.image.repository | string | `"bitnamilegacy/redis"` |  |
+| redis.sentinel.image.repository | string | `"bitnamilegacy/redis-sentinel"` |  |
+| redis.metrics.image.repository | string | `"bitnamilegacy/redis-exporter"` |  |
+| redis.volumePermissions.image.repository | string | `"bitnamilegacy/os-shell"` |  |
+| redis.sysctl.image.repository | string | `"bitnamilegacy/os-shell"` |  |
+| redis.kubectl.image.repository | string | `"bitnamilegacy/kubectl"` |  |
+| postgresql.enabled | bool | `true` | Specifies whether Postgres (using the [Bitnami Chart](https://github.com/bitnami/charts/tree/main/bitnami/postgresql) should be installed. **Not recommended for production environments.** All further values can be configured in the `postgresql` section. |
 | postgresql.nameOverride | string | `"postgres"` |  |
+| postgresql.image.repository | string | `"bitnamilegacy/postgresql"` |  |
+| postgresql.volumePermissions.image.repository | string | `"bitnamilegacy/os-shell"` |  |
+| postgresql.metrics.image.repository | string | `"bitnamilegacy/postgres-exporter"` |  |
 | postgresql.primary.initdb.scripts."setup.sql" | string | `"CREATE USER application WITH PASSWORD 'application';\nCREATE DATABASE application;\nGRANT ALL PRIVILEGES ON DATABASE application TO application;\nALTER DATABASE application OWNER TO application;\nCREATE USER svix WITH PASSWORD 'svix';\nCREATE DATABASE svix;\nGRANT ALL PRIVILEGES ON DATABASE svix TO svix;\nALTER DATABASE svix OWNER TO svix;\n"` |  |
 | api.replicaCount | int | `1` | Number of API replicas (pods) to launch. |
+| api.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the API. |
+| api.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the API. |
+| api.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the API. |
+| api.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the API. |
 | balanceWorker.replicaCount | int | `1` | Number of Balance Worker replicas (pods) to launch. |
+| balanceWorker.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the Balance Worker. |
+| balanceWorker.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the Balance Worker. |
+| balanceWorker.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the Balance Worker. |
+| balanceWorker.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the Balance Worker. |
 | notificationService.replicaCount | int | `1` | Number of Notification Service replicas (pods) to launch. |
+| notificationService.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the Notification Service. |
+| notificationService.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the Notification Service. |
+| notificationService.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the Notification Service. |
+| notificationService.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the Notification Service. |
 | sinkWorker.replicaCount | int | `1` | Number of Sink Worker replicas (pods) to launch. |
-| caRootCertificates | object | `{}` | List of CA Root certificates to inject into pods at runtime. See [values.yaml](values.yaml) |
+| sinkWorker.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the Sink Worker. |
+| sinkWorker.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the Sink Worker. |
+| sinkWorker.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the Sink Worker. |
+| sinkWorker.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the Sink Worker. |
+| billingWorker.replicaCount | int | `1` | Number of Billing Worker replicas (pods) to launch. |
+| billingWorker.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the Billing Worker. |
+| billingWorker.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the Billing Worker. |
+| billingWorker.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the Billing Worker. |
+| billingWorker.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the Billing Worker. |
+| caRootCertificates | object | `{}` | PEM root certificates to add to the image trust bundle at pod startup. See [values.yaml](values.yaml) |
+| jobs.subscriptionSync | object | `{"affinity":{},"nodeSelector":{},"resources":{},"schedule":"0 * * * *","tolerations":[]}` | Subscription sync job is a backup reconciler to make sure that all subscriptions are properly billed even if there is some kind of issue with the billing worker. |
+| jobs.subscriptionSync.schedule | string | `"0 * * * *"` | Schedule for the subscription sync job. Default is every hour. |
+| jobs.subscriptionSync.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the subscription sync job. |
+| jobs.subscriptionSync.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the subscription sync job. |
+| jobs.subscriptionSync.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the subscription sync job. |
+| jobs.subscriptionSync.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the subscription sync job. |
+| jobs.billingCollectInvoices | object | `{"affinity":{},"nodeSelector":{},"resources":{},"schedule":"*/5 * * * *","tolerations":[]}` | Collect invoices job creates invoices based on gathering invoices. The job is only used for the second invoice and up. The first invoice is issued as part of the subscription start job immediately. |
+| jobs.billingCollectInvoices.schedule | string | `"*/5 * * * *"` | Schedule for the collect invoices job. Default is every five minutes. |
+| jobs.billingCollectInvoices.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the collect invoices job. |
+| jobs.billingCollectInvoices.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the collect invoices job. |
+| jobs.billingCollectInvoices.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the collect invoices job. |
+| jobs.billingCollectInvoices.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the collect invoices job. |
+| jobs.billingAdvanceInvoices | object | `{"affinity":{},"nodeSelector":{},"resources":{},"schedule":"*/5 * * * *","tolerations":[]}` | Advance invoices job advances automatic approval invoices. |
+| jobs.billingAdvanceInvoices.schedule | string | `"*/5 * * * *"` | Schedule for the advance invoices job. Default is every five minutes. |
+| jobs.billingAdvanceInvoices.resources | object | The chart-wide `resources` value. | Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for the advance invoices job. |
+| jobs.billingAdvanceInvoices.nodeSelector | object | The chart-wide `nodeSelector` value. | [Node selector](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector) for the advance invoices job. |
+| jobs.billingAdvanceInvoices.tolerations | list | The chart-wide `tolerations` value. | [Tolerations](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) for the advance invoices job. |
+| jobs.billingAdvanceInvoices.affinity | object | The chart-wide `affinity` value. | [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) for the advance invoices job. |

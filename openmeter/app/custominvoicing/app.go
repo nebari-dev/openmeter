@@ -100,6 +100,10 @@ func (a appOperations) UpdateAppConfig(ctx context.Context, input app.AppConfigU
 	})
 }
 
+func (a appOperations) ExecuteAction(ctx context.Context, input app.ExecuteAppActionInput) error {
+	return app.NewAppActionUnsupportedError(a.GetID(), input.Type)
+}
+
 func (a App) GetEventAppData() (app.EventAppData, error) {
 	return app.NewEventAppData(a.Configuration)
 }
@@ -151,6 +155,11 @@ func (a appOperations) FinalizeStandardInvoice(ctx context.Context, invoice bill
 // DeleteStandardInvoice is a no-op as this should happen via the notifications webhook
 func (a appOperations) DeleteStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) error {
 	return nil
+}
+
+// WouldStandardInvoiceBeEmpty never omits: the external system decides what to do with an empty invoice.
+func (a appOperations) WouldStandardInvoiceBeEmpty(billing.StandardInvoice) (bool, error) {
+	return false, nil
 }
 
 // InvoicingAppAsyncSyncer

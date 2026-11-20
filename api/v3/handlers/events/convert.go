@@ -10,8 +10,8 @@ import (
 	"github.com/oapi-codegen/nullable"
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/meterevent"
 	"github.com/openmeterio/openmeter/openmeter/streaming"
@@ -22,26 +22,27 @@ import (
 const cloudEventsSpecVersion = "1.0"
 
 // toAPIMeteringIngestedEvent converts a meterevent.Event to its API wire form.
-func toAPIMeteringIngestedEvent(e meterevent.Event) (api.MeteringIngestedEvent, error) {
-	event := api.MeteringEvent{
+func toAPIMeteringIngestedEvent(e meterevent.Event) (apiv3models.MeteringIngestedEvent, error) {
+	event := apiv3models.MeteringEvent{
 		Id:          e.ID,
 		Source:      e.Source,
 		Specversion: cloudEventsSpecVersion,
 		Subject:     e.Subject,
 		Type:        e.Type,
-		Time:        nullable.NewNullableWithValue[api.DateTime](e.Time),
+		Time:        nullable.NewNullableWithValue[apiv3models.DateTime](e.Time),
 	}
 
 	if e.Data != "" {
 		var data map[string]any
 		if err := json.Unmarshal([]byte(e.Data), &data); err != nil {
-			return api.MeteringIngestedEvent{}, fmt.Errorf("parse event data as json: %w", err)
+			return apiv3models.MeteringIngestedEvent{}, fmt.Errorf("parse event data as json: %w", err)
 		}
+
 		event.Data = nullable.NewNullableWithValue(data)
-		event.Datacontenttype = nullable.NewNullableWithValue[api.MeteringEventDatacontenttype](api.MeteringEventDatacontenttype("application/json"))
+		event.Datacontenttype = nullable.NewNullableWithValue[apiv3models.MeteringEventDatacontenttype](apiv3models.MeteringEventDatacontenttype("application/json"))
 	}
 
-	return api.MeteringIngestedEvent{
+	return apiv3models.MeteringIngestedEvent{
 		Event:            event,
 		Customer:         toAPICustomerReference(e.CustomerID),
 		IngestedAt:       e.IngestedAt,
@@ -50,24 +51,25 @@ func toAPIMeteringIngestedEvent(e meterevent.Event) (api.MeteringIngestedEvent, 
 	}, nil
 }
 
-func toAPICustomerReference(id *string) *api.CustomerReference {
+func toAPICustomerReference(id *string) *apiv3models.CustomerReference {
 	if id == nil || *id == "" {
 		return nil
 	}
-	return &api.CustomerReference{Id: *id}
+
+	return &apiv3models.CustomerReference{Id: *id}
 }
 
-func toAPIMeteringIngestedEventValidationErrors(errs []error) *[]api.MeteringIngestedEventValidationError {
+func toAPIMeteringIngestedEventValidationErrors(errs []error) *[]apiv3models.MeteringIngestedEventValidationError {
 	if len(errs) == 0 {
 		return nil
 	}
 
-	result := lo.FilterMap(errs, func(err error, _ int) (api.MeteringIngestedEventValidationError, bool) {
+	result := lo.FilterMap(errs, func(err error, _ int) (apiv3models.MeteringIngestedEventValidationError, bool) {
 		if err == nil {
-			return api.MeteringIngestedEventValidationError{}, false
+			return apiv3models.MeteringIngestedEventValidationError{}, false
 		}
 
-		return api.MeteringIngestedEventValidationError{
+		return apiv3models.MeteringIngestedEventValidationError{
 			Code:    "validation_error",
 			Message: err.Error(),
 		}, true
@@ -84,13 +86,14 @@ func toAPIMeteringIngestedEventValidationErrors(errs []error) *[]api.MeteringIng
 // rejecting every operator that the underlying service cannot evaluate. Only
 // `eq` and `oeq` are supported because ListEventsV2Params requires a concrete
 // IN set.
-func fromAPICustomerIDFilter(ctx context.Context, f *api.ULIDFieldFilter) (*filter.FilterString, error) {
+func fromAPICustomerIDFilter(ctx context.Context, f *apiv3models.ULIDFieldFilter) (*filter.FilterString, error) {
 	if f == nil {
 		return nil, nil
 	}
 
 	if f.Neq != nil {
 		err := errors.New("only eq and oeq operators are supported")
+
 		return nil, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
 			{
 				Field:  "filter[customer_id]",
@@ -104,6 +107,7 @@ func fromAPICustomerIDFilter(ctx context.Context, f *api.ULIDFieldFilter) (*filt
 	if f.Eq != nil {
 		values = append(values, *f.Eq)
 	}
+
 	if len(f.Oeq) > 0 {
 		values = append(values, f.Oeq...)
 	}
@@ -131,7 +135,7 @@ func FromAPIEventSortField(ctx context.Context, field string) (streaming.EventSo
 }
 
 // fromAPIEventSort resolves the public sort query into a backend sort field and direction.
-func fromAPIEventSort(ctx context.Context, sort *api.SortQuery) (streaming.EventSortField, sortx.Order, error) {
+func fromAPIEventSort(ctx context.Context, sort *apiv3models.SortQuery) (streaming.EventSortField, sortx.Order, error) {
 	if lo.FromPtr(sort) == "" {
 		return "", "", nil
 	}

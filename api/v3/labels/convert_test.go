@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
@@ -36,7 +36,7 @@ var (
 func TestToMetadataAnnotations(t *testing.T) {
 	tests := []struct {
 		name            string
-		labels          *api.Labels
+		labels          *apiv3models.Labels
 		wantMetadata    models.Metadata
 		wantAnnotations models.Annotations
 		wantErr         bool
@@ -49,13 +49,13 @@ func TestToMetadataAnnotations(t *testing.T) {
 		},
 		{
 			name:            "empty labels",
-			labels:          &api.Labels{},
+			labels:          &apiv3models.Labels{},
 			wantMetadata:    nil,
 			wantAnnotations: nil,
 		},
 		{
 			name: "metadata only",
-			labels: &api.Labels{
+			labels: &apiv3models.Labels{
 				"env":  "production",
 				"team": "platform",
 			},
@@ -67,7 +67,7 @@ func TestToMetadataAnnotations(t *testing.T) {
 		},
 		{
 			name: "reserved openmeter prefix is rejected",
-			labels: &api.Labels{
+			labels: &apiv3models.Labels{
 				"openmeter_region": "us-east-1",
 				"openmeter_tier":   "standard",
 			},
@@ -77,7 +77,7 @@ func TestToMetadataAnnotations(t *testing.T) {
 		},
 		{
 			name: "mixed metadata and reserved prefix",
-			labels: &api.Labels{
+			labels: &apiv3models.Labels{
 				"env":              "production",
 				"openmeter_region": "us-east-1",
 			},
@@ -89,7 +89,7 @@ func TestToMetadataAnnotations(t *testing.T) {
 		},
 		{
 			name: "reserved prefix label is rejected",
-			labels: &api.Labels{
+			labels: &apiv3models.Labels{
 				"openmeter_key": "value",
 			},
 			wantMetadata:    nil,
@@ -106,6 +106,7 @@ func TestToMetadataAnnotations(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+
 			assert.Equal(t, tt.wantMetadata, result.Metadata)
 			assert.Equal(t, tt.wantAnnotations, result.Annotations)
 		})
@@ -117,19 +118,19 @@ func TestFromMetadataAnnotations(t *testing.T) {
 		name        string
 		metadata    models.Metadata
 		annotations models.Annotations
-		wantLabels  *api.Labels
+		wantLabels  *apiv3models.Labels
 	}{
 		{
 			name:        "nil inputs",
 			metadata:    nil,
 			annotations: nil,
-			wantLabels:  &api.Labels{},
+			wantLabels:  &apiv3models.Labels{},
 		},
 		{
 			name:        "empty inputs",
 			metadata:    models.Metadata{},
 			annotations: models.Annotations{},
-			wantLabels:  &api.Labels{},
+			wantLabels:  &apiv3models.Labels{},
 		},
 		{
 			name: "metadata only",
@@ -138,7 +139,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 				"team": "platform",
 			},
 			annotations: nil,
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"env":  "production",
 				"team": "platform",
 			},
@@ -149,7 +150,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 			annotations: models.Annotations{
 				"region": "us-east-1",
 			},
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"openmeter_region": "us-east-1",
 			},
 		},
@@ -159,7 +160,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 			annotations: models.Annotations{
 				"openmeter_region": "us-east-1",
 			},
-			wantLabels: &api.Labels{},
+			wantLabels: &apiv3models.Labels{},
 		},
 		{
 			name:     "annotation stringer value",
@@ -167,7 +168,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 			annotations: models.Annotations{
 				"tier": stringerValue{"standard"},
 			},
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"openmeter_tier": "standard",
 			},
 		},
@@ -177,7 +178,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 			annotations: models.Annotations{
 				"tier": textMarshalerValue{"enterprise"},
 			},
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"openmeter_tier": "enterprise",
 			},
 		},
@@ -187,7 +188,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 			annotations: models.Annotations{
 				"tier": failingTextMarshaler{},
 			},
-			wantLabels: &api.Labels{},
+			wantLabels: &apiv3models.Labels{},
 		},
 		{
 			name: "invalid metadata key is skipped",
@@ -196,7 +197,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 				"valid":    "value",
 			},
 			annotations: nil,
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"valid": "value",
 			},
 		},
@@ -207,7 +208,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 				"_invalid": "value",
 				"valid":    "ok",
 			},
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"openmeter_valid": "ok",
 			},
 		},
@@ -219,7 +220,7 @@ func TestFromMetadataAnnotations(t *testing.T) {
 			annotations: models.Annotations{
 				"region": "us-east-1",
 			},
-			wantLabels: &api.Labels{
+			wantLabels: &apiv3models.Labels{
 				"env":              "production",
 				"openmeter_region": "us-east-1",
 			},

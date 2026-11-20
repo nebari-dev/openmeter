@@ -15,7 +15,6 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
 	"github.com/openmeterio/openmeter/openmeter/billing/sequence"
 	"github.com/openmeterio/openmeter/openmeter/billing/service/invoicecalc"
-	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/cmpx"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
@@ -59,7 +58,7 @@ func (s *Service) InvoicePendingLines(ctx context.Context, input billing.Invoice
 		}
 	}
 
-	return transactionForInvoiceManipulation(
+	invoices, err := transactionForInvoiceManipulation(
 		ctx,
 		s,
 		input.Customer,
@@ -96,6 +95,17 @@ func (s *Service) InvoicePendingLines(ctx context.Context, input billing.Invoice
 			return createdInvoices, nil
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Gates record why a charge is blocked. Finish their transaction before
+	// reporting a fully gated collection, so those reasons remain available.
+	if len(invoices) == 0 {
+		return nil, billing.ValidationError{Err: billing.ErrInvoiceCreateAllLinesGated}
+	}
+
+	return invoices, nil
 }
 
 func (s *Service) prepareBillableLines(ctx context.Context, input billing.PrepareBillableLinesInput, options billing.InvoicePendingLinesOptions) (*billing.PrepareBillableLinesResult, error) {
@@ -117,9 +127,9 @@ func (s *Service) prepareBillableLines(ctx context.Context, input billing.Prepar
 		input.Customer,
 		func(ctx context.Context) (*billing.PrepareBillableLinesResult, error) {
 			// let's resolve the customer's settings
-			customerProfile, err := s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+			customerProfile, err := s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 				Customer: input.Customer,
-				Expand: billing.CustomerOverrideExpand{
+				Expand: billing.CustomerBillingProfileExpand{
 					Customer: true,
 					Apps:     true,
 				},
@@ -130,12 +140,12 @@ func (s *Service) prepareBillableLines(ctx context.Context, input billing.Prepar
 
 			asOf := lo.FromPtrOr(input.AsOf, clock.Now())
 
-			progressiveBilling := customerProfile.MergedProfile.WorkflowConfig.Invoicing.ProgressiveBilling
+			progressiveBilling := customerProfile.EffectiveProfile.WorkflowConfig.Invoicing.ProgressiveBilling
 			if options.PartialInvoiceLinesEnabled != nil {
 				progressiveBilling = *options.PartialInvoiceLinesEnabled
 			}
 
-			asOf, err = resolvePendingLineCollectionCutoff(options, customerProfile.MergedProfile.WorkflowConfig.Collection, asOf)
+			asOf, err = resolvePendingLineCollectionCutoff(options, customerProfile.EffectiveProfile.WorkflowConfig.Collection, asOf)
 			if err != nil {
 				return nil, fmt.Errorf("resolving collection asOf: %w", err)
 			}
@@ -252,6 +262,7 @@ func (s *Service) prepareBillableLines(ctx context.Context, input billing.Prepar
 					if systemErr != nil {
 						return nil, fmt.Errorf("checking selected gathering line billability: %w", systemErr)
 					}
+
 					billabilityValidationIssues = selectedValidationIssues
 				}
 
@@ -367,6 +378,7 @@ func (s *Service) gatherInScopeLines(ctx context.Context, in gatherInScopeLineIn
 		if systemErr != nil {
 			return gatherInScopeLinesResult{}, fmt.Errorf("checking gathering line billability: %w", systemErr)
 		}
+
 		if len(validationIssues) > 0 {
 			res.ValidationIssuesByCurrency[currency] = validationIssues
 			s.logger.WarnContext(
@@ -376,6 +388,7 @@ func (s *Service) gatherInScopeLines(ctx context.Context, in gatherInScopeLineIn
 				"error", err,
 			)
 		}
+
 		linesWithResolvedPeriods := lo.Map(billabilityResults, func(result gatheringLineBillabilityResult, index int) gatheringLineWithBillablePeriod {
 			if !result.Billable {
 				return gatheringLineWithBillablePeriod{
@@ -406,7 +419,6 @@ func (s *Service) gatherInScopeLines(ctx context.Context, in gatherInScopeLineIn
 	// but only if all the requested lines are billable.
 	if in.LinesToInclude.IsPresent() {
 		// Step 1: Let's validate that all the requested lines are billable.
-
 		nonBillableLineIDs := make([]string, 0, len(billableLineIDs))
 		for _, lineID := range in.LinesToInclude.OrEmpty() {
 			if _, ok := billableLineIDs[lineID]; !ok {
@@ -657,6 +669,7 @@ func (s *Service) prepareLinesToBill(ctx context.Context, input prepareLinesToBi
 					"original_period_start", currentLine.ServicePeriod.From,
 					"original_period_end", currentLine.ServicePeriod.To,
 					"split_at", line.BillablePeriod.To)
+
 				continue
 			}
 
@@ -714,9 +727,9 @@ func (s *Service) CreateStandardInvoiceFromGatheringLines(ctx context.Context, i
 		return nil, fmt.Errorf("validating gathering lines: %w", err)
 	}
 
-	profile, err := s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+	profile, err := s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 		Customer: in.Customer,
-		Expand: billing.CustomerOverrideExpand{
+		Expand: billing.CustomerBillingProfileExpand{
 			Customer: true,
 			Apps:     true,
 		},
@@ -738,15 +751,11 @@ func (s *Service) CreateStandardInvoiceFromGatheringLines(ctx context.Context, i
 		return nil, fmt.Errorf("generating invoice number: %w", err)
 	}
 
-	if err := productcatalog.ResolveTaxConfig(ctx, s.taxCodeService, in.Customer.Namespace, profile.MergedProfile.WorkflowConfig.Invoicing.DefaultTaxConfig); err != nil {
-		return nil, fmt.Errorf("resolving default tax code: %w", err)
-	}
-
 	// let's create the invoice
 	invoice, err := s.adapter.CreateInvoice(ctx, billing.CreateInvoiceAdapterInput{
 		Namespace: in.Customer.Namespace,
 		Customer:  lo.FromPtr(profile.Customer),
-		Profile:   profile.MergedProfile,
+		Profile:   profile.EffectiveProfile,
 
 		Currency:    in.Currency,
 		Number:      invoiceNumber,
@@ -760,11 +769,12 @@ func (s *Service) CreateStandardInvoiceFromGatheringLines(ctx context.Context, i
 	}
 
 	// let's set the workflow apps as some checks such as CanDraftSyncAdvance depends on the apps
-	invoice.Workflow.Apps = profile.MergedProfile.Apps
+	invoice.Workflow.Apps = profile.EffectiveProfile.Apps
 	validationIssues, err := in.ValidationIssues.Clone()
 	if err != nil {
 		return nil, fmt.Errorf("cloning validation issues: %w", err)
 	}
+
 	invoice.ValidationIssues = append(invoice.ValidationIssues, validationIssues...)
 
 	linesWithEngines, err := s.lineEngines.groupGatheringLinesByEngine(in.Lines)
@@ -848,8 +858,7 @@ func (s *Service) CreateStandardInvoiceFromGatheringLines(ctx context.Context, i
 		}
 	}
 
-	// Prerequisite: we should have the split line group headers expanded so that snapshotting can determine if the preLine
-	// queries are needed.
+	// The legacy engine has already snapshotted quantities using split line group context.
 	// Let's persist the snapshotted values to the database as the state machine always reloads the invoice from the database to make
 	// sure we don't have any manual modifications inside the invoice structure.
 	invoice, err = s.updateInvoice(ctx, invoice)
@@ -878,18 +887,6 @@ func (s *Service) CreateStandardInvoiceFromGatheringLines(ctx context.Context, i
 			// Let's activate the state machine so that the created state's calculation is triggered
 			if err := sm.StateMachine.ActivateCtx(ctx); err != nil {
 				return fmt.Errorf("activating invoice state machine: %w", err)
-			}
-
-			if in.PostCreationCalculationHook != nil {
-				err := s.invokePostCreationHooks(sm.Invoice, in.PostCreationCalculationHook)
-				if err != nil {
-					return fmt.Errorf("invoking post creation calculation hook: %w", err)
-				}
-
-				// Let's recalculate the invoice so that any adjustments made in the hook are respresented in the calculations.
-				if err := sm.calculateInvoice(ctx); err != nil {
-					return fmt.Errorf("recalculating invoice: %w", err)
-				}
 			}
 
 			// If the invoice has critical validation issues => trigger a failed state
@@ -973,6 +970,7 @@ func (s *Service) invokeOnStandardInvoiceCreated(ctx context.Context, invoice bi
 		if errors.As(err, &requestValidationError) {
 			return billing.StandardInvoice{}, err
 		}
+
 		validationIssues, systemErr := billing.ToValidationIssues(err)
 		if systemErr != nil {
 			return billing.StandardInvoice{}, fmt.Errorf("standard invoice created for engine %s: %w", grouped.Engine.GetLineEngineType(), systemErr)
@@ -1000,7 +998,7 @@ func (s *Service) invokeOnStandardInvoiceCreated(ctx context.Context, invoice bi
 }
 
 func (s *Service) recalculateStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) (billing.StandardInvoice, error) {
-	taxCodes, err := s.resolveTaxCodes(ctx, resolveTaxCodesInput{
+	calculatorDeps, err := s.resolveTaxCodes(ctx, resolveTaxCodesInput{
 		Namespace: invoice.Namespace,
 		Invoice:   &invoice,
 		// At this point the invoice is still mutable, so we can properly resolve/backfill the tax codes.
@@ -1010,11 +1008,7 @@ func (s *Service) recalculateStandardInvoice(ctx context.Context, invoice billin
 		return billing.StandardInvoice{}, fmt.Errorf("resolving tax codes: %w", err)
 	}
 
-	if err := s.invoiceCalculator.Calculate(&invoice, invoicecalc.StandardInvoiceCalculatorDependencies{
-		RatingService: s.ratingService,
-		TaxCodes:      taxCodes,
-		LineEngines:   s.lineEngines,
-	}); err != nil {
+	if err := s.invoiceCalculator.Calculate(&invoice, calculatorDeps); err != nil {
 		return billing.StandardInvoice{}, fmt.Errorf("recalculating target invoice: %w", err)
 	}
 
@@ -1024,27 +1018,6 @@ func (s *Service) recalculateStandardInvoice(ctx context.Context, invoice billin
 	}
 
 	return invoice, nil
-}
-
-func (s *Service) invokePostCreationHooks(invoice billing.StandardInvoice, hook billing.PostCreationCalculationHook) error {
-	for _, line := range invoice.Lines.OrEmpty() {
-		ops, err := hook(invoice, lo.FromPtr(line))
-		if err != nil {
-			return fmt.Errorf("invoking post creation hook: %w", err)
-		}
-
-		if len(ops) == 0 {
-			continue
-		}
-
-		for _, op := range ops {
-			if err := op(line); err != nil {
-				return fmt.Errorf("invoking post creation hook: %w", err)
-			}
-		}
-	}
-
-	return nil
 }
 
 // updateGatheringInvoice updates the gathering invoice's state and if it contains no lines, it will be deleted.
@@ -1079,7 +1052,7 @@ func (s *Service) removeLinesFromGatheringInvoice(ctx context.Context, invoice b
 	}
 
 	// Let's update the invoice's state
-	customerProfile, err := s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+	customerProfile, err := s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 		Customer: invoice.GetCustomerID(),
 	})
 	if err != nil {
@@ -1087,7 +1060,7 @@ func (s *Service) removeLinesFromGatheringInvoice(ctx context.Context, invoice b
 	}
 
 	if err := s.invoiceCalculator.CalculateGatheringInvoice(&invoice, invoicecalc.GatheringInvoiceCalculatorDependencies{
-		Collection: customerProfile.MergedProfile.WorkflowConfig.Collection,
+		Collection: customerProfile.EffectiveProfile.WorkflowConfig.Collection,
 	}); err != nil {
 		return fmt.Errorf("calculating gathering invoice: %w", err)
 	}

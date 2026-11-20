@@ -132,10 +132,12 @@ func (a *adapter) ListCustomers(ctx context.Context, input customer.ListCustomer
 				a.logger.WarnContext(ctx, "invalid query result: nil customer received")
 				continue
 			}
+
 			cust, err := CustomerFromDBEntity(*item, input.Expands)
 			if err != nil {
 				return response, fmt.Errorf("failed to convert customer: %w", err)
 			}
+
 			if cust == nil {
 				return response, fmt.Errorf("invalid query result: nil customer received")
 			}
@@ -381,6 +383,32 @@ func (a *adapter) CreateCustomer(ctx context.Context, input customer.CreateCusto
 				Namespace: customerEntity.Namespace,
 			},
 		})
+	})
+}
+
+func (a *adapter) ListNotEndedSubscriptionIDs(ctx context.Context, input customer.CustomerID) ([]string, error) {
+	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, repo *adapter) ([]string, error) {
+		now := clock.Now().UTC()
+
+		ids, err := repo.db.Subscription.Query().
+			Where(
+				subscriptiondb.Namespace(input.Namespace),
+				subscriptiondb.CustomerID(input.ID),
+				subscriptiondb.Or(
+					subscriptiondb.ActiveToIsNil(),
+					subscriptiondb.ActiveToGT(now),
+				),
+				subscriptiondb.Or(
+					subscriptiondb.DeletedAtIsNil(),
+					subscriptiondb.DeletedAtGT(now),
+				),
+			).
+			IDs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list not ended subscriptions: %w", err)
+		}
+
+		return ids, nil
 	})
 }
 
@@ -812,6 +840,7 @@ func (a *adapter) UpdateCustomer(ctx context.Context, input customer.UpdateCusto
 		if previousCustomer.UsageAttribution != nil {
 			previousSubjectKeys = previousCustomer.UsageAttribution.SubjectKeys
 		}
+
 		if input.UsageAttribution != nil {
 			newSubjectKeys = input.UsageAttribution.SubjectKeys
 		}
@@ -1009,5 +1038,6 @@ func buildBillingProfileIDPredicate(f filter.FilterULID, defaultProfileID string
 	}
 
 	p := customerdb.Or(preds...)
+
 	return &p
 }

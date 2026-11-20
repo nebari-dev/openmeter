@@ -233,6 +233,7 @@ func (s InvoiceShortStatus) Values() []InvoiceShortStatus {
 		StandardInvoiceStatusDeleteFailed,
 		StandardInvoiceStatusDeleted,
 	}
+
 	return lo.Uniq(lo.Map(lo.Without(validStatuses, unsupportedStatuses...), func(st StandardInvoiceStatus, _ int) InvoiceShortStatus {
 		return InvoiceShortStatus(st.ShortStatus())
 	}))
@@ -288,6 +289,8 @@ type StandardInvoiceBase struct {
 
 	ExternalIDs externalid.InvoiceExternalIDs `json:"externalIds,omitempty"`
 
+	InvoicingAppStatus InvoicingAppStatus `json:"invoicingAppStatus,omitzero"`
+
 	SchemaLevel int `json:"schemaLevel"`
 
 	// TODO[later]: Let's also include the totals here, as that's part of the invoice db table
@@ -320,6 +323,10 @@ func (i StandardInvoiceBase) Validate() error {
 		if err := i.Period.Validate(); err != nil {
 			outErr = errors.Join(outErr, ValidationWithFieldPrefix("period", err))
 		}
+	}
+
+	if err := i.InvoicingAppStatus.Validate(); err != nil {
+		outErr = errors.Join(outErr, ValidationWithFieldPrefix("invoicingAppStatus", err))
 	}
 
 	return outErr
@@ -355,7 +362,10 @@ func (i StandardInvoiceBase) GetCustomerID() customer.CustomerID {
 	}
 }
 
-var _ GenericInvoice = (*StandardInvoice)(nil)
+var (
+	_ GenericInvoice          = (*StandardInvoice)(nil)
+	_ ValidationIssueAppender = (*StandardInvoice)(nil)
+)
 
 type StandardInvoice struct {
 	StandardInvoiceBase `json:",inline"`
@@ -443,11 +453,16 @@ func (i *StandardInvoice) SetLines(lines []GenericInvoiceLine) error {
 	}
 
 	i.Lines = NewStandardInvoiceLines(mappedLines)
+
 	return nil
 }
 
 func (i *StandardInvoice) UnsetLines() {
 	i.Lines = StandardInvoiceLines{}
+}
+
+func (i *StandardInvoice) AppendValidationIssues(issues ...ValidationIssue) {
+	i.ValidationIssues = append(i.ValidationIssues, issues...)
 }
 
 func (i *StandardInvoice) MergeValidationIssues(errIn error, reportingComponent ComponentName) error {
@@ -471,22 +486,25 @@ func (i *StandardInvoice) HasCriticalValidationIssues() bool {
 	return found
 }
 
-// HasLineSnapshotValidationIssueForComponent reports whether a line engine has
-// incomplete output because quantity snapshotting failed. Retry downgrades old
-// critical issues to warnings, but the lines remain incomplete until collection
-// clears the issue after a successful snapshot.
-func (i *StandardInvoice) HasLineSnapshotValidationIssueForComponent(component ComponentName) bool {
-	_, found := lo.Find(i.ValidationIssues, func(issue ValidationIssue) bool {
-		if issue.Component != component {
-			return false
+func (i *StandardInvoice) ClearInvoicingAppReferences() {
+	i.ExternalIDs.Invoicing = ""
+
+	for _, line := range i.Lines.OrEmpty() {
+		line.ExternalIDs.Invoicing = ""
+
+		for idx := range line.Discounts.Usage {
+			line.Discounts.Usage[idx].ExternalIDs.Invoicing = ""
 		}
 
-		return issue.Code == ErrInvoiceLineFeatureNotFound.Code ||
-			issue.Code == ErrInvoiceLineFeatureHasNoMeters.Code ||
-			issue.Code == ErrInvoiceLineSnapshotFailed.Code
-	})
+		for idx := range line.DetailedLines {
+			detailedLine := &line.DetailedLines[idx]
+			detailedLine.ExternalIDs.Invoicing = ""
 
-	return found
+			for discountIdx := range detailedLine.AmountDiscounts {
+				detailedLine.AmountDiscounts[discountIdx].ExternalIDs.Invoicing = ""
+			}
+		}
+	}
 }
 
 // RemoveMetaForCompare returns a copy of the invoice without the fields that are not relevant for higher level
@@ -514,7 +532,6 @@ func (i *StandardInvoice) getLeafLines() DetailedLines {
 
 	for _, line := range i.Lines.OrEmpty() {
 		// Skip non leaf nodes
-
 		out = append(out, line.DetailedLines...)
 	}
 
@@ -528,11 +545,20 @@ type DetailedLineWithResolvedTaxConfig struct {
 
 // GetLeafLinesWithResolvedTaxConfig returns invoice leaf lines together with the effective tax
 // config inherited from the parent standard line.
+//
+// The invoice default carries no Stripe code. That's fine here: invoice calculation already merged
+// the default, Stripe code included, into every line (SnapshotTaxConfigIntoLines), so merging it
+// again only matters for lines that never went through calculation.
 func (i *StandardInvoice) GetLeafLinesWithResolvedTaxConfig() []DetailedLineWithResolvedTaxConfig {
 	out := make([]DetailedLineWithResolvedTaxConfig, 0)
 
+	var defaultTaxConfig *TaxConfig
+	if cfg := i.Workflow.Config.Invoicing.DefaultTaxConfig; cfg != nil {
+		defaultTaxConfig = FromProductCatalog(lo.ToPtr(cfg.ToTaxConfig()))
+	}
+
 	for _, parentLine := range i.Lines.OrEmpty() {
-		taxConfig := MergeTaxConfigs(FromProductCatalog(i.Workflow.Config.Invoicing.DefaultTaxConfig), parentLine.TaxConfig)
+		taxConfig := MergeTaxConfigs(defaultTaxConfig, parentLine.TaxConfig)
 		for _, line := range parentLine.DetailedLines {
 			out = append(out, DetailedLineWithResolvedTaxConfig{
 				DetailedLine: line,
@@ -557,6 +583,7 @@ func (i StandardInvoice) Clone() (StandardInvoice, error) {
 	if err != nil {
 		return StandardInvoice{}, fmt.Errorf("cloning validation issues: %w", err)
 	}
+
 	clone.Totals = i.Totals
 
 	return clone, nil
@@ -662,6 +689,7 @@ func (c *StandardInvoiceLines) ReplaceByID(id string, newLine *StandardLine) boo
 
 			lines[i] = newLine
 			lines[i].DBState = originalDBState
+
 			return true
 		}
 	}
@@ -988,39 +1016,51 @@ type SimulateInvoiceInput struct {
 }
 
 func (i SimulateInvoiceInput) Validate() error {
-	if i.CustomerID != nil {
-		if *i.CustomerID == "" {
-			return errors.New("customer ID is required")
-		}
+	var errs []error
+
+	if i.CustomerID != nil && *i.CustomerID == "" {
+		errs = append(errs, errors.New("customer ID is required"))
 	}
 
 	if i.Customer != nil {
 		if err := i.Customer.Validate(); err != nil {
-			return fmt.Errorf("customer: %w", err)
+			errs = append(errs, fmt.Errorf("customer: %w", err))
 		}
 	}
 
 	if i.CustomerID == nil && i.Customer == nil {
-		return errors.New("either customer ID or customer is required")
+		errs = append(errs, errors.New("either customer ID or customer is required"))
 	}
 
 	if i.CustomerID != nil && i.Customer != nil {
-		return errors.New("only one of customer ID or customer can be specified")
+		errs = append(errs, errors.New("only one of customer ID or customer can be specified"))
 	}
 
 	if i.Namespace == "" {
-		return errors.New("namespace is required")
+		errs = append(errs, errors.New("namespace is required"))
 	}
 
 	if i.Currency == "" {
-		return errors.New("currency is required")
+		errs = append(errs, errors.New("currency is required"))
 	}
 
 	if len(i.Lines.OrEmpty()) == 0 {
-		return errors.New("lines are required")
+		errs = append(errs, errors.New("lines are required"))
 	}
 
-	return nil
+	// Simulation rates each line through its engine. Report a bad engine as a
+	// client error instead of failing later in the engine lookup.
+	for idx, line := range i.Lines.OrEmpty() {
+		if line.DeletedAt != nil {
+			continue
+		}
+
+		if err := line.Engine.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("line[%d]: %w", idx, err))
+		}
+	}
+
+	return models.NewNillableGenericValidationError(errors.Join(errs...))
 }
 
 type UpsertValidationIssuesInput struct {
@@ -1278,17 +1318,10 @@ type CreateStandardInvoiceFromGatheringLinesInput struct {
 	Currency    currencyx.FiatCode
 	Description *string
 
-	Lines                       GatheringLines
-	ValidationIssues            ValidationIssues
-	PostCreationCalculationHook PostCreationCalculationHook
-	ForceAsyncAdvance           bool
+	Lines             GatheringLines
+	ValidationIssues  ValidationIssues
+	ForceAsyncAdvance bool
 }
-
-type (
-	PostCreationCalculationHook func(StandardInvoice, StandardLine) (LineMutators, error)
-	LineMutator                 func(*StandardLine) error
-	LineMutators                = []LineMutator
-)
 
 func (i CreateStandardInvoiceFromGatheringLinesInput) Validate() error {
 	var errs []error
@@ -1326,10 +1359,3 @@ type (
 	StandardInvoiceHook  = models.ServiceHook[StandardInvoice]
 	StandardInvoiceHooks = models.ServiceHookRegistry[StandardInvoice]
 )
-
-func NewSetCreditsAppliedOperation(creditsApplied CreditsApplied) LineMutator {
-	return func(line *StandardLine) error {
-		line.CreditsApplied = creditsApplied
-		return nil
-	}
-}

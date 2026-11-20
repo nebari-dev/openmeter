@@ -177,7 +177,7 @@ func (h *usageBasedHandler) OnCustomCurrencyOverageAccrued(ctx context.Context, 
 		return usagebased.OnCustomCurrencyOverageAccruedResult{}, err
 	}
 
-	fiatOverage, err := input.Charge.ConvertCustomCurrencyOverageToFiat(input.Run.Totals)
+	fiatOverage, err := input.Charge.ConvertCustomCurrencyOverageToFiat(input.Run.Totals.Totals)
 	if err != nil {
 		return usagebased.OnCustomCurrencyOverageAccruedResult{}, fmt.Errorf("convert custom currency overage to fiat: %w", err)
 	}
@@ -216,6 +216,7 @@ func (h *usageBasedHandler) OnCustomCurrencyOverageAccruedCorrection(ctx context
 	if err := input.Validate(); err != nil {
 		return err
 	}
+
 	if input.Run.InvoiceUsage == nil || input.Run.InvoiceUsage.LedgerTransaction == nil {
 		return nil
 	}
@@ -246,17 +247,17 @@ func (h *usageBasedHandler) OnAllocateFiatOverageCredits(ctx context.Context, in
 	}
 
 	intent := input.Charge.Intent
+
 	return h.collector.CollectToReceivable(ctx, collector.CollectToReceivableInput{
-		Namespace:         input.Charge.Namespace,
-		ChargeID:          input.Charge.ID,
-		CustomerID:        intent.GetCustomerID(),
-		Annotations:       chargeAnnotationsForUsageBasedCharge(input.Charge),
-		BookedAt:          input.BookedAt,
-		SourceBalanceAsOf: input.BookedAt,
-		Currency:          currencies.NewCurrencyReference(currencyx.Code(fiatCurrency.GetFiatCode())),
-		Filters:           intent.GetCreditFilters(),
-		ServicePeriod:     intent.GetEffectiveServicePeriod(),
-		Amount:            input.AmountToAllocate,
+		Namespace:     input.Charge.Namespace,
+		ChargeID:      input.Charge.ID,
+		CustomerID:    intent.GetCustomerID(),
+		Annotations:   chargeAnnotationsForUsageBasedCharge(input.Charge),
+		BookedAt:      input.BookedAt,
+		Currency:      currencies.NewCurrencyReference(currencyx.Code(fiatCurrency.GetFiatCode())),
+		Filters:       intent.GetCreditFilters(),
+		ServicePeriod: intent.GetEffectiveServicePeriod(),
+		Amount:        input.AmountToAllocate,
 	})
 }
 
@@ -367,23 +368,23 @@ func (h *usageBasedHandler) OnCreditsOnlyUsageAccrued(ctx context.Context, input
 	}
 
 	realizations, err := h.collector.CollectToAccrued(ctx, collector.CollectToAccruedInput{
-		Namespace:         input.Charge.Namespace,
-		ChargeID:          input.Charge.ID,
-		CustomerID:        intent.GetCustomerID(),
-		Annotations:       chargeAnnotationsForUsageBasedCharge(input.Charge),
-		BookedAt:          input.BookedAt,
-		SourceBalanceAsOf: input.BookedAt,
-		Currency:          intent.GetCurrency().Reference(),
-		Filters:           intent.GetCreditFilters(),
-		TaxCode:           lo.ToPtr(taxConfig.TaxCodeID),
-		TaxBehavior:       (*ledger.TaxBehavior)(taxConfig.Behavior),
-		SettlementMode:    intent.GetSettlementMode(),
-		ServicePeriod:     intent.GetEffectiveServicePeriod(),
-		Amount:            input.AmountToAllocate,
+		Namespace:      input.Charge.Namespace,
+		ChargeID:       input.Charge.ID,
+		CustomerID:     intent.GetCustomerID(),
+		Annotations:    chargeAnnotationsForUsageBasedCharge(input.Charge),
+		BookedAt:       input.BookedAt,
+		Currency:       intent.GetCurrency().Reference(),
+		Filters:        intent.GetCreditFilters(),
+		TaxCode:        lo.ToPtr(taxConfig.TaxCodeID),
+		TaxBehavior:    (*ledger.TaxBehavior)(taxConfig.Behavior),
+		SettlementMode: intent.GetSettlementMode(),
+		ServicePeriod:  intent.GetEffectiveServicePeriod(),
+		Amount:         input.AmountToAllocate,
 	})
 	if err != nil {
 		return nil, err
 	}
+
 	if len(realizations) == 0 {
 		return nil, nil
 	}

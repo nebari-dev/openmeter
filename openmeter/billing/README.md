@@ -5,7 +5,7 @@ through calculation, external invoicing, and payment.
 
 It owns:
 
-- billing profiles and customer-specific workflow overrides
+- billing profiles and customer-specific profile selections
 - gathering and standard invoice aggregates
 - invoice-line identity and persistence
 - invoice calculation, validation, and lifecycle orchestration
@@ -20,14 +20,46 @@ described in [Charges](charges/README.md).
 ## Billing configuration becomes invoice history
 
 A billing profile selects the workflow and the apps responsible for tax,
-invoicing, and payment. A namespace has one default profile. A customer
-override may select another profile and replace supported parts of its
-workflow.
+invoicing, and payment. A namespace has one default profile. A customer may be
+explicitly pinned to any profile, including the current default. Without a pin, it follows the current
+namespace default. Individual workflow fields cannot be overridden per customer;
+customers needing different settings select a different profile.
 
-The merged customer configuration is resolved when a standard invoice is
+The customer billing service exposes separate set and clear operations. Setting
+requires a profile ID; clearing removes the pin. Successful reads always return
+the effective profile alongside the optional pin. Historical empty and deleted
+selection rows resolve like customers without a pin. The v3 billing response
+exposes these as optional `billing_profile` and required read-only
+`effective_billing_profile`. The dedicated customer billing profile PUT replaces
+only the selection: omitting `billing_profile` or setting it to `null` removes
+the pin and returns the effective default. The operation preserves app customer
+data and commits the selection only after resolving the response. The combined
+v3 billing PUT preserves the pin when the profile is omitted or null; omitting
+it in legacy customer-override PUT clears the pin.
+
+When the default's invoicing app type changes, billing pins previously unpinned
+customers with outstanding valid subscription-linked gathering lines to the old
+profile. Changing the default within the same app type does not auto-pin them.
+Explicit pins remain unchanged in either case.
+
+Installing a Custom Invoicing app with automatic profile creation uses Cloud's
+initial Auto Collection preset: the installed app handles tax, invoicing, and
+payment, with the standard billing workflow and an OpenMeter supplier in the US
+(postal code 94114). This supplier is a placeholder that callers can edit. The
+profile is not made the namespace default, even when no default exists. App
+installation and profile creation commit together; profile creation failures
+roll back the installation.
+
+The effective customer configuration is resolved when a standard invoice is
 created. The invoice keeps the customer, supplier, workflow configuration, and
 app references needed to finish its lifecycle. Customer-visible invoice
 history must not retrospectively follow later customer or profile changes.
+
+Internal invoice events carry calculated line snapshots and split-group IDs,
+without embedded split history. Older payloads containing optional hierarchy
+expansions remain readable; consumers resolve persisted history explicitly when
+their operation needs it. Public HTTP and notification representations do not
+include these internal expansions.
 
 ## Gathering and standard invoices
 
@@ -48,6 +80,37 @@ A standard line is the billable item on the invoice. Detailed lines explain
 the calculated price components beneath it, such as tier or flat-fee
 components. They are derived calculation output, not another source of
 subscription intent.
+
+Invoice amount discounts must be non-negative. Charge snapshots may carry signed
+corrections, but invoicing rejects negative discount amounts until credit-note
+handling is supported. Charge engines map discount facts into billing-managed
+resources and reuse their identities through stable child references.
+
+## Invoice storage compatibility
+
+The application reads and writes invoice schema level 2. Standard lines remain
+in `billing_invoice_lines`; calculated details and their amount discounts live
+in the dedicated standard-invoice detail tables. Customer locking serializes
+invoice manipulation without running data migrations. Invoice storage reads
+and updates reject schema levels other than 2. Historical invoice event
+snapshots retain their original schema marker and remain replayable. The
+schema-level adapter remains available for migration tooling and future use
+until all data migrations are complete; it does not select the invoice storage
+representation at runtime.
+
+Upgrade databases through the invoice schema-level-2 backfill before deploying
+this application. Historical migrations and the frozen Ent adoption baseline
+still support older storage layouts. After all application instances use level
+2, the storage cleanup archives legacy detailed lines, their configurations and
+discounts, and otherwise unreferenced rows from retired tables in
+`om_migration_backup_legacy_detailed_lines`. Cleanup takes table locks on invoice
+storage and its foreign-key referrers, blocking writes for the transaction.
+PostgreSQL also takes the required DDL locks when the obsolete storage is dropped.
+The archive indexes support original-row ID, invoice, parent-line, and JSON
+containment lookups. Cleanup removes the old detail rows, flat-fee configuration
+table, amount-discount table, and flat-fee reference column. Usage-based
+configurations, usage discounts, and parent-line relationships remain in use by
+standard and split lines.
 
 ## Time has distinct meanings
 
@@ -71,6 +134,12 @@ the portions materialized on individual invoices. Already immutable invoice
 history is not rewritten to make a later subscription change look as if it had
 always existed.
 
+[Legacy split-line groups](invoicing/legacy/splitlinegroup/README.md) own
+progressive-billing history and group operations. Ordinary invoice lines carry
+only the persisted split-group ID; reading an invoice does not load or validate
+historical groups. Billing retains invoice-line identity, persistence, lifecycle,
+and customer locking.
+
 Physical subscription attribution is the narrow exception: when a
 subscription-managed charge is rematerialized without changing its intent,
 reference repair updates the subscription, phase, and item IDs on every
@@ -87,9 +156,13 @@ charge engines handle charge-backed lines.
 Before splitting or materializing otherwise billable gathering lines, billing
 asks each line engine to gate their invoice assignment. Blocked lines remain on
 the gathering invoice and do not consume the invoice line limit. A gate may
-persist engine-owned state explaining its decision; when every candidate is
-blocked, collection succeeds without creating an invoice so those writes can
-commit. Gate errors abort collection and roll back its writes. Charge-backed
+persist engine-owned state explaining its decision. When every candidate is
+blocked, collection finishes its transaction without creating an invoice, then
+returns `ErrInvoiceCreateAllLinesGated` as a validation error. Callers with an
+enclosing transaction must handle this deferred outcome so gate diagnostics can
+commit. Automatic collection, subscription sync, and invoice-now during charge
+creation treat it as deferred work. Gate errors abort collection and roll back
+its writes. Charge-backed
 usage lines whose required feature or meter is unavailable are blocked here;
 the charge records the dependency issue and a later collection attempt
 re-evaluates it.
@@ -107,7 +180,57 @@ result. API-originated line edits and system-originated reconciliation are
 different change sources: API edits may change manual ownership, while system
 edits preserve the ownership contract of their source.
 
+Line owners return calculated details, discounts, and totals. Invoice
+calculation aggregates these totals and derives invoice dates, service periods,
+and tax metadata. The legacy engine rates at materialization, collection,
+standard API edits, and transient preview/simulation boundaries. Mutable
+subscription updates snapshot and rate through that engine; immutable
+comparisons only snapshot quantities. Repeated rating starts from raw metered
+usage and retains matching detail and discount identities.
+
+The legacy engine uses a dedicated rating entrypoint whose accessor supplies
+prior-period usage, the full service period, and previously billed amounts.
+Ordinary charge rating uses its own snapshots and does not require split-line
+hierarchy access. Minimum and maximum spend commitments count prior usage
+after discounts, before tax and credits. The final slice adds any minimum-spend
+shortfall; later slices only bill the remaining room under a maximum.
+
+Legacy calculation pairs the current line with separately supplied split-group
+context. Persisted engine operations resolve complete history in the caller's
+transaction so materialization, gathering previews, collection, and mutable
+updates account for previously billed amounts consistently. Snapshot-only
+immutable comparisons use the group's period without rating historical amounts.
+Calculation never replaces pending line edits with historical children.
+
+Rating returns amounts before credit application. Legacy invoice lines do not
+allocate credits; charge engines reconcile allocations and apply them to their
+detailed lines after rating.
+
+Snapshotting and rating run on clones so a failed collection attempt cannot
+modify the prior invoice lines. Complete snapshots follow the existing reuse
+timing policy.
+
+Legacy rating issues belong to the legacy engine component. Lifecycle rating
+uses billing's existing component-wide replacement; standard API edits append
+returned warnings for every line engine. Invoice-level issues retain the
+calculator's replacement lifecycle.
+
+Invoice-issued, payment-authorized, and payment-settled callbacks form one
+local transaction attempt across every live line and line engine. Warning-only
+results commit and remain attached to the invoice. A critical validation issue
+rolls back every line-engine write from that attempt before billing persists the
+retryable failed invoice state. A system error rolls back the attempt and aborts
+the invoice operation. When a payment provider reports a direct paid event,
+authorization and settlement share the same attempt, so a settlement failure
+also rolls back authorization created by that event. Facts committed by an
+earlier attempt remain available to idempotent retry handling.
+
 ## Validation issues alongside successful results
+
+`models.Error` carries codes and diagnostic attributes but remains a system error.
+`models.ValidationIssue` explicitly opts into validation handling. Their shared
+metadata does not make them interchangeable; only an explicit
+`WrapAsValidationIssue` conversion changes a system error into a billing issue.
 
 Typed validation issues can accompany usable results through an `error` return.
 Classify that error before discarding the result. Its meaning depends on the
@@ -123,7 +246,19 @@ boundary:
 Gathering-invoice live previews accept line-engine validation issues of any
 severity and attach them to the projected standard invoice while preserving
 the usable lines. The projection is not persisted; system errors still fail
-the preview.
+the preview. The legacy preview builder currently returns no lines on snapshot
+failure, so its exact-ID check fails for missing snapshot dependencies.
+
+Standard API edits accept calculated output accompanied only by warnings and
+persist those issues on the invoice. Critical callback issues and system errors
+reject the whole edit, including mixed-engine writes. Gathering edits and
+invoice-deletion cleanup keep their rejection semantics for every callback error.
+Simulation validates feature/meter references and explicitly rates supplied
+legacy quantities on clones without persisting the transient result.
+Simulation inputs with split-group IDs resolve persisted history through the
+legacy engine while retaining the supplied quantities and pending line edits.
+Missing groups fail without falling back to ordinary rating.
+Charge simulation is unsupported; supplied charge projections are not rerated.
 
 `ValidationIssueRecorder.Record` collects validation issues of any severity;
 successful extraction alone does not mean an operation may advance. Where only
@@ -157,6 +292,14 @@ are defined in [Charges](charges/README.md#validation-issues-alongside-successfu
 
 ## Invoice lifecycle and failure
 
+Gathering and draft invoice numbers are internal; the invoicing app owns the
+final number. Stripe supplies its own final number without allocating an
+OpenMeter final number. Custom Invoicing's generated final numbers commit with
+the caller so rollback allows reuse and preserves continuity. Sandbox final
+numbers permit gaps and commit independently, releasing the namespace/scope
+counter lock before the caller finishes. Independent allocation needs a spare
+database connection and must not wait on locks held by its caller.
+
 The standard invoice state machine coordinates:
 
 1. collection and quantity snapshotting
@@ -169,7 +312,33 @@ When issuing starts, a standard invoice with no non-deleted lines is deleted
 instead of finalized. Billing records this as a system deletion, synchronizes
 the deletion with the invoicing app, and skips charge booking and payment. This
 decision is based on line presence rather than monetary totals: a non-deleted
-line with a zero total still follows the normal issuing lifecycle.
+line with a zero total still follows the issuing lifecycle.
+
+The workflow's empty invoice mode decides whether such an invoice also exists in
+the invoicing app. With `create` it is synced and finalized like any other
+invoice. With `omit`, billing asks the invoicing app whether the invoice would
+be empty there. Stripe reports invoices without line items or with a zero total;
+the sandbox and custom invoicing apps never report one. For an empty
+invoice, draft synchronization and issuing delete the app's invoice instead of
+upserting it, clear the invoicing references of the invoice, its lines and
+their discounts, and record the invoicing app outcome as skipped with the
+reason `empty_invoice`. Lines and discounts that were already removed keep
+their reference as history. A later edit that gives a draft something to bill
+syncs it again and resets the outcome. Issuing never calls the app's
+finalization for a skipped invoice, and still runs line finalization and charge
+booking. Because no payment event can arrive for an
+invoice the app never issued, billing then books authorization and settlement
+itself and the invoice ends as `paid`.
+
+The state machine runs [invoice sanity checks](stdinvoice/sanity/README.md)
+before app validation, synchronization, finalization and asynchronous readiness
+checks during draft and issuing. Failures are logged at error severity;
+`billing.enforceInvoiceSanityChecks` additionally blocks the call when enabled
+(default: false). Post-advance hooks do not repeat these checks, so payment
+follow-up remains callable after issuance. Deletion also bypasses sanity checks
+so inconsistent invoices can still be cleaned up. Read-only status prediction
+skips sanity validation, preserving available-action predictions for partial
+invoice reads; actual execution still applies the configured enforcement.
 
 Critical validation issues stop advancement. External app and line-engine
 failures leave the invoice in an explicit failed state so the failed step can
@@ -237,6 +406,9 @@ the lifecycle operation.
 
 - invoice manipulation is serialized per customer and runs under the billing
   transaction and customer update lock
+- product-catalog discounts describe commercial configuration without billing
+  identity; once attached to a charge or invoice line, billing owns a stable,
+  non-empty correlation ID for every present discount
 - every invoice contains one fiat currency
 - a customer cannot have two active gathering invoices for the same currency
 - pending-line creation resolves every supplied feature, and metered prices

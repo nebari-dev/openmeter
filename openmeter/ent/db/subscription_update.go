@@ -21,9 +21,9 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/predicate"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscription"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionaddon"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionbillingsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptioncostbasispin"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionphase"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -333,23 +333,23 @@ func (_u *SubscriptionUpdate) AddAddons(v ...*SubscriptionAddon) *SubscriptionUp
 	return _u.AddAddonIDs(ids...)
 }
 
-// SetBillingSyncStateID sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity by ID.
-func (_u *SubscriptionUpdate) SetBillingSyncStateID(id string) *SubscriptionUpdate {
-	_u.mutation.SetBillingSyncStateID(id)
+// SetSyncStateID sets the "sync_state" edge to the SubscriptionSyncState entity by ID.
+func (_u *SubscriptionUpdate) SetSyncStateID(id string) *SubscriptionUpdate {
+	_u.mutation.SetSyncStateID(id)
 	return _u
 }
 
-// SetNillableBillingSyncStateID sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity by ID if the given value is not nil.
-func (_u *SubscriptionUpdate) SetNillableBillingSyncStateID(id *string) *SubscriptionUpdate {
+// SetNillableSyncStateID sets the "sync_state" edge to the SubscriptionSyncState entity by ID if the given value is not nil.
+func (_u *SubscriptionUpdate) SetNillableSyncStateID(id *string) *SubscriptionUpdate {
 	if id != nil {
-		_u = _u.SetBillingSyncStateID(*id)
+		_u = _u.SetSyncStateID(*id)
 	}
 	return _u
 }
 
-// SetBillingSyncState sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity.
-func (_u *SubscriptionUpdate) SetBillingSyncState(v *SubscriptionBillingSyncState) *SubscriptionUpdate {
-	return _u.SetBillingSyncStateID(v.ID)
+// SetSyncState sets the "sync_state" edge to the SubscriptionSyncState entity.
+func (_u *SubscriptionUpdate) SetSyncState(v *SubscriptionSyncState) *SubscriptionUpdate {
+	return _u.SetSyncStateID(v.ID)
 }
 
 // AddCostBasisPinIDs adds the "cost_basis_pins" edge to the SubscriptionCostBasisPin entity by IDs.
@@ -546,9 +546,9 @@ func (_u *SubscriptionUpdate) RemoveAddons(v ...*SubscriptionAddon) *Subscriptio
 	return _u.RemoveAddonIDs(ids...)
 }
 
-// ClearBillingSyncState clears the "billing_sync_state" edge to the SubscriptionBillingSyncState entity.
-func (_u *SubscriptionUpdate) ClearBillingSyncState() *SubscriptionUpdate {
-	_u.mutation.ClearBillingSyncState()
+// ClearSyncState clears the "sync_state" edge to the SubscriptionSyncState entity.
+func (_u *SubscriptionUpdate) ClearSyncState() *SubscriptionUpdate {
+	_u.mutation.ClearSyncState()
 	return _u
 }
 
@@ -677,6 +677,9 @@ func (_u *SubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if value, ok := _u.mutation.BillingAnchor(); ok {
 		_spec.SetField(subscription.FieldBillingAnchor, field.TypeTime, value)
+	}
+	if _u.mutation.BillingStartsAtCleared() {
+		_spec.ClearField(subscription.FieldBillingStartsAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.BillingCadence(); ok {
 		_spec.SetField(subscription.FieldBillingCadence, field.TypeString, value)
@@ -1077,28 +1080,28 @@ func (_u *SubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err error
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
-	if _u.mutation.BillingSyncStateCleared() {
+	if _u.mutation.SyncStateCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2O,
 			Inverse: false,
-			Table:   subscription.BillingSyncStateTable,
-			Columns: []string{subscription.BillingSyncStateColumn},
+			Table:   subscription.SyncStateTable,
+			Columns: []string{subscription.SyncStateColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(subscriptionbillingsyncstate.FieldID, field.TypeString),
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionsyncstate.FieldID, field.TypeString),
 			},
 		}
 		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
 	}
-	if nodes := _u.mutation.BillingSyncStateIDs(); len(nodes) > 0 {
+	if nodes := _u.mutation.SyncStateIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2O,
 			Inverse: false,
-			Table:   subscription.BillingSyncStateTable,
-			Columns: []string{subscription.BillingSyncStateColumn},
+			Table:   subscription.SyncStateTable,
+			Columns: []string{subscription.SyncStateColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(subscriptionbillingsyncstate.FieldID, field.TypeString),
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionsyncstate.FieldID, field.TypeString),
 			},
 		}
 		for _, k := range nodes {
@@ -1462,23 +1465,23 @@ func (_u *SubscriptionUpdateOne) AddAddons(v ...*SubscriptionAddon) *Subscriptio
 	return _u.AddAddonIDs(ids...)
 }
 
-// SetBillingSyncStateID sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity by ID.
-func (_u *SubscriptionUpdateOne) SetBillingSyncStateID(id string) *SubscriptionUpdateOne {
-	_u.mutation.SetBillingSyncStateID(id)
+// SetSyncStateID sets the "sync_state" edge to the SubscriptionSyncState entity by ID.
+func (_u *SubscriptionUpdateOne) SetSyncStateID(id string) *SubscriptionUpdateOne {
+	_u.mutation.SetSyncStateID(id)
 	return _u
 }
 
-// SetNillableBillingSyncStateID sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity by ID if the given value is not nil.
-func (_u *SubscriptionUpdateOne) SetNillableBillingSyncStateID(id *string) *SubscriptionUpdateOne {
+// SetNillableSyncStateID sets the "sync_state" edge to the SubscriptionSyncState entity by ID if the given value is not nil.
+func (_u *SubscriptionUpdateOne) SetNillableSyncStateID(id *string) *SubscriptionUpdateOne {
 	if id != nil {
-		_u = _u.SetBillingSyncStateID(*id)
+		_u = _u.SetSyncStateID(*id)
 	}
 	return _u
 }
 
-// SetBillingSyncState sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity.
-func (_u *SubscriptionUpdateOne) SetBillingSyncState(v *SubscriptionBillingSyncState) *SubscriptionUpdateOne {
-	return _u.SetBillingSyncStateID(v.ID)
+// SetSyncState sets the "sync_state" edge to the SubscriptionSyncState entity.
+func (_u *SubscriptionUpdateOne) SetSyncState(v *SubscriptionSyncState) *SubscriptionUpdateOne {
+	return _u.SetSyncStateID(v.ID)
 }
 
 // AddCostBasisPinIDs adds the "cost_basis_pins" edge to the SubscriptionCostBasisPin entity by IDs.
@@ -1675,9 +1678,9 @@ func (_u *SubscriptionUpdateOne) RemoveAddons(v ...*SubscriptionAddon) *Subscrip
 	return _u.RemoveAddonIDs(ids...)
 }
 
-// ClearBillingSyncState clears the "billing_sync_state" edge to the SubscriptionBillingSyncState entity.
-func (_u *SubscriptionUpdateOne) ClearBillingSyncState() *SubscriptionUpdateOne {
-	_u.mutation.ClearBillingSyncState()
+// ClearSyncState clears the "sync_state" edge to the SubscriptionSyncState entity.
+func (_u *SubscriptionUpdateOne) ClearSyncState() *SubscriptionUpdateOne {
+	_u.mutation.ClearSyncState()
 	return _u
 }
 
@@ -1836,6 +1839,9 @@ func (_u *SubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *Subscripti
 	}
 	if value, ok := _u.mutation.BillingAnchor(); ok {
 		_spec.SetField(subscription.FieldBillingAnchor, field.TypeTime, value)
+	}
+	if _u.mutation.BillingStartsAtCleared() {
+		_spec.ClearField(subscription.FieldBillingStartsAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.BillingCadence(); ok {
 		_spec.SetField(subscription.FieldBillingCadence, field.TypeString, value)
@@ -2236,28 +2242,28 @@ func (_u *SubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *Subscripti
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
-	if _u.mutation.BillingSyncStateCleared() {
+	if _u.mutation.SyncStateCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2O,
 			Inverse: false,
-			Table:   subscription.BillingSyncStateTable,
-			Columns: []string{subscription.BillingSyncStateColumn},
+			Table:   subscription.SyncStateTable,
+			Columns: []string{subscription.SyncStateColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(subscriptionbillingsyncstate.FieldID, field.TypeString),
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionsyncstate.FieldID, field.TypeString),
 			},
 		}
 		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
 	}
-	if nodes := _u.mutation.BillingSyncStateIDs(); len(nodes) > 0 {
+	if nodes := _u.mutation.SyncStateIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2O,
 			Inverse: false,
-			Table:   subscription.BillingSyncStateTable,
-			Columns: []string{subscription.BillingSyncStateColumn},
+			Table:   subscription.SyncStateTable,
+			Columns: []string{subscription.SyncStateColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(subscriptionbillingsyncstate.FieldID, field.TypeString),
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionsyncstate.FieldID, field.TypeString),
 			},
 		}
 		for _, k := range nodes {

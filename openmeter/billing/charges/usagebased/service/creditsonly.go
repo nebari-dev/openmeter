@@ -16,6 +16,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
 	usagebasedrating "github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased/service/rating"
 	usagebasedrun "github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased/service/run"
+	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/statelessx"
@@ -201,6 +202,7 @@ func (s *CreditsOnlyStateMachine) ActiveClearOverride(ctx context.Context) error
 	}
 
 	s.Charge.State.CurrentRealizationRunID = nil
+
 	return nil
 }
 
@@ -321,6 +323,7 @@ func (s *CreditsOnlyStateMachine) applyPeriodPatch(patch periodPatch) error {
 		fields.FullServicePeriod.To = patch.GetNewFullServicePeriodTo()
 		fields.BillingPeriod.To = patch.GetNewBillingPeriodTo()
 		fields.InvoiceAt = patch.GetNewInvoiceAt()
+
 		return nil
 	}); err != nil {
 		return fmt.Errorf("mutating %s intent: %w", target, err)
@@ -335,6 +338,7 @@ func (s *CreditsOnlyStateMachine) patchCreatedChargePeriod(ctx context.Context, 
 	}
 
 	s.Charge.State.AdvanceAfter = lo.ToPtr(meta.NormalizeTimestamp(s.Charge.Intent.GetEffectiveServicePeriod().From))
+
 	return nil
 }
 
@@ -353,6 +357,7 @@ func (s *CreditsOnlyStateMachine) persistActivePeriodPatch(ctx context.Context) 
 	if err != nil {
 		return fmt.Errorf("update charge after period patch: %w", err)
 	}
+
 	s.Charge.ChargeBase = updatedBase
 
 	return nil
@@ -416,13 +421,13 @@ func (s *CreditsOnlyStateMachine) StartFinalRealizationRun(ctx context.Context) 
 	}
 
 	result, err := s.Runs.CreateRatedRun(ctx, usagebasedrun.CreateRatedRunInput{
-		Charge:             s.Charge,
-		CustomerOverride:   s.CustomerOverride,
-		FeatureMeter:       featureMeter,
-		Type:               usagebased.RealizationRunTypeFinalRealization,
-		StoredAtLT:         storedAtLT,
-		ServicePeriodTo:    meta.NormalizeTimestamp(s.Charge.Intent.GetEffectiveServicePeriod().To),
-		CurrencyCalculator: s.CurrencyCalculator,
+		Charge:                 s.Charge,
+		CustomerBillingProfile: s.CustomerBillingProfile,
+		FeatureMeter:           featureMeter,
+		Type:                   usagebased.RealizationRunTypeFinalRealization,
+		StoredAtLT:             storedAtLT,
+		ServicePeriodTo:        meta.NormalizeTimestamp(s.Charge.Intent.GetEffectiveServicePeriod().To),
+		CurrencyCalculator:     s.CurrencyCalculator,
 	})
 	ratingIssues, err := billing.ToValidationIssues(err, billing.RequireWarningsOnly())
 	if err != nil {
@@ -435,6 +440,7 @@ func (s *CreditsOnlyStateMachine) StartFinalRealizationRun(ctx context.Context) 
 		billing.ValidationComponentBillingRating,
 		ratingIssues,
 	)
+
 	return nil
 }
 
@@ -459,7 +465,7 @@ func (s *CreditsOnlyStateMachine) FinalizeRealizationRun(ctx context.Context) er
 		Charge:          s.Charge,
 		StoredAtLT:      storedAtLT,
 		ServicePeriodTo: currentRun.ServicePeriodTo,
-		Customer:        s.CustomerOverride,
+		Customer:        s.CustomerBillingProfile,
 		FeatureMeter:    featureMeter,
 	})
 	ratingIssues, err := billing.ToValidationIssues(err, billing.RequireWarningsOnly())
@@ -492,18 +498,20 @@ func (s *CreditsOnlyStateMachine) FinalizeRealizationRun(ctx context.Context) er
 	}); err != nil {
 		return fmt.Errorf("upsert run detailed lines: %w", err)
 	}
+
 	currentRun.DetailedLines = mo.Some(ratingResult.DetailedLines)
 
 	currentRunBase, err := s.Adapter.UpdateRealizationRun(ctx, usagebased.UpdateRealizationRunInput{
 		ID:                        currentRun.ID,
 		StoredAtLT:                mo.Some(storedAtLT),
 		MeteredQuantity:           mo.Some(ratingResult.Quantity),
-		Totals:                    mo.Some(currentTotals),
+		Totals:                    mo.Some(totals.DeltaTotals{Totals: currentTotals}),
 		NoFiatTransactionRequired: mo.Some(true),
 	})
 	if err != nil {
 		return fmt.Errorf("update realization run: %w", err)
 	}
+
 	currentRun.RealizationRunBase = currentRunBase
 
 	if err := s.Charge.Realizations.SetRealizationRun(currentRun); err != nil {
@@ -518,6 +526,7 @@ func (s *CreditsOnlyStateMachine) FinalizeRealizationRun(ctx context.Context) er
 	if err := s.RefetchCharge(ctx); err != nil {
 		return fmt.Errorf("refetch charge: %w", err)
 	}
+
 	s.Charge.ValidationIssues, _ = replaceValidationIssueComponent(
 		s.Charge.ValidationIssues,
 		billing.ValidationComponentBillingRating,

@@ -25,6 +25,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/adapter"
+	synchooks "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/hooks"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/ledger"
@@ -41,6 +42,7 @@ import (
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/featuregate"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
@@ -69,10 +71,14 @@ func (s *SuiteBase) SetupSuite() {
 	})
 	s.NoError(err)
 	s.Adapter = adapter
+	syncHook, err := synchooks.New(synchooks.Config{Adapter: adapter, Logger: testutils.NewDiscardLogger(s.T())})
+	s.Require().NoError(err)
+	s.Require().NoError(s.SubscriptionService.RegisterHook(syncHook))
 
 	service, err := New(Config{
 		BillingService:          s.BillingService,
 		LegacyBillingLineEngine: s.LegacyBillingLineEngine,
+		SplitLineGroupService:   s.SplitLineGroupService,
 		Logger:                  slog.Default(),
 		Tracer:                  noop.NewTracerProvider().Tracer("test"),
 		SubscriptionSyncAdapter: adapter,
@@ -97,6 +103,7 @@ func (s *SuiteBase) setupChargesService(config chargestestutils.Config) {
 	service, err := New(Config{
 		BillingService:          s.BillingService,
 		LegacyBillingLineEngine: s.LegacyBillingLineEngine,
+		SplitLineGroupService:   s.SplitLineGroupService,
 		ChargesService:          s.Charges,
 		Logger:                  slog.Default(),
 		Tracer:                  noop.NewTracerProvider().Tracer("test"),
@@ -121,7 +128,7 @@ func (s *SuiteBase) beforeTest(ctx context.Context, suiteName, testName string) 
 	appSandbox := s.InstallSandboxApp(s.T(), s.Namespace)
 
 	s.ProvisionBillingProfile(ctx, s.Namespace, appSandbox.GetID())
-	s.ProvisionDefaultTaxCodes(ctx, s.Namespace)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), s.Namespace)
 
 	apiRequestsTotalMeterSlug := "api-requests-total"
 	apiRequestsTotalMeterID := ulid.Make().String()
@@ -197,6 +204,7 @@ func (s *SuiteBase) gatheringInvoice(ctx context.Context, namespace string, cust
 
 	s.NoError(err)
 	s.Len(invoices.Items, 1, "expected 1 gathering invoice")
+
 	return invoices.Items[0]
 }
 
@@ -219,6 +227,7 @@ func (s *SuiteBase) expectNoGatheringInvoice(ctx context.Context, namespace stri
 			s.DebugDumpInvoice(fmt.Sprintf("unexpected gathering invoice[%s]", invoice.ID), invoice)
 		}
 	}
+
 	s.Len(invoices.Items, 0)
 }
 
@@ -239,6 +248,20 @@ func (s *SuiteBase) getGatheringLineByChildID(invoice billing.GatheringInvoice, 
 	s.Failf("line not found", "line with child id %s not found", childID)
 
 	return nil
+}
+
+// mustGetGatheringLineByServicePeriodFrom returns the line whose service period starts at from.
+// Sync keeps the following billing period provisioned too, so tests pick a line by its period
+// instead of its position.
+func (s *SuiteBase) mustGetGatheringLineByServicePeriodFrom(lines []billing.GatheringLine, from time.Time) billing.GatheringLine {
+	s.T().Helper()
+
+	line, found := lo.Find(lines, func(line billing.GatheringLine) bool {
+		return line.ServicePeriod.From.Equal(from)
+	})
+	s.Require().Truef(found, "no gathering line starts at %s", from)
+
+	return line
 }
 
 func (s *SuiteBase) getStandardLineByChildID(invoice billing.StandardInvoice, childID string) *billing.StandardLine {
@@ -289,6 +312,7 @@ func (s *SuiteBase) getPhaseByKey(t *testing.T, subsView subscription.Subscripti
 	}
 
 	t.Fatalf("phase with key %s not found", key)
+
 	return subscription.SubscriptionPhaseView{}
 }
 
@@ -375,9 +399,12 @@ func (s *SuiteBase) expectLines(invoice billing.GenericInvoiceReader, subscripti
 }
 
 type expectedCharge struct {
-	Matcher            lineMatcher
-	Type               chargesmeta.ChargeType
+	Matcher lineMatcher
+	Type    chargesmeta.ChargeType
+	// Status applies to every charge of the expectation. Set Statuses instead, one per
+	// period, when they differ: for example an active current period and a created next one.
 	Status             string
+	Statuses           []string
 	Price              *productcatalog.Price
 	Periods            []timeutil.ClosedPeriod
 	FullServicePeriods []timeutil.ClosedPeriod
@@ -385,6 +412,14 @@ type expectedCharge struct {
 	InvoiceAt          []*time.Time
 	GatheringLines     []expectedChargeGatheringLine
 	Realizations       []expectedChargeRealization
+}
+
+func (e expectedCharge) statusAt(idx int) string {
+	if len(e.Statuses) > 0 {
+		return e.Statuses[idx]
+	}
+
+	return e.Status
 }
 
 type expectedChargeGatheringLine struct {
@@ -427,9 +462,9 @@ func (s *SuiteBase) assertCharges(ctx context.Context, subsView subscription.Sub
 	subscriptionID := subsView.Subscription.NamespacedID
 
 	res, err := s.Charges.ListCharges(ctx, charges.ListChargesInput{
-		Namespace:       subscriptionID.Namespace,
-		SubscriptionIDs: []string{subscriptionID.ID},
-		IncludeDeleted:  true,
+		Namespace:      subscriptionID.Namespace,
+		SubscriptionID: filter.NewULIDIn(subscriptionID.ID),
+		IncludeDeleted: true,
 		Expands: chargesmeta.Expands{
 			chargesmeta.ExpandRealizations,
 			chargesmeta.ExpandDeletedRealizations,
@@ -458,14 +493,25 @@ func (s *SuiteBase) assertCharges(ctx context.Context, subsView subscription.Sub
 
 		childIDs := expectedCharge.Matcher.ChildIDs(subscriptionID.ID)
 		s.Require().NotEmpty(expectedCharge.Type, "expected charge type")
-		s.Require().NotEmpty(expectedCharge.Status, "expected charge status")
+		if len(expectedCharge.Statuses) > 0 && expectedCharge.Status != "" {
+			s.FailNow("expected charge sets both status and statuses", "matcher: %+v", expectedCharge.Matcher)
+		}
+
+		if len(expectedCharge.Statuses) > 0 {
+			s.Require().Len(expectedCharge.Statuses, len(childIDs), "expected charge statuses")
+		} else {
+			s.Require().NotEmpty(expectedCharge.Status, "expected charge status")
+		}
+
 		s.Require().Len(expectedCharge.Periods, len(childIDs), "expected charge periods")
 		if len(expectedCharge.InvoiceAt) > 0 {
 			s.Require().Len(expectedCharge.InvoiceAt, len(childIDs), "expected charge invoice at")
 		}
+
 		if len(expectedCharge.FullServicePeriods) > 0 {
 			s.Require().Len(expectedCharge.FullServicePeriods, len(childIDs), "expected charge full service periods")
 		}
+
 		if len(expectedCharge.BillingPeriods) > 0 {
 			s.Require().Len(expectedCharge.BillingPeriods, len(childIDs), "expected charge billing periods")
 		}
@@ -502,7 +548,7 @@ func (s *SuiteBase) assertCharge(ctx context.Context, charge charges.Charge, sub
 		baseIntent := usageBasedCharge.Intent.GetBaseIntent()
 		subscription := usageBasedCharge.Intent.GetSubscription()
 
-		s.Equal(expectedCharge.Status, string(usageBasedCharge.Status), "%s: status", childID)
+		s.Equal(expectedCharge.statusAt(idx), string(usageBasedCharge.Status), "%s: status", childID)
 		s.Equal(subsView.Subscription.SettlementMode, usageBasedCharge.Intent.GetSettlementMode(), "%s: settlement mode", childID)
 		s.Equal(s.Customer.ID, usageBasedCharge.Intent.GetCustomerID(), "%s: customer id", childID)
 		s.Equal(subsView.Subscription.InvoiceCurrency, usageBasedCharge.Intent.GetCurrency().GetCode(), "%s: currency", childID)
@@ -510,15 +556,19 @@ func (s *SuiteBase) assertCharge(ctx context.Context, charge charges.Charge, sub
 		if len(expectedCharge.FullServicePeriods) > 0 {
 			s.Equal(expectedCharge.FullServicePeriods[idx], baseIntent.FullServicePeriod, "%s: full service period", childID)
 		}
+
 		if len(expectedCharge.BillingPeriods) > 0 {
 			s.Equal(expectedCharge.BillingPeriods[idx], baseIntent.BillingPeriod, "%s: billing period", childID)
 		}
+
 		if expectedCharge.Price != nil {
 			s.Truef(expectedCharge.Price.Equal(&baseIntent.Price), "%s: price expected %v, got %v", childID, expectedCharge.Price, baseIntent.Price)
 		}
+
 		if len(expectedCharge.InvoiceAt) > idx && expectedCharge.InvoiceAt[idx] != nil {
 			s.Equal(*expectedCharge.InvoiceAt[idx], baseIntent.InvoiceAt, "%s: invoice at", childID)
 		}
+
 		s.Require().NotNil(subscription, "%s: subscription", childID)
 		s.Equal(subsView.Subscription.ID, subscription.SubscriptionID, "%s: subscription id", childID)
 		s.Equal(phase.SubscriptionPhase.ID, subscription.PhaseID, "%s: phase id", childID)
@@ -531,6 +581,7 @@ func (s *SuiteBase) assertCharge(ctx context.Context, charge charges.Charge, sub
 				expectedFeatureKey = lo.FromPtrOr(feature.Key, itemKey)
 			}
 		}
+
 		s.Equal(expectedFeatureKey, baseIntent.FeatureKey, "%s: feature key", childID)
 	case chargesmeta.ChargeTypeFlatFee:
 		flatFeeCharge, err := charge.AsFlatFeeCharge()
@@ -538,7 +589,7 @@ func (s *SuiteBase) assertCharge(ctx context.Context, charge charges.Charge, sub
 		baseIntent := flatFeeCharge.Intent.GetBaseIntent()
 		subscription := flatFeeCharge.Intent.GetSubscription()
 
-		s.Equal(expectedCharge.Status, string(flatFeeCharge.Status), "%s: status", childID)
+		s.Equal(expectedCharge.statusAt(idx), string(flatFeeCharge.Status), "%s: status", childID)
 		s.Equal(subsView.Subscription.SettlementMode, flatFeeCharge.Intent.GetSettlementMode(), "%s: settlement mode", childID)
 		s.Equal(s.Customer.ID, flatFeeCharge.Intent.GetCustomerID(), "%s: customer id", childID)
 		s.Equal(subsView.Subscription.InvoiceCurrency, flatFeeCharge.Intent.GetCurrency().GetCode(), "%s: currency", childID)
@@ -546,17 +597,21 @@ func (s *SuiteBase) assertCharge(ctx context.Context, charge charges.Charge, sub
 		if len(expectedCharge.FullServicePeriods) > 0 {
 			s.Equal(expectedCharge.FullServicePeriods[idx], baseIntent.FullServicePeriod, "%s: full service period", childID)
 		}
+
 		if len(expectedCharge.BillingPeriods) > 0 {
 			s.Equal(expectedCharge.BillingPeriods[idx], baseIntent.BillingPeriod, "%s: billing period", childID)
 		}
+
 		if expectedCharge.Price != nil {
 			expectedFlatPrice, err := expectedCharge.Price.AsFlat()
 			s.NoError(err)
 			require.Equal(s.T(), expectedFlatPrice.Amount.InexactFloat64(), baseIntent.AmountBeforeProration.InexactFloat64(), fmt.Sprintf("%s: amount before proration", childID))
 		}
+
 		if len(expectedCharge.InvoiceAt) > idx && expectedCharge.InvoiceAt[idx] != nil {
 			s.Equal(*expectedCharge.InvoiceAt[idx], baseIntent.InvoiceAt, "%s: invoice at", childID)
 		}
+
 		s.Require().NotNil(subscription, "%s: subscription", childID)
 		s.Equal(subsView.Subscription.ID, subscription.SubscriptionID, "%s: subscription id", childID)
 		s.Equal(phase.SubscriptionPhase.ID, subscription.PhaseID, "%s: phase id", childID)
@@ -602,12 +657,14 @@ func (s *SuiteBase) assertCharge(ctx context.Context, charge charges.Charge, sub
 			s.Failf("realization not found", "realization not found for charge %s with status %s and period %s", childID, expectedRealization.Status, expectedRealization.Period)
 			continue
 		}
+
 		remainingActualRealizations = slices.Delete(remainingActualRealizations, idx, idx+1)
 
 		expectedPrice := expectedRealization.Price
 		if expectedPrice == nil {
 			expectedPrice = expectedCharge.Price
 		}
+
 		if expectedPrice != nil {
 			s.Truef(expectedPrice.Equal(actualRealization.Price), "%s: realization price expected %v, got %v", childID, expectedPrice, actualRealization.Price)
 		}
@@ -686,6 +743,7 @@ func (s *SuiteBase) assertPaymentLedgerTransactions(ctx context.Context, namespa
 	if payment.Authorized != nil && payment.Authorized.TransactionGroupID != "" {
 		s.assertLedgerTransactionGroupBookedAt(ctx, namespace, payment.Authorized.TransactionGroupID, payment.Authorized.Time, fmt.Sprintf("%s: payment authorization", childID))
 	}
+
 	if payment.Settled != nil && payment.Settled.TransactionGroupID != "" {
 		s.assertLedgerTransactionGroupBookedAt(ctx, namespace, payment.Settled.TransactionGroupID, payment.Settled.Time, fmt.Sprintf("%s: payment settlement", childID))
 	}
@@ -757,15 +815,18 @@ func (s *SuiteBase) assertChargeGatheringLines(ctx context.Context, charge charg
 			s.Failf("gathering line not found", "gathering line not found for charge %s with period %s", childID, expectedLine.Period)
 			continue
 		}
+
 		remainingActualLines = slices.Delete(remainingActualLines, idx, idx+1)
 
 		expectedPrice := expectedLine.Price
 		if expectedPrice == nil {
 			expectedPrice = chargePrice
 		}
+
 		if expectedPrice != nil {
 			s.Truef(expectedPrice.Equal(actualLine.Price), "%s: gathering line price expected %v, got %v", childID, expectedPrice, actualLine.Price)
 		}
+
 		if expectedLine.InvoiceAt != nil {
 			s.Equal(*expectedLine.InvoiceAt, actualLine.InvoiceAt, "%s: gathering line invoice at", childID)
 		}
@@ -847,6 +908,7 @@ func (s *SuiteBase) chargeRealizations(ctx context.Context, charge charges.Charg
 			if run.DeletedAt != nil {
 				continue
 			}
+
 			if run.InvoiceID == nil || run.LineID == nil {
 				continue
 			}
@@ -873,6 +935,7 @@ func (s *SuiteBase) chargeRealizations(ctx context.Context, charge charges.Charg
 			if run.DeletedAt != nil {
 				continue
 			}
+
 			if run.InvoiceID == nil || run.LineID == nil {
 				continue
 			}
@@ -905,6 +968,7 @@ func (s *SuiteBase) usageBasedRunLedgerTransactionGroups(run usagebased.Realizat
 			Label: fmt.Sprintf("usage-based credit realization %s", realization.ID),
 		})
 	}
+
 	if run.InvoiceUsage != nil && run.InvoiceUsage.LedgerTransaction != nil && run.InvoiceUsage.LedgerTransaction.TransactionGroupID != "" {
 		out = append(out, actualChargeLedgerTransactionGroup{
 			ID:    run.InvoiceUsage.LedgerTransaction.TransactionGroupID,
@@ -929,6 +993,7 @@ func (s *SuiteBase) flatFeeRunLedgerTransactionGroups(run flatfee.RealizationRun
 			Label: fmt.Sprintf("flat fee credit realization %s", realization.ID),
 		})
 	}
+
 	if run.AccruedUsage != nil && run.AccruedUsage.LedgerTransaction != nil && run.AccruedUsage.LedgerTransaction.TransactionGroupID != "" {
 		out = append(out, actualChargeLedgerTransactionGroup{
 			ID:    run.AccruedUsage.LedgerTransaction.TransactionGroupID,
@@ -1092,7 +1157,7 @@ type subscriptionAddItem struct {
 	Price          *productcatalog.Price
 	BillingCadence *datetime.ISODuration
 	FeatureKey     string
-	TaxConfig      *productcatalog.TaxConfig
+	TaxConfig      *productcatalog.TaxCodeConfig
 }
 
 func (i subscriptionAddItem) AsPatch() subscription.Patch {
@@ -1157,6 +1222,7 @@ func (s *SuiteBase) generatePeriods(startStr, endStr string, cadenceStr string, 
 
 		n--
 	}
+
 	return out
 }
 
@@ -1173,30 +1239,13 @@ func (s *SuiteBase) populateChildIDsFromParents(invoice billing.GenericInvoice) 
 
 	for idx, line := range genericLines {
 		if line.GetChildUniqueReferenceID() == nil && line.GetSplitLineGroupID() != nil {
-			invoiceLine := line.AsInvoiceLine()
-			switch invoiceLine.Type() {
-			case billing.InvoiceLineTypeStandard:
-				stdInvoiceLine, err := invoiceLine.AsStandardLine()
-				s.NoError(err)
+			splitLineGroup, err := s.SplitLineGroupService.GetSplitLineGroup(s.T().Context(), models.NamespacedID{
+				Namespace: invoice.GetInvoiceID().Namespace,
+				ID:        *line.GetSplitLineGroupID(),
+			})
+			s.Require().NoError(err)
 
-				line.SetChildUniqueReferenceID(stdInvoiceLine.SplitLineHierarchy.Group.UniqueReferenceID)
-			case billing.InvoiceLineTypeGathering:
-				splitLineGroupID := line.GetSplitLineGroupID()
-				if splitLineGroupID == nil {
-					s.Failf("split line group id not found", "split line group id not found for line %s", line.GetID())
-					return
-				}
-
-				splitLineGroup, err := s.BillingAdapter.GetSplitLineGroup(s.T().Context(), billing.GetSplitLineGroupInput{
-					Namespace: s.Namespace,
-					ID:        *splitLineGroupID,
-				})
-				s.NoError(err)
-
-				line.SetChildUniqueReferenceID(splitLineGroup.Group.UniqueReferenceID)
-			default:
-				s.Failf("unexpected line type", "unexpected line type %s for line %s", invoiceLine.Type(), line.GetID())
-			}
+			line.SetChildUniqueReferenceID(splitLineGroup.Group.UniqueReferenceID)
 		}
 
 		genericLines[idx] = line
@@ -1235,6 +1284,19 @@ func (s *SuiteBase) createSubscriptionFromPlan(planInput plan.CreatePlanInput) s
 }
 
 func (s *SuiteBase) createSubscriptionFromPlanAt(planInput plan.CreatePlanInput, startAt time.Time) subscription.SubscriptionView {
+	return s.createSubscriptionFromPlanWithInput(planInput, subscriptionworkflow.CreateSubscriptionWorkflowInput{
+		ChangeSubscriptionWorkflowInput: subscriptionworkflow.ChangeSubscriptionWorkflowInput{
+			Timing: subscription.Timing{
+				Custom: lo.ToPtr(startAt),
+			},
+			Name: "subs-1",
+		},
+	})
+}
+
+// createSubscriptionFromPlanWithInput creates the plan and a subscription for the suite's customer from it.
+// The namespace and the customer of the input are set here.
+func (s *SuiteBase) createSubscriptionFromPlanWithInput(planInput plan.CreatePlanInput, input subscriptionworkflow.CreateSubscriptionWorkflowInput) subscription.SubscriptionView {
 	ctx := s.T().Context()
 
 	plan, err := s.PlanService.CreatePlan(ctx, planInput)
@@ -1246,18 +1308,52 @@ func (s *SuiteBase) createSubscriptionFromPlanAt(planInput plan.CreatePlanInput,
 	})
 	s.NoError(err)
 
-	subsView, err := s.SubscriptionWorkflowService.CreateFromPlan(ctx, subscriptionworkflow.CreateSubscriptionWorkflowInput{
-		ChangeSubscriptionWorkflowInput: subscriptionworkflow.ChangeSubscriptionWorkflowInput{
-			Timing: subscription.Timing{
-				Custom: lo.ToPtr(startAt),
-			},
-			Name: "subs-1",
-		},
-		Namespace:  s.Namespace,
-		CustomerID: s.Customer.ID,
-	}, subscriptionPlan)
+	input.Namespace = s.Namespace
+	input.CustomerID = s.Customer.ID
+
+	subsView, err := s.SubscriptionWorkflowService.CreateFromPlan(ctx, input, subscriptionPlan)
 
 	s.NoError(err)
 	s.NotNil(subsView)
+
 	return subsView
+}
+
+func (s *SuiteBase) getSyncState(subscriptionID models.NamespacedID) subscriptionsync.SyncStateManaged {
+	s.T().Helper()
+	states, err := s.Service.GetSyncStates(s.T().Context(), subscriptionsync.GetSyncStatesInput{subscriptionID})
+	s.Require().NoError(err)
+	s.Require().Len(states, 1)
+	s.Equal(subscriptionID, states[0].SubscriptionID)
+	s.Require().NoError(states[0].Validate())
+
+	return states[0]
+}
+
+// requireActiveDeadline checks the persisted result against the expected calendar
+// period. Subsequent syncs use the returned deadline, including its random offset.
+func (s *SuiteBase) requireActiveDeadline(subscriptionID models.NamespacedID, period timeutil.ClosedPeriod) time.Time {
+	s.T().Helper()
+	state := s.getSyncState(subscriptionID)
+	s.Equal(subscriptionsync.SyncStateStateActive, state.LastSuccessState)
+	s.Equal(lo.ToPtr(clock.Now().UTC()), state.LastSuccessAt)
+	s.Equal(state.CurrentSubsRevision, state.LastSyncedSubsRevision)
+	s.Require().NotNil(state.NextReconciliationAt)
+	duration := period.To.Sub(period.From)
+	s.Require().False(state.NextReconciliationAt.Before(period.From.Add(duration*80/100)), "deadline %s is before the 80%% point of %v", state.NextReconciliationAt, period)
+	s.Require().False(state.NextReconciliationAt.After(period.From.Add(duration*95/100)), "deadline %s is after the 95%% point of %v", state.NextReconciliationAt, period)
+	s.Require().True(state.NextReconciliationAt.After(clock.Now()), "next sync must advance the clock")
+
+	return *state.NextReconciliationAt
+}
+
+// requireUnscheduled checks that the sync that just ran recorded the given state
+// without a next reconciliation deadline. Only active results are scheduled.
+func (s *SuiteBase) requireUnscheduled(subscriptionID models.NamespacedID, want subscriptionsync.SyncStateState) {
+	s.T().Helper()
+	state := s.getSyncState(subscriptionID)
+	s.Equal(want, state.LastSuccessState)
+	s.Equal(lo.ToPtr(clock.Now().UTC()), state.LastSuccessAt)
+	s.Equal(state.CurrentSubsRevision, state.LastSyncedSubsRevision)
+	s.Nil(state.NextReconciliationAt)
 }

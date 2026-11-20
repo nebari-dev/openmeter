@@ -52,6 +52,31 @@ type CreateChargeIntent struct {
 	Options meta.CreateOptions
 }
 
+func (i CreateChargeIntent) GetCustomerID() (string, error) {
+	switch i.t {
+	case meta.ChargeTypeFlatFee:
+		if i.flatFee == nil {
+			return "", errors.New("flat fee is nil")
+		}
+
+		return i.flatFee.CustomerID, nil
+	case meta.ChargeTypeUsageBased:
+		if i.usageBased == nil {
+			return "", errors.New("usage based is nil")
+		}
+
+		return i.usageBased.CustomerID, nil
+	case meta.ChargeTypeCreditPurchase:
+		if i.creditPurchase == nil {
+			return "", errors.New("credit purchase is nil")
+		}
+
+		return i.creditPurchase.CustomerID, nil
+	default:
+		return "", fmt.Errorf("unsupported charge type: %s", i.t)
+	}
+}
+
 // WithTaxCodeID returns a copy of the create intent with TaxCodeID set to id.
 func (i CreateChargeIntent) WithTaxCodeID(id string) (CreateChargeIntent, error) {
 	switch i.t {
@@ -214,11 +239,13 @@ type ListChargesInput struct {
 	Namespace string
 	// CustomerIDs and CustomerID both narrow the listing and apply together;
 	// empty lists the whole namespace.
-	CustomerIDs     []string
-	CustomerID      *filter.FilterULID
-	SubscriptionIDs []string
-	ChargeTypes     []meta.ChargeType
-	Status          *filter.FilterString
+	CustomerIDs []string
+	CustomerID  *filter.FilterULID
+
+	// Charges without a subscription never match an ID comparison.
+	SubscriptionID *filter.FilterULID
+	ChargeTypes    []meta.ChargeType
+	Status         *filter.FilterString
 	// FeatureID and FeatureKey filter on the charge's feature reference;
 	// credit purchase charges carry no feature reference and never match.
 	FeatureID  *filter.FilterULID
@@ -255,12 +282,6 @@ func (i ListChargesInput) Validate() error {
 		}
 	}
 
-	for _, subscriptionID := range i.SubscriptionIDs {
-		if subscriptionID == "" {
-			errs = append(errs, errors.New("subscription id is required"))
-		}
-	}
-
 	for _, chargeType := range i.ChargeTypes {
 		if err := chargeType.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("charge type: %w", err))
@@ -270,6 +291,12 @@ func (i ListChargesInput) Validate() error {
 	if i.CustomerID != nil {
 		if err := i.CustomerID.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("customer id filter: %w", err))
+		}
+	}
+
+	if i.SubscriptionID != nil {
+		if err := i.SubscriptionID.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("subscription id filter: %w", err))
 		}
 	}
 

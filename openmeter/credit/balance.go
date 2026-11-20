@@ -65,10 +65,11 @@ func (m *connector) getBalanceSinceSnapshot(ctx context.Context, ownerID models.
 	}
 
 	// get all relevant grants
-	grants, err := m.GrantRepo.ListActiveGrantsBetween(ctx, ownerID, period.From, period.To)
+	grants, err := m.listActiveGrantsBetween(ctx, ownerID, period.From, period.To)
 	if err != nil {
 		return def, fmt.Errorf("failed to list active grants at %s for owner %s: %w", at, ownerID.ID, err)
 	}
+
 	// These grants might not be present in the starting balance so lets fill them
 	// This is only possible in case the grant becomes active exactly at the start of the current period
 	m.populateBalanceSnapshotWithMissingGrantsActiveAt(&snap, grants, period.From)
@@ -177,7 +178,7 @@ func (m *connector) GetBalanceForPeriod(ctx context.Context, ownerID models.Name
 	}
 
 	// get all relevant grants
-	grants, err := m.GrantRepo.ListActiveGrantsBetween(ctx, ownerID, res.Snapshot.At, period.To)
+	grants, err := m.listActiveGrantsBetween(ctx, ownerID, res.Snapshot.At, period.To)
 	if err != nil {
 		return def, err
 	}
@@ -235,8 +236,10 @@ func (m *connector) ResetUsageForOwner(ctx context.Context, ownerID models.Names
 		if _, ok := lo.ErrorsAs[*grant.OwnerNotFoundError](err); ok {
 			return nil, err
 		}
+
 		return nil, fmt.Errorf("failed to get current usage period start for owner %s at %s: %w", ownerID.ID, at, err)
 	}
+
 	if at.Before(periodStart) {
 		return nil, models.NewGenericValidationError(fmt.Errorf("reset at %s is before current usage period start %s", at, periodStart))
 	}
@@ -275,10 +278,11 @@ func (m *connector) ResetUsageForOwner(ctx context.Context, ownerID models.Names
 	resetBehavior := owner.ResetBehavior
 	resetBehavior.PreserveOverage = params.PreserveOverage
 
-	grants, err := m.GrantRepo.ListActiveGrantsBetween(ctx, ownerID, bal.At, at)
+	grants, err := m.listActiveGrantsBetween(ctx, ownerID, bal.At, at)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list active grants at %s for owner %s: %w", at, ownerID.ID, err)
 	}
+
 	m.populateBalanceSnapshotWithMissingGrantsActiveAt(&bal, grants, bal.At)
 
 	// Let's define the period the engine will be queried for

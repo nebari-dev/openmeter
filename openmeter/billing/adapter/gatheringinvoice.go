@@ -8,7 +8,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/ent/db"
@@ -33,17 +33,12 @@ func (a *adapter) CreateGatheringInvoice(ctx context.Context, input billing.Crea
 
 	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, tx *adapter) (billing.GatheringInvoice, error) {
 		customer := input.Customer
-		supplier := input.MergedProfile.Supplier
+		supplier := input.EffectiveProfile.Supplier
 
 		// Clone the workflow config
-		clonedWorkflowConfig, err := tx.createWorkflowConfig(ctx, input.Namespace, input.MergedProfile.WorkflowConfig)
+		clonedWorkflowConfig, err := tx.createWorkflowConfig(ctx, input.Namespace, input.EffectiveProfile.WorkflowConfig)
 		if err != nil {
 			return billing.GatheringInvoice{}, fmt.Errorf("clone workflow config: %w", err)
-		}
-
-		currentSchemaLevel, err := tx.GetInvoiceDefaultSchemaLevel(ctx)
-		if err != nil {
-			return billing.GatheringInvoice{}, fmt.Errorf("get invoice write schema level: %w", err)
 		}
 
 		createMut := tx.db.BillingInvoice.Create().
@@ -51,19 +46,19 @@ func (a *adapter) CreateGatheringInvoice(ctx context.Context, input billing.Crea
 			SetMetadata(input.Metadata).
 			SetCurrency(input.Currency).
 			SetStatus(billing.StandardInvoiceStatusGathering).
-			SetSourceBillingProfileID(input.MergedProfile.ID).
+			SetSourceBillingProfileID(input.EffectiveProfile.ID).
 			SetType(billing.InvoiceTypeStandard). // TODO: Migrate to GatheringInvoiceType once we have the type in the database
 			SetNumber(input.Number).
 			SetNillableDescription(input.Description).
 			SetNillableCollectionAt(input.NextCollectionAt).
-			SetSchemaLevel(currentSchemaLevel).
+			SetSchemaLevel(billing.CurrentInvoiceSchemaLevel).
 			// Customer snapshot about usage attribution fields
 			SetCustomerID(input.Customer.ID).
 			// TODO: Remove all below this line once we have separate tables for gathering invoices
 			SetBillingWorkflowConfigID(clonedWorkflowConfig.ID).
-			SetTaxAppID(input.MergedProfile.Apps.Tax.GetID().ID).
-			SetInvoicingAppID(input.MergedProfile.Apps.Invoicing.GetID().ID).
-			SetPaymentAppID(input.MergedProfile.Apps.Payment.GetID().ID).
+			SetTaxAppID(input.EffectiveProfile.Apps.Tax.GetID().ID).
+			SetInvoicingAppID(input.EffectiveProfile.Apps.Invoicing.GetID().ID).
+			SetPaymentAppID(input.EffectiveProfile.Apps.Payment.GetID().ID).
 			// Totals
 			SetAmount(alpacadecimal.Zero).
 			SetChargesTotal(alpacadecimal.Zero).
@@ -80,6 +75,7 @@ func (a *adapter) CreateGatheringInvoice(ctx context.Context, input billing.Crea
 		if usageAttr := mapCustomerUsageAttributionToDB(input.Customer); usageAttr != nil {
 			createMut = createMut.SetCustomerUsageAttribution(usageAttr)
 		}
+
 		createMut = createMut.
 			SetCustomerName(customer.Name)
 
@@ -91,11 +87,15 @@ func (a *adapter) CreateGatheringInvoice(ctx context.Context, input billing.Crea
 		// Let's add required edges for mapping
 		newInvoice.Edges.BillingWorkflowConfig = clonedWorkflowConfig
 
-		return tx.mapGatheringInvoiceFromDB(ctx, newInvoice, billing.GatheringInvoiceExpands{})
+		return tx.mapGatheringInvoiceFromDB(newInvoice, billing.GatheringInvoiceExpands{})
 	})
 }
 
 func (a *adapter) UpdateGatheringInvoice(ctx context.Context, in billing.GatheringInvoice) error {
+	if in.SchemaLevel != billing.CurrentInvoiceSchemaLevel {
+		return fmt.Errorf("unsupported invoice schema level: %d", in.SchemaLevel)
+	}
+
 	if err := in.Validate(); err != nil {
 		return fmt.Errorf("validating gathering invoice: %w", err)
 	}
@@ -107,6 +107,10 @@ func (a *adapter) UpdateGatheringInvoice(ctx context.Context, in billing.Gatheri
 			Only(ctx)
 		if err != nil {
 			return err
+		}
+
+		if existingInvoice.SchemaLevel != billing.CurrentInvoiceSchemaLevel {
+			return fmt.Errorf("unsupported invoice schema level: %d", existingInvoice.SchemaLevel)
 		}
 
 		if err := tx.validateUpdateGatheringInvoiceRequest(in, existingInvoice); err != nil {
@@ -232,17 +236,17 @@ func (a *adapter) ListGatheringInvoices(ctx context.Context, input billing.ListG
 		}
 
 		switch input.OrderBy {
-		case api.InvoiceOrderByCustomerName:
+		case apiv1models.InvoiceOrderByCustomerName:
 			query = query.Order(billinginvoice.ByCustomerName(order...))
-		case api.InvoiceOrderByIssuedAt:
+		case apiv1models.InvoiceOrderByIssuedAt:
 			query = query.Order(billinginvoice.ByIssuedAt(order...))
-		case api.InvoiceOrderByPeriodStart:
+		case apiv1models.InvoiceOrderByPeriodStart:
 			query = query.Order(billinginvoice.ByPeriodStart(order...))
-		case api.InvoiceOrderByStatus:
+		case apiv1models.InvoiceOrderByStatus:
 			query = query.Order(billinginvoice.ByStatus(order...))
-		case api.InvoiceOrderByUpdatedAt:
+		case apiv1models.InvoiceOrderByUpdatedAt:
 			query = query.Order(billinginvoice.ByUpdatedAt(order...))
-		case api.InvoiceOrderByCreatedAt:
+		case apiv1models.InvoiceOrderByCreatedAt:
 			fallthrough
 		default:
 			query = query.Order(billinginvoice.ByCreatedAt(order...))
@@ -263,7 +267,7 @@ func (a *adapter) ListGatheringInvoices(ctx context.Context, input billing.ListG
 
 		result := make([]billing.GatheringInvoice, 0, len(paged.Items))
 		for _, invoice := range paged.Items {
-			mapped, err := tx.mapGatheringInvoiceFromDB(ctx, invoice, input.Expand)
+			mapped, err := tx.mapGatheringInvoiceFromDB(invoice, input.Expand)
 			if err != nil {
 				return response, err
 			}
@@ -455,11 +459,15 @@ func (a *adapter) GetGatheringInvoiceById(ctx context.Context, input billing.Get
 			return billing.GatheringInvoice{}, err
 		}
 
-		return tx.mapGatheringInvoiceFromDB(ctx, invoice, input.Expand)
+		return tx.mapGatheringInvoiceFromDB(invoice, input.Expand)
 	})
 }
 
-func (a *adapter) mapGatheringInvoiceFromDB(ctx context.Context, invoice *db.BillingInvoice, expand billing.GatheringInvoiceExpands) (billing.GatheringInvoice, error) {
+func (a *adapter) mapGatheringInvoiceFromDB(invoice *db.BillingInvoice, expand billing.GatheringInvoiceExpands) (billing.GatheringInvoice, error) {
+	if invoice.SchemaLevel != billing.CurrentInvoiceSchemaLevel {
+		return billing.GatheringInvoice{}, fmt.Errorf("unsupported invoice schema level: %d", invoice.SchemaLevel)
+	}
+
 	if invoice.Status != billing.StandardInvoiceStatusGathering {
 		return billing.GatheringInvoice{}, fmt.Errorf("invoice is not a gathering invoice [id=%s]", invoice.ID)
 	}
@@ -502,27 +510,9 @@ func (a *adapter) mapGatheringInvoiceFromDB(ctx context.Context, invoice *db.Bil
 	}
 
 	if expand.Has(billing.GatheringInvoiceExpandLines) {
-		mappedLines, err := a.mapGatheringInvoiceLinesFromDB(invoice.SchemaLevel, invoice.Edges.BillingInvoiceLines)
+		mappedLines, err := a.mapGatheringInvoiceLinesFromDB(invoice.Edges.BillingInvoiceLines)
 		if err != nil {
 			return billing.GatheringInvoice{}, err
-		}
-
-		if expand.Has(billing.GatheringInvoiceExpandSplitLineHierarchy) {
-			hierarchyByLineID, err := a.expandSplitLineHierarchy(ctx, invoice.Namespace, mappedLines.AsGenericLines())
-			if err != nil {
-				return billing.GatheringInvoice{}, err
-			}
-
-			mappedLinePtrs, err := withSplitLineHierarchyForLines(lo.Map(mappedLines, func(_ billing.GatheringLine, idx int) *billing.GatheringLine {
-				return &mappedLines[idx]
-			}), hierarchyByLineID)
-			if err != nil {
-				return billing.GatheringInvoice{}, err
-			}
-
-			mappedLines = lo.Map(mappedLinePtrs, func(line *billing.GatheringLine, _ int) billing.GatheringLine {
-				return *line
-			})
 		}
 
 		res.Lines = billing.NewGatheringInvoiceLines(mappedLines)

@@ -10,9 +10,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/handlers/meters/query"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/meter"
@@ -45,7 +45,7 @@ func (h *handler) QueryMeterCSV() QueryMeterCSVHandler {
 				return QueryMeterCSVRequest{}, err
 			}
 
-			var body api.MeterQueryRequest
+			var body apiv3models.MeterQueryRequest
 			if err := request.ParseBody(r, &body); err != nil {
 				return QueryMeterCSVRequest{}, err
 			}
@@ -113,8 +113,10 @@ func collectCustomerIDs(rows []meter.MeterQueryRow) []string {
 		if row.CustomerID == nil {
 			continue
 		}
+
 		ids = append(ids, *row.CustomerID)
 	}
+
 	return lo.Uniq(ids)
 }
 
@@ -170,9 +172,11 @@ func (r *queryMeterCSVResult) Records() [][]string {
 	if hasSubjectColumn {
 		headers = append(headers, query.DimensionSubject)
 	}
+
 	if hasCustomerColumns {
 		headers = append(headers, csvColumnCustomerID, csvColumnCustomerKey, csvColumnCustomerName)
 	}
+
 	headers = append(headers, otherDimensions...)
 	headers = append(headers, csvColumnValue)
 
@@ -199,6 +203,7 @@ func (r *queryMeterCSVResult) Records() [][]string {
 					name = c.Name
 				}
 			}
+
 			record = append(record,
 				id,
 				key,
@@ -211,6 +216,7 @@ func (r *queryMeterCSVResult) Records() [][]string {
 			if ptr, ok := row.GroupBy[k]; ok && ptr != nil {
 				v = *ptr
 			}
+
 			record = append(record, v)
 		}
 

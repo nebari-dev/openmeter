@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"github.com/stripe/stripe-go/v80"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/openmeterio/openmeter/openmeter/app"
 	appstripe "github.com/openmeterio/openmeter/openmeter/app/stripe"
@@ -45,6 +46,7 @@ import (
 	secretservice "github.com/openmeterio/openmeter/openmeter/secret/service"
 	"github.com/openmeterio/openmeter/openmeter/streaming"
 	"github.com/openmeterio/openmeter/openmeter/taxcode"
+	taxcodetestutils "github.com/openmeterio/openmeter/openmeter/taxcode/testutils"
 	omtestutils "github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/clock"
@@ -135,6 +137,7 @@ func (s *StripeInvoiceTestSuite) SetupSuite() {
 	advanceService := advancetestutils.NewService(s.T(), ledgerDeps, breakageService)
 
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:   metricnoop.NewMeterProvider().Meter("test"),
 		Logger:  omtestutils.NewDiscardLogger(s.T()),
 		Advance: advanceService,
 		Ledger:  ledgerDeps.HistoricalLedger,
@@ -166,7 +169,7 @@ func (s *StripeInvoiceTestSuite) SetupSuite() {
 		BillingService:        s.BillingService,
 		FeatureMeterResolver:  s.FeatureMeterResolver,
 		StreamingConnector:    s.MockStreamingConnector,
-		TaxCodeService:        s.TaxCodeService,
+		TaxCodeService:        s.TaxCodeEnv.Service,
 		CustomerService:       s.CustomerService,
 		FlatFeeHandler:        ledgerchargeadapter.NewFlatFeeHandler(ledgerDeps.HistoricalLedger, transactions.ResolverDependencies{AccountService: ledgerDeps.ResolversService, AccountCatalog: ledgerDeps.AccountService, BalanceQuerier: ledgerDeps.HistoricalLedger}, collectorService),
 		CreditPurchaseHandler: creditPurchaseHandler,
@@ -217,29 +220,11 @@ func (s *StripeInvoiceTestSuite) TestComplexInvoice() {
 
 	sandboxApp := s.InstallSandboxApp(s.T(), namespace)
 
-	defaultInvoicingTaxCode, err := s.TaxCodeService.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-		Namespace: namespace,
-		Key:       "default-invoicing",
-		Name:      "Default Invoicing",
-		AppMappings: taxcode.TaxCodeAppMappings{
+	defaultTaxCodes := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), namespace, taxcodetestutils.ProvisionDefaultTaxCodesInput{
+		InvoicingAppMappings: taxcode.TaxCodeAppMappings{
 			{AppType: app.AppTypeStripe, TaxCode: defaultStripeTaxCode},
 		},
 	})
-	s.NoError(err)
-
-	defaultCreditGrantTaxCode, err := s.TaxCodeService.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-		Namespace: namespace,
-		Key:       "default-credit-grant",
-		Name:      "Default Credit Grant",
-	})
-	s.NoError(err)
-
-	defaultTaxCodes, err := s.TaxCodeService.UpsertOrganizationDefaultTaxCodes(ctx, taxcode.UpsertOrganizationDefaultTaxCodesInput{
-		Namespace:            namespace,
-		InvoicingTaxCodeID:   defaultInvoicingTaxCode.ID,
-		CreditGrantTaxCodeID: defaultCreditGrantTaxCode.ID,
-	})
-	s.NoError(err)
 
 	flatPerUnitMeterID := ulid.Make().String()
 	flatPerUsageMeterID := ulid.Make().String()
@@ -247,7 +232,7 @@ func (s *StripeInvoiceTestSuite) TestComplexInvoice() {
 	tieredVolumeMeterID := ulid.Make().String()
 	aiFlatPerUnitMeterID := ulid.Make().String()
 
-	err = s.MeterAdapter.ReplaceMeters(ctx, []meter.Meter{
+	err := s.MeterAdapter.ReplaceMeters(ctx, []meter.Meter{
 		{
 			ManagedResource: models.ManagedResource{
 				ID: flatPerUnitMeterID,
@@ -1150,7 +1135,6 @@ func (s *StripeInvoiceTestSuite) TestEmptyInvoiceGenerationZeroUsage() {
 	// Given we have a test customer and an UBP line without usage priced at 0
 	// we can create the invoice and even if there are no detailed lines the validation
 	// errors should be empty
-
 	namespace := "ns-empty-invoice-generation"
 	ctx := context.Background()
 	periodStart := lo.Must(time.Parse(time.RFC3339, "2024-09-02T12:13:14Z"))
@@ -1225,7 +1209,7 @@ func (s *StripeInvoiceTestSuite) TestEmptyInvoiceGenerationZeroUsage() {
 		// manual advancement for testing the update invoice flow
 		profile.WorkflowConfig.Invoicing.AutoAdvance = false
 	}))
-	s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+	s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 	// Setup the app with the customer
 
@@ -1386,7 +1370,7 @@ func (s *StripeInvoiceTestSuite) TestDeletedAppFailsAdvancementButAllowsInvoiceD
 		s.Require().NoError(err)
 
 		s.ProvisionBillingProfile(ctx, namespace, stripeApp.GetID(), billingtest.WithManualApproval())
-		s.ProvisionProviderDefaultTaxCode(ctx, namespace)
+		s.TaxCodeEnv.ProvisionProviderDefaultTaxCode(s.T(), namespace)
 
 		s.StripeAppClient.
 			On("GetCustomer", customerData.StripeCustomerID).
@@ -1473,7 +1457,7 @@ func (s *StripeInvoiceTestSuite) TestDeletedAppFailsAdvancementButAllowsInvoiceD
 		s.Equal(stripeApp.GetID(), refetched.Workflow.Apps.Tax.GetID())
 		s.Equal(stripeApp.GetID(), refetched.Workflow.Apps.Invoicing.GetID())
 		s.Equal(stripeApp.GetID(), refetched.Workflow.Apps.Payment.GetID())
-		_, err = billinghttpdriver.MapStandardInvoiceToAPI(refetched)
+		_, err = billinghttpdriver.MapStandardInvoiceToAPI(refetched, nil)
 		s.Require().NoError(err)
 	})
 
@@ -1528,7 +1512,6 @@ func (s *StripeInvoiceTestSuite) TestSendInvoice() {
 	// Given we have a test customer and a billing profile with send_invoice collection method
 	// we can create an invoice that will be sent to the customer instead of charged automatically.
 	// In this test we should see due date set and collection method set to send_invoice.
-
 	namespace := "ns-send-invoice"
 	ctx := context.Background()
 	periodStart := lo.Must(time.Parse(time.RFC3339, "2024-09-02T12:13:14Z"))

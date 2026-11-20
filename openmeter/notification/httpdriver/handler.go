@@ -8,7 +8,8 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/namespace/namespacedriver"
 	"github.com/openmeterio/openmeter/openmeter/notification"
-	"github.com/openmeterio/openmeter/openmeter/notification/internal"
+	"github.com/openmeterio/openmeter/openmeter/notification/testevent"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
 )
@@ -46,7 +47,7 @@ var _ Handler = (*handler)(nil)
 
 type handler struct {
 	service            notification.Service
-	testEventGenerator *internal.TestEventGenerator
+	testEventGenerator *testevent.Generator
 	namespaceDecoder   namespacedriver.NamespaceDecoder
 	options            []httptransport.HandlerOption
 }
@@ -64,11 +65,12 @@ func New(
 	namespaceDecoder namespacedriver.NamespaceDecoder,
 	service notification.Service,
 	billingService billing.Service,
+	taxCodeResolver productcatalog.TaxCodeResolver,
 	options ...httptransport.HandlerOption,
 ) Handler {
 	return &handler{
 		service:            service,
-		testEventGenerator: internal.NewTestEventGenerator(billingService),
+		testEventGenerator: testevent.NewGenerator(billingService, taxCodeResolver),
 		namespaceDecoder:   namespaceDecoder,
 		options:            options,
 	}

@@ -5,16 +5,22 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/samber/lo"
+
 	"github.com/openmeterio/openmeter/openmeter/billing"
-	billinghttp "github.com/openmeterio/openmeter/openmeter/billing/httpdriver"
+	billingconvert "github.com/openmeterio/openmeter/openmeter/billing/apiconvert"
 	"github.com/openmeterio/openmeter/openmeter/notification"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/sortx"
 )
 
 type InvoiceEventHandler struct {
 	Notification notification.Service
-	Logger       *slog.Logger
+	// TaxCodeResolver fills in the invoice default's stripe.code, which the event doesn't carry.
+	TaxCodeResolver productcatalog.TaxCodeResolver
+	Logger          *slog.Logger
 }
 
 func (h *InvoiceEventHandler) Handle(ctx context.Context, event billing.EventStandardInvoice, eventType notification.EventType) error {
@@ -27,10 +33,11 @@ func (h *InvoiceEventHandler) Handle(ctx context.Context, event billing.EventSta
 
 	// List active rules available for this event type in namespace
 	rules, err := h.Notification.ListRules(ctx, notification.ListRulesInput{
-		Namespaces: []string{event.Invoice.Namespace},
-		Types:      []notification.EventType{eventType},
-		OrderBy:    notification.OrderByID,
-		Order:      sortx.OrderDefault,
+		Namespace: event.Invoice.Namespace,
+		Type:      &filter.FilterString{Eq: lo.ToPtr(string(eventType))},
+		Disabled:  &filter.FilterBoolean{Eq: lo.ToPtr(false)},
+		OrderBy:   notification.OrderByID,
+		Order:     sortx.OrderDefault,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list rules for event type [namespace=%s event.type=%s]: %w",
@@ -48,7 +55,12 @@ func (h *InvoiceEventHandler) Handle(ctx context.Context, event billing.EventSta
 		return nil
 	}
 
-	apiInvoice, err := billinghttp.MapEventInvoiceToAPI(event)
+	taxCodes, err := billingconvert.ResolveWorkflowTaxCodes(ctx, h.TaxCodeResolver, event.Invoice.Namespace, event.Invoice.Workflow.Config)
+	if err != nil {
+		return fmt.Errorf("failed to resolve tax codes for event invoice: %w", err)
+	}
+
+	apiInvoice, err := billingconvert.ToAPIEventInvoice(event, taxCodes)
 	if err != nil {
 		return fmt.Errorf("failed to map event invoice to API: %w", err)
 	}

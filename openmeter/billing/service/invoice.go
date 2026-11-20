@@ -10,6 +10,7 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
+	"github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	"github.com/openmeterio/openmeter/openmeter/billing/service/invoicecalc"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/pkg/clock"
@@ -165,34 +166,11 @@ func (s *Service) calculateGatheringInvoiceAsStandardInvoice(ctx context.Context
 	}
 
 	wasLinesPresent := invoice.Lines.IsPresent()
-
-	shouldReloadLines := !wasLinesPresent
-
-	if !invoice.Expands.Has(billing.GatheringInvoiceExpandSplitLineHierarchy) && wasLinesPresent {
-		// If the invoice has lines and the splitline hierarchy is not expanded, we need to check if there are any progressive billed lines
-		// and reload the invoice as price calculations depend on the presence of the split line hierarchy.
-
-		progressiveBilledLineCount := lo.CountBy(invoice.Lines.OrEmpty(), func(line billing.GatheringLine) bool {
-			if line.DeletedAt != nil {
-				return false
-			}
-
-			return line.SplitLineGroupID != nil
-		})
-
-		if progressiveBilledLineCount > 0 {
-			shouldReloadLines = true
-		}
-	}
-
-	// If the gathering invoice has no splitline hierarchy expanded we need to reload the invoice so that the price calculations can
-	// properly proceed.
-	if shouldReloadLines {
+	if !wasLinesPresent {
 		// Let's reload the whole invoice with lines expanded
 		invoice, err = s.adapter.GetGatheringInvoiceById(ctx, billing.GetGatheringInvoiceByIdInput{
 			Invoice: in.Invoice.GetInvoiceID(),
-			Expand: billing.GatheringInvoiceExpandAll.
-				With(billing.GatheringInvoiceExpandSplitLineHierarchy),
+			Expand:  billing.GatheringInvoiceExpandAll,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("fetching gathering invoice: %w", err)
@@ -280,20 +258,8 @@ func (s *Service) calculateGatheringInvoiceAsStandardInvoice(ctx context.Context
 	out.QuantitySnapshotedAt = lo.ToPtr(now)
 	out.Lines = billing.NewStandardInvoiceLines(inScopeLines)
 
-	taxCodes, err := s.resolveTaxCodes(ctx, resolveTaxCodesInput{
-		Namespace: invoice.Namespace,
-		Invoice:   out,
-		ReadOnly:  true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("resolving tax codes: %w", err)
-	}
-
-	if err := s.invoiceCalculator.CalculateGatheringInvoiceWithLiveData(out, invoicecalc.StandardInvoiceCalculatorDependencies{
-		RatingService: s.ratingService,
-		TaxCodes:      taxCodes,
-		LineEngines:   s.lineEngines,
-	}); err != nil {
+	// No tax inputs: tax config is only snapshotted into lines of standard invoices, never gathering.
+	if err := s.invoiceCalculator.CalculateGatheringInvoiceWithLiveData(out, invoicecalc.StandardInvoiceCalculatorDependencies{}); err != nil {
 		return nil, fmt.Errorf("calculating invoice: %w", err)
 	}
 
@@ -329,12 +295,12 @@ func (s *Service) calculateGatheringInvoiceAsStandardInvoice(ctx context.Context
 }
 
 func (s *Service) createStandardInvoiceHeaderFromGatheringInvoice(ctx context.Context, in billing.GatheringInvoice) (*billing.StandardInvoice, error) {
-	mergedProfile, err := s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+	mergedProfile, err := s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 		Customer: customer.CustomerID{
 			Namespace: in.Namespace,
 			ID:        in.CustomerID,
 		},
-		Expand: billing.CustomerOverrideExpand{
+		Expand: billing.CustomerBillingProfileExpand{
 			Customer: true,
 			Apps:     true,
 		},
@@ -360,12 +326,12 @@ func (s *Service) createStandardInvoiceHeaderFromGatheringInvoice(ctx context.Co
 			UpdatedAt: in.UpdatedAt,
 			DeletedAt: in.DeletedAt,
 			Customer:  billing.NewInvoiceCustomer(lo.FromPtr(mergedProfile.Customer)),
-			Supplier:  mergedProfile.MergedProfile.Supplier,
+			Supplier:  mergedProfile.EffectiveProfile.Supplier,
 			Workflow: billing.InvoiceWorkflow{
-				AppReferences:          lo.FromPtr(mergedProfile.MergedProfile.AppReferences),
-				Apps:                   mergedProfile.MergedProfile.Apps,
-				SourceBillingProfileID: mergedProfile.MergedProfile.ID,
-				Config:                 mergedProfile.MergedProfile.WorkflowConfig,
+				AppReferences:          lo.FromPtr(mergedProfile.EffectiveProfile.AppReferences),
+				Apps:                   mergedProfile.EffectiveProfile.Apps,
+				SourceBillingProfileID: mergedProfile.EffectiveProfile.ID,
+				Config:                 mergedProfile.EffectiveProfile.WorkflowConfig,
 			},
 			SchemaLevel: in.SchemaLevel,
 		},
@@ -457,6 +423,7 @@ func (s *Service) advanceUntilStateStable(ctx context.Context, sm *InvoiceStateM
 	}
 
 	sm.Invoice.ValidationIssues = validationIssues
+
 	return nil
 }
 
@@ -770,6 +737,7 @@ func (s *Service) DeleteInvoice(ctx context.Context, input billing.DeleteInvoice
 			if input.DeletionSource != billing.ChangeSourceAPIRequest {
 				return nil
 			}
+
 			// Charge cleanup committed before invoice-app synchronization. A retry
 			// must not validate or dispatch those already-applied line deletions.
 			if sm.Invoice.DeletedAt != nil {
@@ -825,16 +793,16 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 		return billing.StandardInvoice{}, fmt.Errorf("validating input: %w", err)
 	}
 
-	var customerProfile billing.CustomerOverrideWithDetails
+	var customerProfile billing.CustomerBillingProfile
 
 	if input.CustomerID != nil {
 		var err error
-		customerProfile, err = s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+		customerProfile, err = s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 			Customer: customer.CustomerID{
 				Namespace: input.Namespace,
 				ID:        *input.CustomerID,
 			},
-			Expand: billing.CustomerOverrideExpand{Customer: true},
+			Expand: billing.CustomerBillingProfileExpand{Customer: true},
 		})
 		if err != nil {
 			return billing.StandardInvoice{}, fmt.Errorf("getting profile with customer override: %w", err)
@@ -857,6 +825,8 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 			Namespace: input.Namespace,
 			ID:        ulid.Make().String(),
 
+			SchemaLevel: billing.CurrentInvoiceSchemaLevel,
+
 			Number: lo.FromPtrOr(input.Number, "INV-SIMULATED"),
 
 			Type: billing.InvoiceTypeStandard,
@@ -870,22 +840,25 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 			Customer: billing.NewInvoiceCustomer(*customerProfile.Customer),
 
 			Supplier: billing.SupplierContact{
-				ID:      customerProfile.MergedProfile.Supplier.ID,
-				Name:    customerProfile.MergedProfile.Supplier.Name,
-				Address: customerProfile.MergedProfile.Supplier.Address,
-				TaxCode: customerProfile.MergedProfile.Supplier.TaxCode,
+				ID:      customerProfile.EffectiveProfile.Supplier.ID,
+				Name:    customerProfile.EffectiveProfile.Supplier.Name,
+				Address: customerProfile.EffectiveProfile.Supplier.Address,
+				TaxCode: customerProfile.EffectiveProfile.Supplier.TaxCode,
 			},
 
 			Workflow: billing.InvoiceWorkflow{
-				AppReferences:          lo.FromPtr(customerProfile.MergedProfile.AppReferences),
-				Apps:                   customerProfile.MergedProfile.Apps,
-				SourceBillingProfileID: customerProfile.MergedProfile.ID,
-				Config:                 customerProfile.MergedProfile.WorkflowConfig,
+				AppReferences:          lo.FromPtr(customerProfile.EffectiveProfile.AppReferences),
+				Apps:                   customerProfile.EffectiveProfile.Apps,
+				SourceBillingProfileID: customerProfile.EffectiveProfile.ID,
+				Config:                 customerProfile.EffectiveProfile.WorkflowConfig,
 			},
 		},
 	}
 
-	inputLines := input.Lines.OrEmpty()
+	inputLines, err := input.Lines.OrEmpty().Clone()
+	if err != nil {
+		return billing.StandardInvoice{}, fmt.Errorf("cloning simulation lines: %w", err)
+	}
 
 	invoice.Lines = billing.NewStandardInvoiceLines(
 		lo.Map(inputLines, func(line *billing.StandardLine, _ int) *billing.StandardLine {
@@ -893,6 +866,7 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 			if line.ID == "" {
 				line.ID = ulid.Make().String()
 			}
+
 			line.CreatedAt = now
 			line.UpdatedAt = now
 			line.Currency = input.Currency
@@ -908,7 +882,7 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 		}
 	}
 
-	err := errors.Join(lo.Map(invoice.Lines.OrEmpty(), func(line *billing.StandardLine, _ int) error {
+	err = errors.Join(lo.Map(invoice.Lines.OrEmpty(), func(line *billing.StandardLine, _ int) error {
 		return line.Validate()
 	})...)
 	if err != nil {
@@ -927,7 +901,7 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 		}
 	}
 
-	taxCodes, err := s.resolveTaxCodes(ctx, resolveTaxCodesInput{
+	calculatorDeps, err := s.resolveTaxCodes(ctx, resolveTaxCodesInput{
 		Namespace: input.Namespace,
 		Invoice:   &invoice,
 		ReadOnly:  true,
@@ -936,12 +910,37 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 		return billing.StandardInvoice{}, fmt.Errorf("resolving tax codes: %w", err)
 	}
 
-	// Let's simulate a recalculation of the invoice
-	if err := s.invoiceCalculator.Calculate(&invoice, invoicecalc.StandardInvoiceCalculatorDependencies{
-		RatingService: s.ratingService,
-		TaxCodes:      taxCodes,
-		LineEngines:   s.lineEngines,
-	}); err != nil {
+	groupedLines, err := s.lineEngines.groupStandardLinesByEngine(invoice.Lines.OrEmpty().WithoutDeletedLines())
+	if err != nil {
+		return billing.StandardInvoice{}, fmt.Errorf("grouping simulation lines: %w", err)
+	}
+
+	for _, grouped := range groupedLines {
+		legacyEngine, ok := grouped.Engine.(*lineengine.Engine)
+		if !ok {
+			// Charge simulation is not feasible yet: charge rating requires persisted
+			// realizations and lifecycle actions. Keep the supplied projection unchanged.
+			continue
+		}
+
+		ratedLines, ratingErr := legacyEngine.RateStandardLines(ctx, lineengine.RateStandardLinesInput{
+			Namespace: input.Namespace,
+			Lines:     grouped.Lines,
+		})
+		if err := invoice.MergeValidationIssues(billing.NewLineEngineValidationError(legacyEngine, ratingErr), billing.LineEngineValidationComponent(legacyEngine.GetLineEngineType())); err != nil {
+			return billing.StandardInvoice{}, fmt.Errorf("rating simulation lines: %w", err)
+		}
+
+		if err := invoice.Lines.ReplaceExact(billing.ReplaceExactLinesInput{
+			Existing:    grouped.Lines,
+			Replacement: ratedLines,
+		}); err != nil {
+			return billing.StandardInvoice{}, fmt.Errorf("replacing simulation lines: %w", err)
+		}
+	}
+
+	// Owners supply calculated lines; the invoice calculator derives aggregate fields.
+	if err := s.invoiceCalculator.Calculate(&invoice, calculatorDeps); err != nil {
 		return billing.StandardInvoice{}, err
 	}
 
@@ -949,6 +948,7 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 		if validationIssue.Severity == billing.ValidationIssueSeverityCritical {
 			invoice.Status = billing.StandardInvoiceStatusDraftInvalid
 			invoice.StatusDetails.Failed = true
+
 			break
 		}
 	}
@@ -956,17 +956,17 @@ func (s Service) SimulateInvoice(ctx context.Context, input billing.SimulateInvo
 	return invoice, nil
 }
 
-func (s *Service) buildSimulatedCustomerProfile(ctx context.Context, namespace string, simulatedCustomer customer.Customer) (billing.CustomerOverrideWithDetails, error) {
+func (s *Service) buildSimulatedCustomerProfile(ctx context.Context, namespace string, simulatedCustomer customer.Customer) (billing.CustomerBillingProfile, error) {
 	profile, err := s.GetDefaultProfile(ctx, billing.GetDefaultProfileInput{
 		Namespace: namespace,
 	})
 	if err != nil {
-		return billing.CustomerOverrideWithDetails{}, fmt.Errorf("getting default profile: %w", err)
+		return billing.CustomerBillingProfile{}, fmt.Errorf("getting default profile: %w", err)
 	}
 
-	return billing.CustomerOverrideWithDetails{
-		MergedProfile: *profile,
-		Customer:      &simulatedCustomer,
+	return billing.CustomerBillingProfile{
+		EffectiveProfile: *profile,
+		Customer:         &simulatedCustomer,
 	}, nil
 }
 
@@ -1012,7 +1012,7 @@ func (s *Service) RecalculateGatheringInvoices(ctx context.Context, input billin
 			return fmt.Errorf("listing gathering invoices: %w", err)
 		}
 
-		customerProfile, err := s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+		customerProfile, err := s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 			Customer: input,
 		})
 		if err != nil {
@@ -1021,7 +1021,7 @@ func (s *Service) RecalculateGatheringInvoices(ctx context.Context, input billin
 
 		for _, invoice := range gatheringInvoices.Items {
 			if err := s.invoiceCalculator.CalculateGatheringInvoice(&invoice, invoicecalc.GatheringInvoiceCalculatorDependencies{
-				Collection: customerProfile.MergedProfile.WorkflowConfig.Collection,
+				Collection: customerProfile.EffectiveProfile.WorkflowConfig.Collection,
 			}); err != nil {
 				return fmt.Errorf("calculating gathering invoice: %w", err)
 			}

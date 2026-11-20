@@ -24,6 +24,7 @@ import (
 
 func TestSubscriptionCustomCurrencyBackfillAcrossPeriods(t *testing.T) {
 	// given: two funded monthly fees followed by two separately collected advances.
+	// The May sync also provisions June's fee, which is not due yet.
 	clock.FreezeTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	defer clock.UnFreeze()
 	f := setupCustomCurrencyFlatFeeSubscription(t)
@@ -31,13 +32,14 @@ func TestSubscriptionCustomCurrencyBackfillAcrossPeriods(t *testing.T) {
 	for month := time.February; month <= time.May; month++ {
 		at := time.Date(2026, month, 1, 0, 0, 0, 0, time.UTC)
 		clock.FreezeTime(at)
-		require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, f.view, at))
+		require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, f.view.Subscription.NamespacedID, at))
 
 		_, err := f.chargesService.AdvanceCharges(ctx, charges.AdvanceChargesInput{Customer: f.view.Customer.GetID()})
 		require.NoError(t, err)
 	}
+
 	ids := listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID)
-	require.Len(t, ids, 4)
+	require.Len(t, ids, 5)
 
 	chargeByMonth := map[time.Month]string{}
 	for _, id := range ids {
@@ -52,7 +54,8 @@ func TestSubscriptionCustomCurrencyBackfillAcrossPeriods(t *testing.T) {
 
 		chargeByMonth[charge.Intent.GetEffectiveServicePeriod().From.Month()] = id
 	}
-	require.Len(t, chargeByMonth, 4)
+
+	require.Len(t, chargeByMonth, 5)
 
 	// when: a late purchase can cover all of April and only half of May.
 	at := time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC)
@@ -131,6 +134,7 @@ func TestSubscriptionCustomCurrencyBackfillAcrossPeriods(t *testing.T) {
 
 		booked[lo.FromPtr(bucket.GroupByValues[ledger.BalanceBucketGroupBySpendChargeID])] += bucket.SettledAmount.InexactFloat64()
 	}
+
 	require.Equal(t, expected, booked)
 
 	roots, err := f.lineageService.LoadLineagesByCustomer(ctx, legacylineage.LoadLineagesByCustomerInput{
@@ -169,6 +173,7 @@ func TestSubscriptionCustomCurrencyBackfillAcrossPeriods(t *testing.T) {
 
 		uncovered[lo.FromPtr(bucket.GroupByValues[ledger.BalanceBucketGroupBySpendChargeID])] -= bucket.SettledAmount.InexactFloat64()
 	}
+
 	require.Equal(t, map[string]float64{chargeByMonth[time.May]: 5}, uncovered)
 
 	requireCustomCurrencyAccountBalance(t, f, f.business.EarningsAccount, 35)

@@ -31,8 +31,10 @@ func TestMigrateToPlanAddons(t *testing.T) {
 			db := subscriptiontestutils.SetupDBDeps(t)
 			defer db.Cleanup(t)
 			deps := subscriptiontestutils.NewService(t, db)
+			taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+			taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
 			planInput := subscriptiontestutils.BuildTestPlanInput(t).AddPhase(nil,
-				subscriptiontestutils.ExampleRateCard3ForAddons.Clone(), subscriptiontestutils.ExampleRateCard2.Clone()).Build()
+				subscriptiontestutils.ExampleRateCard3ForAddons(taxConfig), subscriptiontestutils.ExampleRateCard2.Clone()).Build()
 			p1, addon := subscriptiontestutils.CreatePlanWithAddon(t, deps, planInput,
 				subscriptiontestutils.BuildAddonForTesting(t, productcatalog.EffectivePeriod{EffectiveFrom: &start},
 					productcatalog.AddonInstanceTypeMultiple, subscriptiontestutils.ExampleAddonRateCard4.Clone()))
@@ -51,13 +53,14 @@ func TestMigrateToPlanAddons(t *testing.T) {
 			at := start.Add(9 * 24 * time.Hour)
 			clock.FreezeTime(at)
 			nextInput := subscriptiontestutils.BuildTestPlanInput(t).AddPhase(nil,
-				subscriptiontestutils.ExampleRateCard3ForAddons.Clone(), subscriptiontestutils.ExampleRateCard2.Clone(), subscriptiontestutils.ExampleRateCard1.Clone()).Build()
+				subscriptiontestutils.ExampleRateCard3ForAddons(taxConfig), subscriptiontestutils.ExampleRateCard2.Clone(), subscriptiontestutils.ExampleRateCard1(taxConfig)).Build()
 			if scenario == "changed base" {
 				require.NoError(t, nextInput.Phases[0].RateCards[0].ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
 					meta.Price = productcatalog.NewPriceFrom(productcatalog.FlatPrice{Amount: alpacadecimal.NewFromInt(200), PaymentTerm: productcatalog.InAdvancePaymentTerm})
 					return meta, nil
 				}))
 			}
+
 			p2, err := deps.PlanService.CreatePlan(ctx, nextInput)
 			require.NoError(t, err)
 			if scenario != "incompatible" {
@@ -65,12 +68,14 @@ func TestMigrateToPlanAddons(t *testing.T) {
 				if scenario == "quantity limit" {
 					maxQuantity = lo.ToPtr(1)
 				}
+
 				_, err := deps.PlanAddonService.CreatePlanAddon(ctx, planaddon.CreatePlanAddonInput{
 					NamespacedModel: models.NamespacedModel{Namespace: addon.Namespace}, PlanID: p2.ID, AddonID: addon.ID,
 					FromPlanPhase: "test_phase_1", MaxQuantity: maxQuantity,
 				})
 				require.NoError(t, err)
 			}
+
 			p2, err = deps.PlanService.PublishPlan(ctx, plan.PublishPlanInput{
 				NamespacedID:    p2.NamespacedID,
 				EffectivePeriod: productcatalog.EffectivePeriod{EffectiveFrom: lo.ToPtr(at)},
@@ -92,8 +97,10 @@ func TestMigrateToPlanAddons(t *testing.T) {
 				persistedJSON, err := json.Marshal(persisted)
 				require.NoError(t, err)
 				require.JSONEq(t, string(beforeJSON), string(persistedJSON))
+
 				return
 			}
+
 			require.NoError(t, err)
 			key := subscriptiontestutils.ExampleFeatureKey2
 			require.Equal(t, before.Subscription.ID, after.Subscription.ID)
@@ -107,6 +114,7 @@ func TestMigrateToPlanAddons(t *testing.T) {
 					require.Equal(t, item.SubscriptionItem.CadencedModel, actual.CadencedModel)
 				}
 			}
+
 			// when removing the addon later, restoration must retain the migrated base price
 			removeAt := start.Add(24 * 24 * time.Hour)
 			clock.FreezeTime(removeAt)
@@ -118,6 +126,7 @@ func TestMigrateToPlanAddons(t *testing.T) {
 			if scenario == "changed base" {
 				expected = 200
 			}
+
 			active, ok := lo.Find(removed.Phases[0].ItemsByKey[key], func(item subscription.SubscriptionItemView) bool {
 				return item.SubscriptionItem.IsActiveAt(removeAt)
 			})

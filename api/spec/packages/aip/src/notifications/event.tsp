@@ -1,0 +1,379 @@
+import "../shared/index.tsp";
+import "../entitlements/index.tsp";
+import "./rule.tsp";
+import "./legacy-v1.tsp";
+
+namespace Notifications;
+
+/**
+ * The type of a notification event. It determines which payload variant the event
+ * carries.
+ */
+@friendlyName("BillingNotificationEventType")
+enum NotificationEventType {
+  /**
+   * A metered entitlement's balance crossed a threshold configured on the rule.
+   */
+  EntitlementsBalanceThreshold: "entitlements.balance.threshold",
+
+  /**
+   * A metered entitlement's usage period was reset.
+   */
+  EntitlementsReset: "entitlements.reset",
+
+  /**
+   * An invoice was created.
+   */
+  InvoiceCreated: "invoice.created",
+
+  /**
+   * An invoice was updated.
+   */
+  InvoiceUpdated: "invoice.updated",
+}
+
+/**
+ * The delivery state of a notification event for a single channel.
+ */
+@friendlyName("BillingNotificationEventDeliveryState")
+enum NotificationEventDeliveryState {
+  /**
+   * The event was delivered and acknowledged by the recipient.
+   */
+  Success: "success",
+
+  /**
+   * Delivery failed and no further attempts will be made.
+   */
+  Failed: "failed",
+
+  /**
+   * Delivery is in progress.
+   */
+  Sending: "sending",
+
+  /**
+   * Delivery has not been attempted yet.
+   */
+  Pending: "pending",
+
+  /**
+   * Delivery is being retried after a resend request.
+   */
+  Resending: "resending",
+}
+
+/**
+ * A reference to the notification rule that generated an event.
+ */
+@friendlyName("BillingNotificationRuleReference")
+model NotificationRuleReference {
+  /**
+   * The unique identifier of the rule.
+   */
+  @visibility(Lifecycle.Read)
+  id: Shared.ULID;
+
+  /**
+   * The type of event the rule generates.
+   */
+  @visibility(Lifecycle.Read)
+  type: NotificationEventType;
+
+  /**
+   * The user-provided name of the rule.
+   */
+  @visibility(Lifecycle.Read)
+  name: string;
+}
+
+/**
+ * The response the recipient returned for a delivery attempt. For webhook channels
+ * this is the HTTP response.
+ */
+@friendlyName("BillingNotificationEventDeliveryAttemptResponse")
+model NotificationEventDeliveryAttemptResponse {
+  /**
+   * The HTTP status code returned by the recipient. Absent when no response was
+   * received.
+   */
+  @visibility(Lifecycle.Read)
+  status_code?: int32;
+
+  /**
+   * The response body returned by the recipient. Empty when no body was received.
+   */
+  @visibility(Lifecycle.Read)
+  body: string;
+
+  /**
+   * How long the delivery attempt took, in milliseconds.
+   */
+  @visibility(Lifecycle.Read)
+  duration_ms: int64;
+
+  /**
+   * The URL the event was delivered to. Only set for webhook channels.
+   */
+  @visibility(Lifecycle.Read)
+  url?: string;
+}
+
+/**
+ * A single delivery attempt to a channel.
+ */
+@friendlyName("BillingNotificationEventDeliveryAttempt")
+model NotificationEventDeliveryAttempt {
+  /**
+   * The delivery state reached by this attempt.
+   */
+  @visibility(Lifecycle.Read)
+  state: NotificationEventDeliveryState;
+
+  /**
+   * The response returned by the recipient.
+   */
+  @visibility(Lifecycle.Read)
+  response: NotificationEventDeliveryAttemptResponse;
+
+  /**
+   * When the attempt was made.
+   */
+  @visibility(Lifecycle.Read)
+  timestamp: Shared.DateTime;
+}
+
+/**
+ * The delivery status of a notification event for one channel of the generating
+ * rule.
+ */
+@friendlyName("BillingNotificationEventDeliveryStatus")
+model NotificationEventDeliveryStatus {
+  /**
+   * The identifier of the channel this delivery status belongs to.
+   */
+  @visibility(Lifecycle.Read)
+  channel_id: Shared.ULID;
+
+  /**
+   * The current delivery state.
+   */
+  @visibility(Lifecycle.Read)
+  state: NotificationEventDeliveryState;
+
+  /**
+   * The reason for the last state change. Empty for successful deliveries.
+   */
+  @visibility(Lifecycle.Read)
+  reason: string;
+
+  /**
+   * When the delivery state was last updated.
+   */
+  @visibility(Lifecycle.Read)
+  updated_at: Shared.DateTime;
+
+  /**
+   * When the next delivery attempt is scheduled. Absent when no further attempts
+   * will be made.
+   */
+  @visibility(Lifecycle.Read)
+  next_attempt?: Shared.DateTime;
+
+  /**
+   * The delivery attempts made so far, most recent first.
+   */
+  @visibility(Lifecycle.Read)
+  attempts: Array<NotificationEventDeliveryAttempt>;
+}
+
+/**
+ * A balance threshold notification event payload.
+ */
+@friendlyName("BillingNotificationEventBalanceThresholdPayload")
+model NotificationEventBalanceThresholdPayload {
+  /**
+   * The identifier of the event the payload belongs to.
+   */
+  @visibility(Lifecycle.Read)
+  id: Shared.ULID;
+
+  /**
+   * The type of the event.
+   */
+  @visibility(Lifecycle.Read)
+  type: NotificationEventType.EntitlementsBalanceThreshold;
+
+  /**
+   * When the event was generated.
+   */
+  @visibility(Lifecycle.Read)
+  timestamp: Shared.DateTime;
+
+  /**
+   * The entities and threshold the event refers to.
+   */
+  @visibility(Lifecycle.Read)
+  data: LegacyV1.BalanceThresholdTriggeredV1Payload;
+}
+
+/**
+ * An entitlement reset notification event payload.
+ */
+@friendlyName("BillingNotificationEventResetPayload")
+model NotificationEventResetPayload {
+  /**
+   * The identifier of the event the payload belongs to.
+   */
+  @visibility(Lifecycle.Read)
+  id: Shared.ULID;
+
+  /**
+   * The type of the event.
+   */
+  @visibility(Lifecycle.Read)
+  type: NotificationEventType.EntitlementsReset;
+
+  /**
+   * When the event was generated.
+   */
+  @visibility(Lifecycle.Read)
+  timestamp: Shared.DateTime;
+
+  /**
+   * The entities the event refers to.
+   */
+  @visibility(Lifecycle.Read)
+  data: LegacyV1.UsagePeriodResetV1Payload;
+}
+
+/**
+ * An invoice created notification event payload.
+ */
+@friendlyName("BillingNotificationEventInvoiceCreatedPayload")
+model NotificationEventInvoiceCreatedPayload {
+  /**
+   * The identifier of the event the payload belongs to.
+   */
+  @visibility(Lifecycle.Read)
+  id: Shared.ULID;
+
+  /**
+   * The type of the event.
+   */
+  @visibility(Lifecycle.Read)
+  type: NotificationEventType.InvoiceCreated;
+
+  /**
+   * When the event was generated.
+   */
+  @visibility(Lifecycle.Read)
+  timestamp: Shared.DateTime;
+
+  /**
+   * The invoice the event refers to.
+   */
+  @visibility(Lifecycle.Read)
+  data: LegacyV1.InvoiceCreatedV1Payload;
+}
+
+/**
+ * An invoice updated notification event payload.
+ */
+@friendlyName("BillingNotificationEventInvoiceUpdatedPayload")
+model NotificationEventInvoiceUpdatedPayload {
+  /**
+   * The identifier of the event the payload belongs to.
+   */
+  @visibility(Lifecycle.Read)
+  id: Shared.ULID;
+
+  /**
+   * The type of the event.
+   */
+  @visibility(Lifecycle.Read)
+  type: NotificationEventType.InvoiceUpdated;
+
+  /**
+   * When the event was generated.
+   */
+  @visibility(Lifecycle.Read)
+  timestamp: Shared.DateTime;
+
+  /**
+   * The invoice the event refers to.
+   */
+  @visibility(Lifecycle.Read)
+  data: LegacyV1.InvoiceUpdatedV1Payload;
+}
+
+/**
+ * The payload delivered to the channels, discriminated by the event type.
+ */
+@friendlyName("BillingNotificationEventPayload")
+@discriminated(#{ envelope: "none", discriminatorPropertyName: "type" })
+union NotificationEventPayload {
+  `entitlements.balance.threshold`: NotificationEventBalanceThresholdPayload,
+  `entitlements.reset`: NotificationEventResetPayload,
+  `invoice.created`: NotificationEventInvoiceCreatedPayload,
+  `invoice.updated`: NotificationEventInvoiceUpdatedPayload,
+}
+
+/**
+ * A notification event records that a notification rule fired and tracks the
+ * delivery of its payload to each channel of the rule. Events are created by the
+ * system and cannot be modified.
+ */
+@friendlyName("BillingNotificationEvent")
+model NotificationEvent {
+  /**
+   * The unique identifier of the event.
+   */
+  @visibility(Lifecycle.Read)
+  id: Shared.ULID;
+
+  /**
+   * The type of the event.
+   */
+  @visibility(Lifecycle.Read)
+  type: NotificationEventType;
+
+  /**
+   * When the event was generated.
+   */
+  @visibility(Lifecycle.Read)
+  created_at: Shared.DateTime;
+
+  /**
+   * The rule that generated the event.
+   */
+  @visibility(Lifecycle.Read)
+  rule: NotificationRuleReference;
+
+  /**
+   * The delivery status of the event, one entry per channel of the rule.
+   */
+  @visibility(Lifecycle.Read)
+  delivery_status: Array<NotificationEventDeliveryStatus>;
+
+  /**
+   * The payload delivered to the channels.
+   */
+  @visibility(Lifecycle.Read)
+  payload: NotificationEventPayload;
+}
+
+/**
+ * Request body for resending a notification event.
+ */
+@withVisibility(Lifecycle.Create)
+@friendlyName("ResendBillingNotificationEventRequest")
+model NotificationEventResendRequest {
+  /**
+   * The channels to resend the event to. When omitted or empty, the event is resent
+   * to every enabled channel of the rule. Channels not targeted by the rule or
+   * disabled are rejected.
+   */
+  @visibility(Lifecycle.Create)
+  channels?: Array<Shared.ResourceReference<NotificationChannel>>;
+}

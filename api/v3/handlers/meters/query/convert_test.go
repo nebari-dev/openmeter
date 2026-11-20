@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 )
 
@@ -33,6 +33,7 @@ func TestConvertISO8601DurationToWindowSize(t *testing.T) {
 				require.Error(t, err)
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
@@ -60,6 +61,7 @@ func TestConvertWindowSizeToISO8601Duration(t *testing.T) {
 				require.Error(t, err)
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
@@ -69,7 +71,7 @@ func TestConvertWindowSizeToISO8601Duration(t *testing.T) {
 func TestExtractStringsFromQueryFilter(t *testing.T) {
 	tests := []struct {
 		name    string
-		filter  *api.QueryFilterString
+		filter  *apiv3models.QueryFilterString
 		want    []string
 		wantErr bool
 	}{
@@ -80,17 +82,17 @@ func TestExtractStringsFromQueryFilter(t *testing.T) {
 		},
 		{
 			name:   "eq operator",
-			filter: &api.QueryFilterString{Eq: lo.ToPtr("hello")},
+			filter: &apiv3models.QueryFilterString{Eq: lo.ToPtr("hello")},
 			want:   []string{"hello"},
 		},
 		{
 			name:   "in operator",
-			filter: &api.QueryFilterString{In: &[]string{"a", "b", "c"}},
+			filter: &apiv3models.QueryFilterString{In: &[]string{"a", "b", "c"}},
 			want:   []string{"a", "b", "c"},
 		},
 		{
 			name: "eq and in together rejected",
-			filter: &api.QueryFilterString{
+			filter: &apiv3models.QueryFilterString{
 				Eq: lo.ToPtr("x"),
 				In: &[]string{"y"},
 			},
@@ -98,35 +100,35 @@ func TestExtractStringsFromQueryFilter(t *testing.T) {
 		},
 		{
 			name:    "neq rejected",
-			filter:  &api.QueryFilterString{Neq: lo.ToPtr("x")},
+			filter:  &apiv3models.QueryFilterString{Neq: lo.ToPtr("x")},
 			wantErr: true,
 		},
 		{
 			name:    "nin rejected",
-			filter:  &api.QueryFilterString{Nin: &[]string{"x"}},
+			filter:  &apiv3models.QueryFilterString{Nin: &[]string{"x"}},
 			wantErr: true,
 		},
 		{
 			name:    "contains rejected",
-			filter:  &api.QueryFilterString{Contains: lo.ToPtr("x")},
+			filter:  &apiv3models.QueryFilterString{Contains: lo.ToPtr("x")},
 			wantErr: true,
 		},
 		{
 			name:    "ncontains rejected",
-			filter:  &api.QueryFilterString{Ncontains: lo.ToPtr("x")},
+			filter:  &apiv3models.QueryFilterString{Ncontains: lo.ToPtr("x")},
 			wantErr: true,
 		},
 		{
 			name: "and rejected",
-			filter: &api.QueryFilterString{
-				And: &[]api.QueryFilterString{{Eq: lo.ToPtr("x")}},
+			filter: &apiv3models.QueryFilterString{
+				And: &[]apiv3models.QueryFilterString{{Eq: lo.ToPtr("x")}},
 			},
 			wantErr: true,
 		},
 		{
 			name: "or rejected",
-			filter: &api.QueryFilterString{
-				Or: &[]api.QueryFilterString{{Eq: lo.ToPtr("x")}},
+			filter: &apiv3models.QueryFilterString{
+				Or: &[]apiv3models.QueryFilterString{{Eq: lo.ToPtr("x")}},
 			},
 			wantErr: true,
 		},
@@ -139,6 +141,7 @@ func TestExtractStringsFromQueryFilter(t *testing.T) {
 				require.Error(t, err)
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})

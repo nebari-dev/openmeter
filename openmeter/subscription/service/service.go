@@ -13,7 +13,6 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	subscriptionvalidators "github.com/openmeterio/openmeter/openmeter/subscription/validators/subscription"
-	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/ffx"
@@ -39,8 +38,10 @@ type ServiceConfig struct {
 	Publisher          eventbus.Publisher
 	Lockr              *lockr.Locker
 	FeatureFlags       ffx.Service
-	TaxCode            taxcode.Service
 	CostBasisService   currencies.CostBasisService
+	// ChargesConfig decides whether a subscription is billed through charges or legacy invoice lines.
+	// The zero value means legacy invoice lines.
+	ChargesConfig subscription.ChargesConfig
 
 	// Hooks
 	Hooks []subscription.SubscriptionCommandHook
@@ -53,6 +54,10 @@ func New(conf ServiceConfig) (subscription.Service, error) {
 
 	if conf.CostBasisService == nil {
 		return nil, errors.New("cost basis service is required")
+	}
+
+	if err := conf.ChargesConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid charges config: %w", err)
 	}
 
 	svc := &service{
@@ -245,12 +250,14 @@ func (s *service) Update(ctx context.Context, subscriptionID models.NamespacedID
 		if err := s.lockCustomer(ctx, view.Subscription.CustomerId); err != nil {
 			return def, err
 		}
+
 		// An edit may have read its spec before a concurrent migration acquired
 		// the customer lock. Do not apply those old terms over the migrated plan.
 		lockedSubscription, err := s.SubscriptionRepo.GetByID(ctx, subscriptionID)
 		if err != nil {
 			return def, err
 		}
+
 		if !lockedSubscription.PlanRef.NilEqual(view.Subscription.PlanRef) {
 			return def, models.NewGenericConflictError(errors.New("subscription plan changed during update; retry with the current subscription"))
 		}
@@ -360,6 +367,13 @@ func (s *service) Delete(ctx context.Context, subscriptionID models.NamespacedID
 		// Then let's delete the subscription itself
 		if err := s.SubscriptionRepo.Delete(ctx, view.Subscription.NamespacedID); err != nil {
 			return fmt.Errorf("failed to delete subscription: %w", err)
+		}
+
+		// Revision changes must roll back together with deletion if a hook fails.
+		if err := errors.Join(lo.Map(s.Hooks, func(v subscription.SubscriptionCommandHook, _ int) error {
+			return v.AfterDelete(ctx, view.Subscription.NamespacedID)
+		})...); err != nil {
+			return fmt.Errorf("running subscription deletion hooks: %w", err)
 		}
 
 		// Let's publish the event for the deletion
@@ -507,6 +521,7 @@ func (s *service) Get(ctx context.Context, subscriptionID models.NamespacedID) (
 	if err != nil {
 		return subscription.Subscription{}, err
 	}
+
 	return sub, nil
 }
 
@@ -572,6 +587,7 @@ func (s *service) ExpandViews(ctx context.Context, subs []subscription.Subscript
 	if len(namespaces) != 1 {
 		return nil, fmt.Errorf("ExpandViews only supports a single namespace, got %d", len(namespaces))
 	}
+
 	namespace := namespaces[0]
 
 	// Batch-fetch every distinct customer on the set, then attach the right one to
@@ -625,7 +641,10 @@ func (s *service) ExpandViews(ctx context.Context, subs []subscription.Subscript
 		return nil, fmt.Errorf("failed to get items: %w", err)
 	}
 
-	ents, err := s.EntitlementAdapter.GetForSubscriptionsAt(ctx, getAtInputs)
+	ents, err := s.EntitlementAdapter.GetForItemsAt(ctx, subscription.GetForItemsAtInput{
+		Items: items,
+		At:    now,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get entitlements: %w", err)
 	}
@@ -660,6 +679,7 @@ func (s *service) ExpandViews(ctx context.Context, subs []subscription.Subscript
 				if reference == nil {
 					continue
 				}
+
 				fKey, fID := lo.FromPtr(reference.Key), lo.FromPtr(reference.ID)
 
 				if fKey != "" {
@@ -758,6 +778,7 @@ func (s *service) ExpandViews(ctx context.Context, subs []subscription.Subscript
 			if reference == nil {
 				continue
 			}
+
 			fKey, fID := lo.FromPtr(reference.Key), lo.FromPtr(reference.ID)
 
 			if fKey == "" && fID == "" {

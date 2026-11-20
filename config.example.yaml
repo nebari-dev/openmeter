@@ -94,6 +94,8 @@ server:
 #   gracePeriod: P1D
 
 billing:
+  # Always log invoice sanity failures; also block invoice app calls when true.
+  enforceInvoiceSanityChecks: false
   # for production deployments it's recommended to use queued for server only
   # advancementStrategy: foreground
   featureSwitches:
@@ -141,6 +143,22 @@ events:
 postgres:
   url: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
   autoMigrate: migration # Valid values are: migration, migration-job, false
+  # Maximum size of the connection pool. When unset, pgx defaults to max(4, NumCPU), which can be
+  # exhausted by concurrent API requests. Size it well above the peak number of in-flight requests.
+  # See https://github.com/openmeterio/openmeter/pull/5433 (nested acquire fix) and
+  # https://github.com/openmeterio/openmeter/pull/5261 (e2e tests use a pool of 64).
+  #
+  # With `url`, set it in the query string: pool_max_conns=64
+  #   url: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable&pool_max_conns=64
+  #
+  # With separate fields and no `url`, use `options` (ignored when `url` is set):
+  #   host: localhost
+  #   port: 5432
+  #   user: postgres
+  #   password: postgres
+  #   database: postgres
+  #   options:
+  #     poolMaxConns: 64
 
 meters:
   # Sample meter to count API requests
@@ -193,6 +211,9 @@ notification:
 #    saslMechanisms: PLAIN
 #    saslUsername: user
 #    saslPassword: pass
+#    # Optional: PEM file with the CA certificate(s) used to verify the brokers when securityProtocol is
+#    # SSL or SASL_SSL. Replaces the system trust store (like librdkafka's ssl.ca.location).
+#    sslCaLocation: /etc/openmeter/kafka-ca.pem
 #    # To enable stats reporting set this value to >=5s.
 #    # Setting this value to 0 makes reporting explicitly disabled.
 #    statsInterval: 5s

@@ -37,7 +37,7 @@ func (s *CreditOnlyValidationSuite) TestUsageBasedCreditOnlyAdvanceMissingMeterI
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credit-only-usagebased-missing-meter-advance")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -172,7 +172,7 @@ func (s *CreditOnlyValidationSuite) TestUsageBasedCreditOnlyNegativeUsageKeepsRa
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credit-only-negative-usage")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -234,6 +234,7 @@ func (s *CreditOnlyValidationSuite) TestUsageBasedCreditOnlyNegativeUsageKeepsRa
 		s.Require().NoError(err)
 		charge, err := result.AsUsageBasedCharge()
 		s.Require().NoError(err)
+
 		return charge
 	}
 
@@ -261,7 +262,7 @@ func (s *CreditOnlyValidationSuite) TestUsageBasedCreditOnlyNegativeUsageKeepsRa
 		})
 		s.Require().NoError(err)
 		s.Require().Len(balances, 1)
-		s.Zero(balances[0].Balance.Settled().InexactFloat64())
+		s.Zero(balances[0].Balance.Booked().InexactFloat64())
 		s.Zero(balances[0].Balance.Live().InexactFloat64())
 	}
 	requireZeroBalance()
@@ -298,7 +299,7 @@ func (s *CreditOnlyValidationSuite) TestFlatFeeCreditOnlyAdvancesWhenSiblingUsag
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credit-only-flatfee-sibling-missing-meter")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -395,7 +396,7 @@ func (s *CreditOnlyValidationSuite) TestFlatFeeCreditOnlyIgnoresMissingMeterOnOw
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("charges-credit-only-flatfee-own-missing-meter")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")

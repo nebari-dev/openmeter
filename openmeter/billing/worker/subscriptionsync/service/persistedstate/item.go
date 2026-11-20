@@ -9,6 +9,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/flatfee"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
@@ -37,7 +38,7 @@ type LineGetter interface {
 }
 
 type SplitLineHierarchyGetter interface {
-	GetSplitLineHierarchy() *billing.SplitLineHierarchy
+	GetSplitLineHierarchy() *splitlinegroup.SplitLineHierarchy
 }
 
 type UsageBasedChargeGetter interface {
@@ -116,7 +117,7 @@ func ItemAsLine(in Item) (billing.GenericInvoiceLine, error) {
 }
 
 type persistedSplitLineHierarchy struct {
-	hierarchy *billing.SplitLineHierarchy
+	hierarchy *splitlinegroup.SplitLineHierarchy
 }
 
 var (
@@ -127,7 +128,7 @@ var (
 // newPersistedSplitLineHierarchy constructs a persisted split line hierarchy item.
 // Kept private so persistedstate controls construction-time validation and Item
 // implementations can expose non-erroring accessors.
-func newPersistedSplitLineHierarchy(hierarchy *billing.SplitLineHierarchy) (persistedSplitLineHierarchy, error) {
+func newPersistedSplitLineHierarchy(hierarchy *splitlinegroup.SplitLineHierarchy) (persistedSplitLineHierarchy, error) {
 	if hierarchy == nil {
 		return persistedSplitLineHierarchy{}, fmt.Errorf("split line hierarchy is nil")
 	}
@@ -151,7 +152,7 @@ func (i persistedSplitLineHierarchy) GetSubscriptionReference() *meta.Subscripti
 	return subscriptionReferenceFromBilling(i.hierarchy.Group.Subscription)
 }
 
-func (i persistedSplitLineHierarchy) GetSplitLineHierarchy() *billing.SplitLineHierarchy {
+func (i persistedSplitLineHierarchy) GetSplitLineHierarchy() *splitlinegroup.SplitLineHierarchy {
 	return i.hierarchy
 }
 
@@ -168,7 +169,7 @@ func (i persistedSplitLineHierarchy) IsSubscriptionManaged() bool {
 		return false
 	}
 
-	return child.GetManagedBy() == billing.SubscriptionManagedLine
+	return child.ManagedBy == billing.SubscriptionManagedLine
 }
 
 func (i persistedSplitLineHierarchy) HasLastLineAnnotation(annotation string) bool {
@@ -177,14 +178,15 @@ func (i persistedSplitLineHierarchy) HasLastLineAnnotation(annotation string) bo
 		return false
 	}
 
-	return child.GetAnnotations().GetBool(annotation)
+	return child.Annotations.GetBool(annotation)
 }
 
-func (i persistedSplitLineHierarchy) getLastLineForAnnotations() billing.GenericInvoiceLine {
+func (i persistedSplitLineHierarchy) getLastLineForAnnotations() *splitlinegroup.SplitLineHierarchyLine {
 	servicePeriod := i.hierarchy.Group.ServicePeriod
-	for _, child := range i.hierarchy.Lines {
-		if child.Line.GetServicePeriod().To.Equal(servicePeriod.To) && child.Line.GetDeletedAt() == nil {
-			return child.Line
+	for childIdx := range i.hierarchy.Lines {
+		child := &i.hierarchy.Lines[childIdx]
+		if child.ServicePeriod.To.Equal(servicePeriod.To) && child.DeletedAt == nil {
+			return child
 		}
 	}
 
@@ -192,7 +194,7 @@ func (i persistedSplitLineHierarchy) getLastLineForAnnotations() billing.Generic
 }
 
 // ItemAsSplitLineHierarchy returns the wrapped hierarchy when the persisted item is hierarchy-backed.
-func ItemAsSplitLineHierarchy(in Item) (*billing.SplitLineHierarchy, error) {
+func ItemAsSplitLineHierarchy(in Item) (*splitlinegroup.SplitLineHierarchy, error) {
 	hierarchyGetter, ok := in.(SplitLineHierarchyGetter)
 	if !ok {
 		return nil, fmt.Errorf("persisted item does not implement split line hierarchy getter: %s", getErrorDetails(in))

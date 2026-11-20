@@ -1,0 +1,317 @@
+import { resolvePath } from '@typespec/compiler'
+import {
+  createTester,
+  expectDiagnosticEmpty,
+  expectDiagnostics,
+} from '@typespec/compiler/testing'
+import { describe, expect, it } from 'vitest'
+
+const Tester = createTester(resolvePath(import.meta.dirname, '..'), {
+  libraries: [
+    '@typespec/json-schema',
+    '@openmeter/typespec-notification-events',
+  ],
+})
+  .importLibraries()
+  .using('TypeSpec.JsonSchema', 'NotificationCodegen')
+
+const lib = '@openmeter/typespec-notification-events'
+
+// A rule-produced Event type with every contract convention satisfied; each
+// test overrides one declaration to break exactly one convention.
+function contract({
+  eventType = 'v1.widget.thing.happened',
+  payloadName = 'WidgetThingHappenedV1Payload',
+  payloadId = 'v1.widget.thing.happened.payload',
+  ruleConfigName = 'WidgetThingHappenedV1RuleConfig',
+  ruleConfigJsonSchema = '@jsonSchema',
+} = {}) {
+  return `
+    namespace Widget.NotificationEvents {
+      ${ruleConfigJsonSchema}
+      @id("v1.widget.thing.happened.rule_config")
+      @friendlyName("${ruleConfigName}")
+      model ThingHappenedV1RuleConfig {
+        limit: int32;
+      }
+
+      @jsonSchema
+      @id("${payloadId}")
+      @eventType("${eventType}", ThingHappenedV1RuleConfig)
+      @friendlyName("${payloadName}")
+      model ThingHappenedV1Payload {
+        thing_id: string;
+      }
+    }
+  `
+}
+
+describe('contract validation', () => {
+  it('accepts a contract that follows every convention', async () => {
+    expectDiagnosticEmpty(await Tester.diagnose(contract()))
+  })
+
+  it('rejects a malformed Event type', async () => {
+    const diagnostics = await Tester.diagnose(
+      contract({ eventType: 'widget.thing.happened' }),
+    )
+
+    expectDiagnostics(diagnostics, { code: `${lib}/invalid-event-type` })
+  })
+
+  it('rejects a payload name without the version suffix and reports only that', async () => {
+    // The Rule configuration name is derived from the payload name, so a
+    // second diagnostic about it would name a wrong expectation.
+    const diagnostics = await Tester.diagnose(
+      contract({ payloadName: 'WidgetThingHappenedPayload' }),
+    )
+
+    expectDiagnostics(diagnostics, {
+      code: `${lib}/invalid-contract`,
+      message:
+        'Payload WidgetThingHappenedPayload of v1.widget.thing.happened must have a friendly name ending in V1Payload.',
+    })
+  })
+
+  it('rejects a Rule configuration name that does not match the payload', async () => {
+    const diagnostics = await Tester.diagnose(
+      contract({ ruleConfigName: 'WidgetThingRuleConfig' }),
+    )
+
+    expectDiagnostics(diagnostics, {
+      code: `${lib}/invalid-contract`,
+      message:
+        'Rule configuration of v1.widget.thing.happened must have the friendly name WidgetThingHappenedV1RuleConfig.',
+    })
+  })
+
+  it('rejects two payloads with the same friendly name', async () => {
+    // given two Event types whose payloads would generate the same Go names
+    const diagnostics = await Tester.diagnose(`
+      namespace Widget.NotificationEvents {
+        @jsonSchema
+        @id("v1.widget.thing.created.payload")
+        @eventType("v1.widget.thing.created")
+        @friendlyName("WidgetThingV1Payload")
+        model ThingCreatedV1Payload {
+          thing_id: string;
+        }
+
+        @jsonSchema
+        @id("v1.widget.thing.updated.payload")
+        @eventType("v1.widget.thing.updated")
+        @friendlyName("WidgetThingV1Payload")
+        model ThingUpdatedV1Payload {
+          thing_id: string;
+        }
+      }
+    `)
+
+    expectDiagnostics(diagnostics, {
+      code: `${lib}/invalid-contract`,
+      message:
+        'Payload WidgetThingV1Payload of v1.widget.thing.updated has the same friendly name as the payload of v1.widget.thing.created.',
+    })
+  })
+
+  it('rejects a contract root without @jsonSchema', async () => {
+    const diagnostics = await Tester.diagnose(
+      contract({ ruleConfigJsonSchema: '' }),
+    )
+
+    expectDiagnostics(diagnostics, {
+      code: `${lib}/invalid-contract`,
+      message: 'ThingHappenedV1RuleConfig must be decorated with @jsonSchema.',
+    })
+  })
+
+  it('rejects a contract root whose @id does not match its Event type', async () => {
+    const diagnostics = await Tester.diagnose(
+      contract({ payloadId: 'widget.thing.happened.payload' }),
+    )
+
+    expectDiagnostics(diagnostics, {
+      code: `${lib}/invalid-contract`,
+      message:
+        'ThingHappenedV1Payload must be decorated with @id("v1.widget.thing.happened.payload").',
+    })
+  })
+})
+
+describe('emitter', () => {
+  const EmitTester = Tester.emit(lib, {
+    'module-path': 'github.com/example/mod',
+    'eventtype-import-path': 'github.com/example/mod/openmeter/notification/v4',
+    'definitions-import-path':
+      'github.com/example/mod/openmeter/notification/v4/definitions',
+  })
+
+  it('emits the Event types, schemas, definitions and manifest', async () => {
+    const { outputs } = await EmitTester.compile(contract())
+
+    expect(outputs['openmeter/notification/v4/definitions/definitions.gen.go'])
+      .toBe(`// Code generated by @openmeter/typespec-notification-events, DO NOT EDIT.
+
+package definitions
+
+import (
+	_ "embed"
+
+	"github.com/example/mod/openmeter/notification/v4"
+)
+
+// WidgetThingHappenedV1EventType is v1.widget.thing.happened.
+var WidgetThingHappenedV1EventType = v4.EventType{
+	Name:    "widget.thing.happened",
+	Version: 1,
+}
+
+// WidgetThingHappenedV1PayloadJSONSchema is the JSON Schema (draft 2020-12) of
+// apiv3models.WidgetThingHappenedV1Payload.
+//
+//go:embed schemas/v1.widget.thing.happened.payload.json
+var WidgetThingHappenedV1PayloadJSONSchema []byte
+
+// WidgetThingHappenedV1RuleConfigJSONSchema is the JSON Schema (draft 2020-12) of
+// WidgetThingHappenedV1RuleConfig, the Rule configuration of v1.widget.thing.happened.
+//
+//go:embed schemas/v1.widget.thing.happened.rule_config.json
+var WidgetThingHappenedV1RuleConfigJSONSchema []byte
+
+// WidgetThingHappenedV1Definition is the definition of v1.widget.thing.happened.
+var WidgetThingHappenedV1Definition = v4.EventTypeDefinition{
+	EventType:         WidgetThingHappenedV1EventType,
+	PayloadJSONSchema: WidgetThingHappenedV1PayloadJSONSchema,
+	Rule: &v4.RuleConfigDefinition{
+		JSONSchema: WidgetThingHappenedV1RuleConfigJSONSchema,
+	},
+}
+
+// All returns the definition of every Notification Event type.
+func All() []v4.EventTypeDefinition {
+	return []v4.EventTypeDefinition{
+		WidgetThingHappenedV1Definition,
+	}
+}
+`)
+
+    expect(JSON.parse(outputs['manifest.json'])).toEqual({
+      definitions: 'openmeter/notification/v4/definitions',
+      schemas: [
+        {
+          source: 'ThingHappenedV1Payload.json',
+          target: 'v1.widget.thing.happened.payload.json',
+        },
+        {
+          source: 'ThingHappenedV1RuleConfig.json',
+          target: 'v1.widget.thing.happened.rule_config.json',
+        },
+      ],
+    })
+  })
+
+  it('lists definitions of several namespaces in Event type order', async () => {
+    // given Event types declared out of order across namespaces, and versions
+    // whose strings sort differently (v10, v2)
+    const { outputs } = await EmitTester.compile(`
+      namespace Widget.NotificationEvents {
+        @jsonSchema
+        @id("v1.widget.thing.updated.payload")
+        @eventType("v1.widget.thing.updated")
+        @friendlyName("WidgetThingUpdatedV1Payload")
+        model ThingUpdatedV1Payload {
+          thing_id: string;
+        }
+
+        @jsonSchema
+        @id("v1.widget.thing.created.payload")
+        @eventType("v1.widget.thing.created")
+        @friendlyName("WidgetThingCreatedV1Payload")
+        model ThingCreatedV1Payload {
+          thing_id: string;
+        }
+      }
+
+      namespace Gadget.NotificationEvents {
+        @jsonSchema
+        @id("v10.gadget.part.created.payload")
+        @eventType("v10.gadget.part.created")
+        @friendlyName("GadgetPartCreatedV10Payload")
+        model PartCreatedV10Payload {
+          part_id: string;
+        }
+
+        @jsonSchema
+        @id("v2.gadget.part.created.payload")
+        @eventType("v2.gadget.part.created")
+        @friendlyName("GadgetPartCreatedV2Payload")
+        model PartCreatedV2Payload {
+          part_id: string;
+        }
+
+        @jsonSchema
+        @id("v1.gadget.part.created.payload")
+        @eventType("v1.gadget.part.created")
+        @friendlyName("GadgetPartCreatedV1Payload")
+        model PartCreatedV1Payload {
+          part_id: string;
+        }
+      }
+    `)
+
+    // then definitions and schemas are ordered by numeric version, then name
+    expect(outputs['openmeter/notification/v4/definitions/definitions.gen.go'])
+      .toContain(`func All() []v4.EventTypeDefinition {
+	return []v4.EventTypeDefinition{
+		GadgetPartCreatedV1Definition,
+		WidgetThingCreatedV1Definition,
+		WidgetThingUpdatedV1Definition,
+		GadgetPartCreatedV2Definition,
+		GadgetPartCreatedV10Definition,
+	}
+}
+`)
+
+    expect(
+      JSON.parse(outputs['manifest.json']).schemas.map(({ target }) => target),
+    ).toEqual([
+      'v1.gadget.part.created.payload.json',
+      'v1.widget.thing.created.payload.json',
+      'v1.widget.thing.updated.payload.json',
+      'v2.gadget.part.created.payload.json',
+      'v10.gadget.part.created.payload.json',
+    ])
+  })
+
+  it('omits the Rule of a system Event type', async () => {
+    const { outputs } = await EmitTester.compile(`
+      namespace Widget.NotificationEvents {
+        @jsonSchema
+        @id("v1.widget.thing.created.payload")
+        @eventType("v1.widget.thing.created")
+        @friendlyName("WidgetThingCreatedV1Payload")
+        model ThingCreatedV1Payload {
+          thing_id: string;
+        }
+      }
+    `)
+
+    expect(outputs['openmeter/notification/v4/definitions/definitions.gen.go'])
+      .toContain(`var WidgetThingCreatedV1Definition = v4.EventTypeDefinition{
+	EventType:         WidgetThingCreatedV1EventType,
+	PayloadJSONSchema: WidgetThingCreatedV1PayloadJSONSchema,
+}
+`)
+  })
+
+  it('emits an empty definitions list without Event types', async () => {
+    const { outputs } = await EmitTester.compile(
+      `model Unrelated { id: string; }`,
+    )
+
+    expect(outputs['openmeter/notification/v4/definitions/definitions.gen.go'])
+      .toContain(`	return []v4.EventTypeDefinition{}
+`)
+    expect(JSON.parse(outputs['manifest.json']).schemas).toEqual([])
+  })
+})

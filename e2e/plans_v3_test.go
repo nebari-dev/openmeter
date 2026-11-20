@@ -66,6 +66,7 @@ func TestV3PlanLifecycle(t *testing.T) {
 				break
 			}
 		}
+
 		assert.True(t, found, "created plan not found in list")
 	})
 
@@ -224,6 +225,7 @@ func TestV3PlanInvalidDraftLifecycle(t *testing.T) {
 		for _, e := range got.ValidationErrors {
 			codes = append(codes, e.Code)
 		}
+
 		assert.Contains(t, codes, "plan_phase_has_no_rate_cards")
 	})
 
@@ -319,6 +321,7 @@ func TestV3PlanUnitPriceWithoutBillingCadence(t *testing.T) {
 		for _, e := range got.ValidationErrors {
 			codes = append(codes, e.Code)
 		}
+
 		assert.Contains(t, codes, "billing_cadence_invalid_value")
 	})
 
@@ -691,6 +694,7 @@ func TestV3PlanReadTranslatesV1DynamicAndPackagePrices(t *testing.T) {
 				break
 			}
 		}
+
 		require.NotNil(t, found, "created plan not in list response (the v3 list handler should no longer skip plans with v1 dynamic/package prices)")
 
 		dynRC := findRateCardByKey(t, found, dynamicRCKey)
@@ -707,4 +711,33 @@ func TestV3PlanReadTranslatesV1DynamicAndPackagePrices(t *testing.T) {
 		require.NotNil(t, pkgRC.UnitConfig.Rounding)
 		assert.Equal(t, v3sdk.UnitConfigRoundingModeCeiling, *pkgRC.UnitConfig.Rounding)
 	})
+}
+
+func TestV3PlanLabelsRoundTrip(t *testing.T) {
+	c := newV3Client(t)
+
+	createBody := validPlanRequest("test_v3_plan_labels")
+	createBody.Labels = &map[string]string{"tier": "pro"}
+	createBody.Phases[0].Labels = &map[string]string{"stage": "main"}
+	createBody.Phases[0].RateCards[0].Labels = &map[string]string{"kind": "base_fee"}
+
+	assertLabels := func(t *testing.T, plan *v3sdk.Plan) {
+		t.Helper()
+
+		require.NotNil(t, plan)
+		require.Len(t, plan.Phases, 1)
+		require.Len(t, plan.Phases[0].RateCards, 1)
+
+		assert.Equal(t, map[string]string{"tier": "pro"}, plan.Labels)
+		assert.Equal(t, map[string]string{"stage": "main"}, plan.Phases[0].Labels)
+		assert.Equal(t, map[string]string{"kind": "base_fee"}, plan.Phases[0].RateCards[0].Labels)
+	}
+
+	created, err := c.Plans.Create(t.Context(), createBody)
+	c.requireStatus(http.StatusCreated, err)
+	assertLabels(t, created)
+
+	fetched, err := c.Plans.Get(t.Context(), created.ID)
+	c.requireStatus(http.StatusOK, err)
+	assertLabels(t, fetched)
 }

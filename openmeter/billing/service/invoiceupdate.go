@@ -82,6 +82,7 @@ func diffMutableInvoiceLines(
 			}
 
 			diff.Created = append(diff.Created, item)
+
 			return nil
 		},
 		HandleDelete: func(item billing.GenericInvoiceLine) error {
@@ -95,6 +96,7 @@ func diffMutableInvoiceLines(
 			}
 
 			diff.Deleted = append(diff.Deleted, item)
+
 			return nil
 		},
 		HandleUpdate: func(item entitydiff.DiffUpdate[billing.GenericInvoiceLine]) error {
@@ -111,6 +113,7 @@ func diffMutableInvoiceLines(
 				// for example when a cancellation shrinks the deleted split-line period.
 				// Keep them out of line-engine callbacks so delete side effects do not run twice.
 				diff.Unchanged = append(diff.Unchanged, afterLine)
+
 				return nil
 			}
 
@@ -135,6 +138,7 @@ func diffMutableInvoiceLines(
 
 				deletedLine.SetDeletedAt(afterLine.GetDeletedAt())
 				diff.Deleted = append(diff.Deleted, deletedLine)
+
 				return nil
 			}
 
@@ -281,6 +285,7 @@ func (s *Service) sanitizeInvoiceLineTaxConfigForDiff(
 		}
 
 		standardLine.TaxConfig = taxConfig
+
 		return standardLine.AsGenericLine(), nil
 
 	case billing.InvoiceLineTypeGathering:
@@ -290,6 +295,7 @@ func (s *Service) sanitizeInvoiceLineTaxConfigForDiff(
 		}
 
 		gatheringLine.TaxConfig = taxConfig.ToProductCatalog()
+
 		return gatheringLine.AsGenericLine(), nil
 
 	default:
@@ -545,7 +551,6 @@ func (s *Service) applyAPIInvoiceLineEdits(
 		createdLines, err := s.preallocateCreatedStandardLines(ctx, preallocatedCreatedStandardLinesInput{
 			Invoice:      stdInvoice.GetInvoiceID(),
 			Currency:     stdInvoice.Currency,
-			SchemaLevel:  stdInvoice.SchemaLevel,
 			CreatedLines: lineDiff.Created,
 		})
 		if err != nil {
@@ -595,20 +600,38 @@ func (s *Service) applyAPIInvoiceLineEdits(
 			return nil, fmt.Errorf("validating API invoice line edit input for engine %s: %w", engine.GetLineEngineType(), err)
 		}
 
-		engineResult, err := engine.OnMutableInvoiceLinesEditedViaAPI(ctx, input)
+		engineResult, warnings, err := s.runInTransactionWithValidationWarningsAllowed(ctx, func(ctx context.Context) (billing.OnMutableInvoiceUpdateResult, error) {
+			return engine.OnMutableInvoiceLinesEditedViaAPI(ctx, input)
+		})
 		if err != nil {
 			return nil, billing.NewLineEngineValidationError(engine, err)
+		}
+
+		if len(warnings) > 0 {
+			warningErr := errors.Join(lo.Map(warnings, func(issue billing.ValidationIssue, _ int) error { return issue })...)
+			if appender, ok := edited.(billing.ValidationIssueAppender); ok {
+				issues, err := billing.ToValidationIssues(billing.NewLineEngineValidationError(engine, warningErr))
+				if err != nil {
+					return nil, fmt.Errorf("extracting API line edit warnings: %w", err)
+				}
+
+				appender.AppendValidationIssues(issues...)
+			} else {
+				return nil, billing.NewLineEngineValidationError(engine, warningErr)
+			}
 		}
 
 		if err := validateLineEngineResult(input.Created, engineResult.CreatedLines); err != nil {
 			return nil, fmt.Errorf("validating API invoice line edit created output for engine %s: %w", engine.GetLineEngineType(), err)
 		}
+
 		// API-created inputs are stamped before engine dispatch, but engines may
 		// return replacement line instances. Billing owns the API ownership
 		// transition, so created outputs are stamped here as well.
 		for _, line := range engineResult.CreatedLines {
 			line.SetManagedBy(billing.ManuallyManagedLine)
 		}
+
 		resultingLines = append(resultingLines, engineResult.CreatedLines...)
 
 		if err := validateLineEngineResult(lo.Map(input.Updated, func(override billing.InvoiceLineOverride, _ int) billing.GenericInvoiceLine {
@@ -616,12 +639,14 @@ func (s *Service) applyAPIInvoiceLineEdits(
 		}), engineResult.UpdatedLines); err != nil {
 			return nil, fmt.Errorf("validating API invoice line edit updated output for engine %s: %w", engine.GetLineEngineType(), err)
 		}
+
 		// Updated lines are stamped after the engine runs. This lets engines see
 		// whether the API edit is system/subscription -> manual or manual -> manual,
 		// while billing still owns the API ownership transition.
 		for _, line := range engineResult.UpdatedLines {
 			line.SetManagedBy(billing.ManuallyManagedLine)
 		}
+
 		resultingLines = append(resultingLines, engineResult.UpdatedLines...)
 	}
 
@@ -631,6 +656,7 @@ func (s *Service) applyAPIInvoiceLineEdits(
 	for _, line := range lineDiff.Deleted {
 		line.SetManagedBy(billing.ManuallyManagedLine)
 	}
+
 	resultingLines = append(resultingLines, lineDiff.Deleted...)
 
 	if err := edited.SetLines(resultingLines); err != nil {
@@ -665,8 +691,8 @@ func (s *Service) validateAPIInvoiceLineEdits(ctx context.Context, changesByEngi
 
 func (s *Service) defaultTaxCodeResolversForInvoiceUpdate(invoice billing.GenericInvoiceReader) billing.DefaultTaxCodeResolvers {
 	namespace := invoice.GetInvoiceID().Namespace
-	getCustomerOverride := syncx.OnceValues(func(ctx context.Context) (billing.CustomerOverrideWithDetails, error) {
-		return s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+	getCustomerOverride := syncx.OnceValues(func(ctx context.Context) (billing.CustomerBillingProfile, error) {
+		return s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 			Customer: invoice.GetCustomerID(),
 		})
 	})
@@ -694,22 +720,16 @@ func (s *Service) defaultTaxCodeResolversForInvoiceUpdate(invoice billing.Generi
 func (s *Service) defaultInvoicingTaxCodeIDForInvoiceUpdate(
 	ctx context.Context,
 	invoice billing.GenericInvoiceReader,
-	getCustomerOverride func(context.Context) (billing.CustomerOverrideWithDetails, error),
+	getCustomerOverride func(context.Context) (billing.CustomerBillingProfile, error),
 	getOrganizationDefaultTaxCodes func(context.Context) (taxcode.OrganizationDefaultTaxCodes, error),
 ) (string, error) {
-	namespace := invoice.GetInvoiceID().Namespace
-
 	if invoice.GetType() == billing.InvoiceTypeStandard {
 		standardInvoice, err := invoice.AsInvoice().AsStandardInvoice()
 		if err != nil {
 			return "", fmt.Errorf("getting standard invoice: %w", err)
 		}
 
-		taxCodeID, err := s.taxCodeIDWithBackfill(ctx, namespace, standardInvoice.Workflow.Config.Invoicing.DefaultTaxConfig)
-		if err != nil {
-			return "", fmt.Errorf("resolving standard invoice default tax config: %w", err)
-		}
-		if taxCodeID != "" {
+		if taxCodeID := standardInvoice.Workflow.Config.Invoicing.DefaultTaxCodeID(); taxCodeID != "" {
 			return taxCodeID, nil
 		}
 	}
@@ -719,11 +739,7 @@ func (s *Service) defaultInvoicingTaxCodeIDForInvoiceUpdate(
 		return "", fmt.Errorf("getting customer billing profile: %w", err)
 	}
 
-	taxCodeID, err := s.taxCodeIDWithBackfill(ctx, namespace, customerOverride.MergedProfile.WorkflowConfig.Invoicing.DefaultTaxConfig)
-	if err != nil {
-		return "", fmt.Errorf("resolving customer billing profile default tax config: %w", err)
-	}
-	if taxCodeID != "" {
+	if taxCodeID := customerOverride.EffectiveProfile.WorkflowConfig.Invoicing.DefaultTaxCodeID(); taxCodeID != "" {
 		return taxCodeID, nil
 	}
 
@@ -735,23 +751,9 @@ func (s *Service) defaultInvoicingTaxCodeIDForInvoiceUpdate(
 	return defaults.InvoicingTaxCodeID, nil
 }
 
-func (s *Service) taxCodeIDWithBackfill(ctx context.Context, namespace string, taxConfig *productcatalog.TaxConfig) (string, error) {
-	if taxConfig == nil {
-		return "", nil
-	}
-
-	resolved := taxConfig.Clone()
-	if err := productcatalog.ResolveTaxConfig(ctx, s.taxCodeService, namespace, &resolved); err != nil {
-		return "", err
-	}
-
-	return lo.FromPtr(resolved.TaxCodeID), nil
-}
-
 type preallocatedCreatedStandardLinesInput struct {
 	Invoice      billing.InvoiceID
 	Currency     currencyx.FiatCode
-	SchemaLevel  int
 	CreatedLines []billing.GenericInvoiceLine
 }
 
@@ -767,10 +769,6 @@ func (i preallocatedCreatedStandardLinesInput) Validate() error {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("currency: %w", err))
 		}
-	}
-
-	if i.SchemaLevel <= 0 {
-		errs = append(errs, errors.New("schema level is required"))
 	}
 
 	return errors.Join(errs...)
@@ -810,10 +808,9 @@ func (s *Service) preallocateCreatedStandardLines(
 	}
 
 	preallocatedLines, err := s.adapter.UpsertInvoiceLines(ctx, billing.UpsertInvoiceLinesAdapterInput{
-		Namespace:   input.Invoice.Namespace,
-		Lines:       standardLinesToCreate,
-		SchemaLevel: input.SchemaLevel,
-		InvoiceID:   input.Invoice.ID,
+		Namespace: input.Invoice.Namespace,
+		Lines:     standardLinesToCreate,
+		InvoiceID: input.Invoice.ID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upserting provisional created lines: %w", err)
@@ -879,6 +876,7 @@ func validateLineEngineResult(expectedLines []billing.GenericInvoiceLine, actual
 		}
 
 		id := line.GetID()
+
 		return id, id != ""
 	})
 
@@ -889,6 +887,7 @@ func validateLineEngineResult(expectedLines []billing.GenericInvoiceLine, actual
 		}
 
 		id := line.GetID()
+
 		return id, id != ""
 	})
 
@@ -976,6 +975,7 @@ func (s *Service) groupAPIStandardLineDeletionsByEngine(invoice billing.Standard
 			errs = append(errs, fmt.Errorf("line[%s]: inferring engine: %w", stdLine.GetID(), err))
 		}
 	}
+
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}

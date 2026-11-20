@@ -23,7 +23,9 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/ledger"
+	ledgerbreakage "github.com/openmeterio/openmeter/openmeter/ledger/breakage"
 	"github.com/openmeterio/openmeter/openmeter/ledger/customerbalance"
+	fbotestutils "github.com/openmeterio/openmeter/openmeter/ledger/fbo/testutils"
 	"github.com/openmeterio/openmeter/openmeter/ledger/transactions"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
@@ -186,7 +188,7 @@ func (s *CustomCurrencyLedgerIntegrationTestSuite) prepareFlatFeeCustomCurrencyL
 	s.T().Helper()
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-real-ledger")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID(), billingtest.WithManualApproval())
@@ -268,7 +270,7 @@ func (s *CustomCurrencyLedgerIntegrationTestSuite) prepareUsageBasedCustomCurren
 	s.T().Helper()
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-real-ledger")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -769,7 +771,7 @@ func (s *CustomCurrencyLedgerIntegrationTestSuite) requireCustomCurrencyLedgerOu
 	// balance identity.
 	balanceService, err := customerbalance.New(customerbalance.Config{
 		AccountResolver:   s.LedgerDeps.ResolversService,
-		SubAccountService: s.LedgerDeps.AccountService,
+		FBO:               fbotestutils.NewService(s.T(), s.LedgerDeps, ledgerbreakage.NewNoopService()),
 		ChargesService:    s.Charges,
 		UsageBasedService: s.UsageBasedService,
 		Currencies:        s.CurrencyService,
@@ -974,6 +976,7 @@ func (s *CustomCurrencyLedgerIntegrationTestSuite) requireChargeTransactionTempl
 		s.Require().NoError(err)
 		actual = append(actual, templateCode)
 	}
+
 	s.ElementsMatch(expected, actual)
 }
 
@@ -991,6 +994,7 @@ func (s *CustomCurrencyLedgerIntegrationTestSuite) requireTransactionTemplates(n
 		s.Require().NoError(err)
 		actual = append(actual, templateCode)
 	}
+
 	s.Equal(expected, actual)
 }
 

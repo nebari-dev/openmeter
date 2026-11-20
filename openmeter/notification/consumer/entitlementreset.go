@@ -8,14 +8,15 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
-	customerhttphandler "github.com/openmeterio/openmeter/openmeter/customer/httpdriver"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
+	customerconvert "github.com/openmeterio/openmeter/openmeter/customer/apiconvert"
 	"github.com/openmeterio/openmeter/openmeter/entitlement"
-	entitlementdriver "github.com/openmeterio/openmeter/openmeter/entitlement/driver"
+	entitlementconvert "github.com/openmeterio/openmeter/openmeter/entitlement/apiconvert"
 	"github.com/openmeterio/openmeter/openmeter/entitlement/snapshot"
 	"github.com/openmeterio/openmeter/openmeter/notification"
-	productcatalogdriver "github.com/openmeterio/openmeter/openmeter/productcatalog/driver"
-	subjecthttphandler "github.com/openmeterio/openmeter/openmeter/subject/httphandler"
+	featureconvert "github.com/openmeterio/openmeter/openmeter/productcatalog/feature/apiconvert"
+	subjectconvert "github.com/openmeterio/openmeter/openmeter/subject/apiconvert"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/sortx"
@@ -32,8 +33,9 @@ func (b *EntitlementSnapshotHandler) isEntitlementResetEvent(event snapshot.Snap
 
 func (b *EntitlementSnapshotHandler) handleAsEntitlementResetEvent(ctx context.Context, event snapshot.SnapshotEvent) error {
 	affectedRulesPaged, err := b.Notification.ListRules(ctx, notification.ListRulesInput{
-		Namespaces: []string{event.Namespace.ID},
-		Types:      []notification.EventType{notification.EventTypeEntitlementReset},
+		Namespace: event.Namespace.ID,
+		Type:      &filter.FilterString{Eq: lo.ToPtr(string(notification.EventTypeEntitlementReset))},
+		Disabled:  &filter.FilterBoolean{Eq: lo.ToPtr(false)},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list notification rules: %w", err)
@@ -67,8 +69,10 @@ func (b *EntitlementSnapshotHandler) handleResetRule(ctx context.Context, event 
 		},
 		Namespaces: []string{event.Namespace.ID},
 
-		From: event.Entitlement.CurrentUsagePeriod.From,
-		To:   event.Entitlement.CurrentUsagePeriod.To,
+		CreatedAt: filter.NewFilterTime(
+			&event.Entitlement.CurrentUsagePeriod.From,
+			&event.Entitlement.CurrentUsagePeriod.To,
+		),
 
 		OrderBy: notification.OrderByCreatedAt,
 		Order:   sortx.OrderDesc,
@@ -94,7 +98,7 @@ type createEntitlementResetEventInput struct {
 }
 
 func (b *EntitlementSnapshotHandler) createResetEvent(ctx context.Context, in createEntitlementResetEventInput) error {
-	entitlementAPIEntity, err := entitlementdriver.Parser.ToMetered(&entitlement.EntitlementWithCustomer{Entitlement: in.Snapshot.Entitlement, Customer: in.Snapshot.Customer})
+	entitlementAPIEntity, err := entitlementconvert.ToAPIEntitlementMetered(&entitlement.EntitlementWithCustomer{Entitlement: in.Snapshot.Entitlement, Customer: in.Snapshot.Customer})
 	if err != nil {
 		return fmt.Errorf("failed to map entitlement value to API: %w", err)
 	}
@@ -117,7 +121,7 @@ func (b *EntitlementSnapshotHandler) createResetEvent(ctx context.Context, in cr
 		annotations[notification.AnnotationEventFeatureID] = in.Snapshot.Feature.ID
 	}
 
-	featureResp, err := productcatalogdriver.MapFeatureToResponse(in.Snapshot.Feature)
+	featureResp, err := featureconvert.ToAPIFeature(in.Snapshot.Feature)
 	if err != nil {
 		return fmt.Errorf("failed to map feature to API: %w", err)
 	}
@@ -125,18 +129,13 @@ func (b *EntitlementSnapshotHandler) createResetEvent(ctx context.Context, in cr
 	resetPayload := notification.EntitlementResetPayload{
 		Entitlement: *entitlementAPIEntity,
 		Feature:     featureResp,
-		Subject:     subjecthttphandler.FromSubject(in.Snapshot.Subject),
-		Value:       api.EntitlementValue(*in.Snapshot.Value),
+		Subject:     subjectconvert.ToAPISubject(in.Snapshot.Subject),
+		Value:       apiv1models.EntitlementValue(*in.Snapshot.Value),
 	}
 
 	// TODO(OM-1508): As we're reusing the same event version, we need to add this temporary check
 	if in.Snapshot.Customer.ID != "" {
-		apiCustomer, err := customerhttphandler.CustomerToAPI(in.Snapshot.Customer, nil, nil)
-		if err != nil {
-			return fmt.Errorf("failed to map customer to API: %w", err)
-		}
-
-		resetPayload.Customer = apiCustomer
+		resetPayload.Customer = customerconvert.ToAPICustomer(in.Snapshot.Customer)
 	}
 
 	_, err = b.Notification.CreateEvent(ctx, notification.CreateEventInput{

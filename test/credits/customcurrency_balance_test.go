@@ -20,7 +20,7 @@ func (s *CustomCurrencyCreditsSuite) TestBalanceAndTransactionsPreserveCustomCur
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("custom-currency-balance-history")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customer := s.CreateLedgerBackedCustomer(ns, "custom-currency-balance-history")
 	tokens := s.createCustomCurrency(ns, "TOKENS")
 	points := s.createCustomCurrency(ns, "POINTS")
@@ -108,11 +108,11 @@ func (s *CustomCurrencyCreditsSuite) TestBalanceAndTransactionsPreserveCustomCur
 		return *balance.CustomCurrencyID, balance
 	})
 	s.Require().Contains(balancesByID, tokens.ID)
-	s.Equal(float64(70), balancesByID[tokens.ID].Balance.Settled().InexactFloat64())
+	s.Equal(float64(70), balancesByID[tokens.ID].Balance.Booked().InexactFloat64())
 	s.Equal(float64(70), balancesByID[tokens.ID].Balance.Live().InexactFloat64())
 	s.Equal(float64(0), balancesByID[tokens.ID].Balance.Pending().InexactFloat64())
 	s.Require().Contains(balancesByID, points.ID)
-	s.Equal(float64(0), balancesByID[points.ID].Balance.Settled().InexactFloat64())
+	s.Equal(float64(0), balancesByID[points.ID].Balance.Booked().InexactFloat64())
 	s.Equal(float64(0), balancesByID[points.ID].Balance.Live().InexactFloat64())
 	s.Equal(float64(50), balancesByID[points.ID].Balance.Pending().InexactFloat64())
 
@@ -157,7 +157,7 @@ func (s *CustomCurrencyCreditsSuite) TestBalanceDiscoversCustomCurrencyWithoutSt
 	t := s.T()
 	ctx := t.Context()
 	ns := s.GetUniqueNamespace("custom-currency-balance-discovery")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customer := s.CreateLedgerBackedCustomer(ns, "custom-currency-balance-discovery")
 	tokens := s.createCustomCurrency(ns, "TOKENS")
 
@@ -201,7 +201,7 @@ func (s *CustomCurrencyCreditsSuite) TestBalanceDiscoversCustomCurrencyWithoutSt
 	s.Require().Len(balances, 1)
 	s.Require().NotNil(balances[0].CustomCurrencyID)
 	s.Equal(tokens.ID, *balances[0].CustomCurrencyID)
-	s.Equal(float64(0), balances[0].Balance.Settled().InexactFloat64())
+	s.Equal(float64(0), balances[0].Balance.Booked().InexactFloat64())
 	s.Equal(float64(-30), balances[0].Balance.Live().InexactFloat64())
 
 	// then:
@@ -220,6 +220,6 @@ func (s *CustomCurrencyCreditsSuite) TestBalanceDiscoversCustomCurrencyWithoutSt
 	s.Require().Len(balances, 1)
 	s.Require().NotNil(balances[0].CustomCurrencyID)
 	s.Equal(tokens.ID, *balances[0].CustomCurrencyID)
-	s.Equal(float64(-30), balances[0].Balance.Settled().InexactFloat64())
+	s.Equal(float64(-30), balances[0].Balance.Booked().InexactFloat64())
 	s.Equal(float64(-30), balances[0].Balance.Live().InexactFloat64())
 }

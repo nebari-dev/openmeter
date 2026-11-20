@@ -38,6 +38,7 @@ func (s PlanStatus) Validate() error {
 	if !slices.Contains(s.Values(), s) {
 		return fmt.Errorf("invalid plan status: %s", s)
 	}
+
 	return nil
 }
 
@@ -79,6 +80,17 @@ func (p Plan) HasCurrencyOverrides() bool {
 	return lo.SomeBy(p.Phases, func(ph Phase) bool {
 		return ph.RateCards.HasCurrencyOverride()
 	})
+}
+
+// TaxCodeIDs returns the distinct Tax Code IDs referenced across all phases, so callers can look
+// them all up in one batch.
+func (p Plan) TaxCodeIDs() []string {
+	ids := make([]string, 0, len(p.Phases))
+	for _, phase := range p.Phases {
+		ids = append(ids, phase.RateCards.TaxCodeIDs()...)
+	}
+
+	return lo.Uniq(ids)
 }
 
 // UsesCustomCurrency reports whether the plan is priced in a custom (non-fiat)
@@ -146,6 +158,7 @@ func ValidatePlanPhases() models.ValidatorFunc[Plan] {
 
 				errs = append(errs, models.ErrorWithFieldPrefix(selector, ErrPlanPhaseDuplicatedKey))
 			}
+
 			phaseKeys[phase.Key] = struct{}{}
 
 			if err := phase.Validate(); err != nil {
@@ -266,6 +279,7 @@ func ValidatePlanWithCurrencies() models.ValidatorFunc[Plan] {
 		if p.SettlementMode == CreditOnlySettlementMode {
 			validationOption = ValidationOptionCostBasisRequiredFalse
 		}
+
 		validateCurrencyOverride := ValidateCurrencyWithOverride(p.Currency, validationOption)
 		for _, phase := range p.Phases {
 			for _, rateCard := range phase.RateCards {

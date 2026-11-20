@@ -13,6 +13,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges"
 	chargesmeta "github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/service/persistedstate"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/service/reconciler/invoiceupdater"
@@ -22,6 +23,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/streaming"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/featuregate"
+	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/slicesx"
 )
 
@@ -30,8 +32,11 @@ type Reconciler interface {
 	Apply(ctx context.Context, input ApplyInput) error
 }
 
+var _ models.Validator = (*Config)(nil)
+
 type Config struct {
 	BillingService          billing.Service
+	SplitLineGroupService   splitlinegroup.Service
 	LegacyBillingLineEngine *billinglineengine.Engine
 	ChargesService          charges.Service
 	EnableCreditThenInvoice bool
@@ -40,27 +45,33 @@ type Config struct {
 }
 
 func (c Config) Validate() error {
+	var errs []error
+
+	if c.SplitLineGroupService == nil {
+		errs = append(errs, errors.New("split line group service is required"))
+	}
+
 	if c.BillingService == nil {
-		return fmt.Errorf("billing service is required")
+		errs = append(errs, errors.New("billing service is required"))
 	}
 
 	if c.LegacyBillingLineEngine == nil {
-		return fmt.Errorf("legacy billing line engine is required")
+		errs = append(errs, errors.New("legacy billing line engine is required"))
 	}
 
 	if c.Logger == nil {
-		return fmt.Errorf("logger is required")
+		errs = append(errs, errors.New("logger is required"))
 	}
 
 	if c.EnableCreditThenInvoice && c.ChargesService == nil {
-		return fmt.Errorf("charges service is required when credit then invoice is enabled")
+		errs = append(errs, errors.New("charges service is required when credit then invoice is enabled"))
 	}
 
 	if err := c.FeatureGate.Validate(); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("feature gate: %w", err))
 	}
 
-	return nil
+	return models.NewNillableGenericValidationError(errors.Join(errs...))
 }
 
 type Service struct {
@@ -79,9 +90,10 @@ func New(config Config) (*Service, error) {
 	}
 
 	invoiceUpdater, err := invoiceupdater.New(invoiceupdater.Config{
-		BillingService:      config.BillingService,
-		QuantitySnapshotter: config.LegacyBillingLineEngine,
-		Logger:              config.Logger,
+		BillingService:        config.BillingService,
+		SplitLineGroupService: config.SplitLineGroupService,
+		LineEngine:            config.LegacyBillingLineEngine,
+		Logger:                config.Logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating invoice updater: %w", err)
@@ -116,6 +128,7 @@ func (i ApplyInput) Validate() error {
 	if i.Plan == nil {
 		errs = append(errs, fmt.Errorf("plan is required"))
 	}
+
 	if err := i.Customer.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
@@ -127,6 +140,7 @@ func (i ApplyInput) Validate() error {
 			errs = append(errs, fmt.Errorf("currency: %w", err))
 		}
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -144,6 +158,7 @@ type Plan struct {
 	ChargePatches                      charges.ApplyPatchesInput
 	Invoices                           persistedstate.Invoices
 	SubscriptionMaxGenerationTimeLimit time.Time
+	BillingEndsAt                      *time.Time
 }
 
 func (p *Plan) IsEmpty() bool {
@@ -155,6 +170,7 @@ func (p *Plan) IsEmpty() bool {
 }
 
 func (s *Service) diffItem(
+	ctx context.Context,
 	target *targetstate.StateItem,
 	existing persistedstate.Item,
 	patches PatchCollection,
@@ -168,6 +184,22 @@ func (s *Service) diffItem(
 		return patches.AddDelete(uniqueID, existing)
 	case target != nil && existing == nil:
 		return patches.AddCreate(*target)
+	}
+
+	if patches.GetLineEngineType().IsCharge() {
+		var err error
+		switch charge := existing.(type) {
+		case persistedstate.FlatFeeChargeGetter:
+			err = validateMatchedChargeOwnership(charge.GetFlatFeeCharge().Intent.GetBaseIntent().Intent, *target)
+		case persistedstate.UsageBasedChargeGetter:
+			err = validateMatchedChargeOwnership(charge.GetUsageBasedCharge().Intent.GetBaseIntent().Intent, *target)
+		default:
+			return fmt.Errorf("unsupported charge item type for subscription reconciliation: %s", existing.Type())
+		}
+
+		if err != nil {
+			return err
+		}
 	}
 
 	existingPeriod := existing.ServicePeriod()
@@ -200,21 +232,22 @@ func (s *Service) diffItem(
 			// Periods are classified by the existing shrink/extend flow below and the physical
 			// reference is handled separately. Any remaining base-intent difference means the
 			// subscription replaced the charge rather than merely reassigning it.
-			var intentsMatch bool
+			var billingTermsMatch bool
 			var err error
 			switch existingCharge := existing.(type) {
 			case persistedstate.FlatFeeChargeGetter:
-				intentsMatch, err = flatFeeChargeMatchesTargetIgnoringPeriodsAndSubscriptionReference(existingCharge, *target)
+				billingTermsMatch, err = flatFeeBillingTermsMatch(existingCharge, *target)
 			case persistedstate.UsageBasedChargeGetter:
-				intentsMatch, err = usageBasedChargeMatchesTargetIgnoringPeriodsAndSubscriptionReference(existingCharge, *target)
+				billingTermsMatch, err = usageBasedBillingTermsMatch(existingCharge, *target)
 			default:
 				return fmt.Errorf("unsupported charge item type for subscription reference repair: %s", existing.Type())
 			}
+
 			if err != nil {
-				return fmt.Errorf("comparing charge intent: %w", err)
+				return fmt.Errorf("comparing charge billing terms: %w", err)
 			}
 
-			if !intentsMatch {
+			if !billingTermsMatch {
 				referenceRepairStrategy = referenceRepairStrategyReplace
 			} else {
 				referencePatch, err := targetReference.AsPatchUpdateSubscriptionReference(*existingReference)
@@ -236,6 +269,10 @@ func (s *Service) diffItem(
 	}
 
 	if referenceRepairStrategy == referenceRepairStrategyReplace {
+		if err := s.ensureChargeCanBeReplaced(ctx, existing); err != nil {
+			return fmt.Errorf("reconciling subscription item[%s]: replacing charge[%s]: %w", target.UniqueID, existing.ID().ID, err)
+		}
+
 		// Replacement preserves the logical child reference while retiring the old physical
 		// charge. Charge deletion remains visible to downstream consumers; economic history
 		// and any user-managed overrides stay owned by the charge lifecycle, not this diff.
@@ -277,6 +314,26 @@ func (s *Service) diffItem(
 	}
 }
 
+func validateMatchedChargeOwnership(existing chargesmeta.Intent, target targetstate.StateItem) error {
+	if existing.ManagedBy != billing.SubscriptionManagedLine {
+		return errors.New("existing charge is not subscription-managed")
+	}
+
+	if existing.CustomerID != target.Subscription.CustomerId {
+		return errors.New("existing charge customer does not match subscription customer")
+	}
+
+	if existing.Subscription == nil {
+		return errors.New("existing charge is missing its subscription reference")
+	}
+
+	if existing.Subscription.SubscriptionID != target.Subscription.ID {
+		return errors.New("subscription ID cannot be updated")
+	}
+
+	return nil
+}
+
 // filterInScopeLines removes target items that should not participate in
 // reconciliation. We intentionally do this before diff planning so
 // non-billable targets behave as absent targets and naturally reconcile to
@@ -306,6 +363,7 @@ func filterInScopeLines(
 		} else {
 			collection, err = patchCollections.ResolveDefaultCollection(line)
 		}
+
 		if err != nil {
 			return nil, fmt.Errorf("resolving patch collection for line[%s]: %w", line.UniqueID, err)
 		}
@@ -338,6 +396,7 @@ func (s *Service) Plan(ctx context.Context, input PlanInput) (*Plan, error) {
 	if len(input.Target.Items) == 0 && len(input.Persisted.ByUniqueID) == 0 {
 		return &Plan{
 			SubscriptionMaxGenerationTimeLimit: input.Target.MaxGenerationTimeLimit,
+			BillingEndsAt:                      input.Target.BillingEndsAt,
 		}, nil
 	}
 
@@ -369,6 +428,7 @@ func (s *Service) Plan(ctx context.Context, input PlanInput) (*Plan, error) {
 	if len(inScopeLines) == 0 && len(persisted.ByUniqueID) == 0 {
 		return &Plan{
 			SubscriptionMaxGenerationTimeLimit: input.Target.MaxGenerationTimeLimit,
+			BillingEndsAt:                      input.Target.BillingEndsAt,
 		}, nil
 	}
 
@@ -398,7 +458,7 @@ func (s *Service) Plan(ctx context.Context, input PlanInput) (*Plan, error) {
 			return nil, fmt.Errorf("getting patch collection for deleted line[%s]: %w", id, err)
 		}
 
-		if err := s.diffItem(nil, line, patchCollection, chargeReferencePatches); err != nil {
+		if err := s.diffItem(ctx, nil, line, patchCollection, chargeReferencePatches); err != nil {
 			return nil, fmt.Errorf("diffing deleted line[%s]: %w", id, err)
 		}
 	}
@@ -415,9 +475,10 @@ func (s *Service) Plan(ctx context.Context, input PlanInput) (*Plan, error) {
 				return nil, fmt.Errorf("resolving default patch collection for new line[%s]: %w", id, err)
 			}
 
-			if err := s.diffItem(&targetLine, nil, defaultCollection, chargeReferencePatches); err != nil {
+			if err := s.diffItem(ctx, &targetLine, nil, defaultCollection, chargeReferencePatches); err != nil {
 				return nil, fmt.Errorf("diffing new line[%s]: %w", id, err)
 			}
+
 			continue
 		}
 
@@ -426,7 +487,7 @@ func (s *Service) Plan(ctx context.Context, input PlanInput) (*Plan, error) {
 			return nil, fmt.Errorf("getting patch collection for existing line[%s]: %w", id, err)
 		}
 
-		if err := s.diffItem(&targetLine, existingLine, patchCollection, chargeReferencePatches); err != nil {
+		if err := s.diffItem(ctx, &targetLine, existingLine, patchCollection, chargeReferencePatches); err != nil {
 			return nil, fmt.Errorf("diffing existing line[%s]: %w", id, err)
 		}
 	}
@@ -435,12 +496,14 @@ func (s *Service) Plan(ctx context.Context, input PlanInput) (*Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collecting charge patches: %w", err)
 	}
+
 	return &Plan{
 		InvoicePatches:                     patchCollections.CollectInvoicePatches(),
 		ChargeReferencePatches:             chargeReferencePatches,
 		ChargePatches:                      chargePatches,
 		Invoices:                           input.Persisted.Invoices,
 		SubscriptionMaxGenerationTimeLimit: input.Target.MaxGenerationTimeLimit,
+		BillingEndsAt:                      input.Target.BillingEndsAt,
 	}, nil
 }
 
@@ -474,6 +537,7 @@ func (s *Service) Apply(ctx context.Context, input ApplyInput) error {
 		s.invoiceUpdater.LogPatches(invoicePatches, input.Plan.Invoices)
 		logChargesPatches(ctx, s.logger, chargeReferencePatches)
 		logChargesPatches(ctx, s.logger, input.Plan.ChargePatches)
+
 		return nil
 	}
 

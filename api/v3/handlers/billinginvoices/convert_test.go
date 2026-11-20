@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -47,29 +47,29 @@ func standardLineForMergeTest(t *testing.T, id string, period timeutil.ClosedPer
 	}
 }
 
-func apiLineForMergeTest(t *testing.T, period timeutil.ClosedPeriod, id *string) api.UpdateInvoiceLine {
+func apiLineForMergeTest(t *testing.T, period timeutil.ClosedPeriod, id *string) apiv3models.UpdateInvoiceLine {
 	t.Helper()
 
-	price := api.UpdatePrice{}
-	require.NoError(t, price.FromUpdatePriceFlat(api.UpdatePriceFlat{
+	price := apiv3models.UpdatePrice{}
+	require.NoError(t, price.FromUpdatePriceFlat(apiv3models.UpdatePriceFlat{
 		Amount: "1",
-		Type:   api.UpdatePriceFlatTypeFlat,
+		Type:   apiv3models.UpdatePriceFlatTypeFlat,
 	}))
 
-	standardLine := api.UpdateInvoiceStandardLine{
+	standardLine := apiv3models.UpdateInvoiceStandardLine{
 		Id:   id,
 		Name: "line",
-		ServicePeriod: api.UpdateClosedPeriod{
+		ServicePeriod: apiv3models.UpdateClosedPeriod{
 			From: period.From,
 			To:   period.To,
 		},
-		RateCard: api.UpdateInvoiceLineRateCard{
+		RateCard: apiv3models.UpdateInvoiceLineRateCard{
 			Price:      price,
 			FeatureKey: lo.ToPtr("feature-key"),
 		},
 	}
 
-	var out api.UpdateInvoiceLine
+	var out apiv3models.UpdateInvoiceLine
 	require.NoError(t, out.FromUpdateInvoiceStandardLine(standardLine))
 
 	return out
@@ -96,9 +96,9 @@ func TestMapRateCardSurfacesUnitConfigSnapshot(t *testing.T) {
 
 	// then: the snapshot surfaces field-for-field on the API rate card.
 	require.NotNil(t, rc.UnitConfig)
-	require.Equal(t, api.BillingUnitConfigOperationDivide, rc.UnitConfig.Operation)
+	require.Equal(t, apiv3models.BillingUnitConfigOperationDivide, rc.UnitConfig.Operation)
 	require.Equal(t, "1000", rc.UnitConfig.ConversionFactor)
-	require.Equal(t, lo.ToPtr(api.BillingUnitConfigRoundingModeCeiling), rc.UnitConfig.Rounding)
+	require.Equal(t, lo.ToPtr(apiv3models.BillingUnitConfigRoundingModeCeiling), rc.UnitConfig.Rounding)
 	require.Equal(t, lo.ToPtr(0), rc.UnitConfig.Precision)
 	require.Equal(t, lo.ToPtr("GB"), rc.UnitConfig.DisplayUnit)
 }
@@ -116,6 +116,71 @@ func TestMapRateCardOmitsUnitConfigWhenAbsent(t *testing.T) {
 
 	// then: the API field is nil (omitted) — identity with today's output.
 	require.Nil(t, rc.UnitConfig)
+}
+
+func TestMapRateCardTaxConfigOutput(t *testing.T) {
+	period := mergeTestPeriod()
+
+	t.Run("legacy config maps to tax code ID and behavior", func(t *testing.T) {
+		// given: a line whose legacy tax config also carries a Stripe code
+		line := standardLineForMergeTest(t, "line-id", period)
+		line.TaxConfig = &billing.TaxConfig{
+			TaxConfig: productcatalog.TaxConfig{
+				Behavior:  lo.ToPtr(productcatalog.InclusiveTaxBehavior),
+				Stripe:    &productcatalog.StripeTaxConfig{Code: "txcd_10000000"},
+				TaxCodeID: lo.ToPtr("01TAXCODE000"),
+			},
+		}
+
+		// when
+		rc, err := mapRateCard(line)
+		require.NoError(t, err)
+
+		// then: the v3 shape has no Stripe field, only the Tax Code ID and behavior
+		require.Equal(t, &apiv3models.TaxCodeConfig{
+			Behavior: lo.ToPtr(apiv3models.BillingTaxBehavior("inclusive")),
+			Code:     &apiv3models.TaxCodeReference{Id: "01TAXCODE000"},
+		}, rc.TaxConfig)
+	})
+
+	t.Run("stripe-only config is omitted", func(t *testing.T) {
+		line := standardLineForMergeTest(t, "line-id", period)
+		line.TaxConfig = &billing.TaxConfig{
+			TaxConfig: productcatalog.TaxConfig{
+				Stripe: &productcatalog.StripeTaxConfig{Code: "txcd_10000000"},
+			},
+		}
+
+		rc, err := mapRateCard(line)
+		require.NoError(t, err)
+		require.Nil(t, rc.TaxConfig)
+	})
+
+	t.Run("no tax config", func(t *testing.T) {
+		rc, err := mapRateCard(standardLineForMergeTest(t, "line-id", period))
+		require.NoError(t, err)
+		require.Nil(t, rc.TaxConfig)
+	})
+}
+
+func TestMergeStandardLineFromAPIPreservesDiscountCorrelationID(t *testing.T) {
+	period := mergeTestPeriod()
+	line := standardLineForMergeTest(t, "line-id", period)
+	line.RateCardDiscounts = billing.Discounts{
+		Percentage: &billing.PercentageDiscount{
+			PercentageDiscount: productcatalog.PercentageDiscount{Percentage: models.NewPercentage(10)},
+			CorrelationID:      "existing-percentage",
+		},
+	}
+
+	apiLine, err := apiLineForMergeTest(t, period, lo.ToPtr(line.ID)).AsUpdateInvoiceStandardLine()
+	require.NoError(t, err)
+	apiLine.RateCard.Discounts = &apiv3models.UpdateDiscounts{Percentage: lo.ToPtr(float32(20))}
+
+	mergedLine, err := mergeStandardLineFromAPI(line, apiLine)
+	require.NoError(t, err)
+	require.Equal(t, models.NewPercentage(20), mergedLine.RateCardDiscounts.Percentage.Percentage)
+	require.Equal(t, "existing-percentage", mergedLine.RateCardDiscounts.Percentage.CorrelationID)
 }
 
 func TestMapUsageQuantityDetailSurfacesStoredQuantities(t *testing.T) {
@@ -190,7 +255,7 @@ func TestMergeStandardInvoiceLinesFromAPITombstonesOmittedLines(t *testing.T) {
 		Lines: billing.NewStandardInvoiceLines([]*billing.StandardLine{keptLine, deletedLine}),
 	}
 
-	lines := []api.UpdateInvoiceLine{
+	lines := []apiv3models.UpdateInvoiceLine{
 		apiLineForMergeTest(t, period, lo.ToPtr("kept-line-id")),
 		apiLineForMergeTest(t, period, nil),
 	}
@@ -235,11 +300,11 @@ func TestMergeInvoiceCustomerFromAPIPreservesImmutableFields(t *testing.T) {
 		Name:       "Old Name",
 	}
 
-	updated := api.UpdateInvoiceCustomer{
+	updated := apiv3models.UpdateInvoiceCustomer{
 		Id:   "attacker-id",
 		Key:  lo.ToPtr("attacker-key"),
 		Name: "New Name",
-		BillingAddress: &api.UpdateAddress{
+		BillingAddress: &apiv3models.UpdateAddress{
 			City: lo.ToPtr("Ghent"),
 		},
 	}
@@ -259,10 +324,10 @@ func TestMergeInvoiceSupplierFromAPI(t *testing.T) {
 		Name: "Old Supplier",
 	}
 
-	updated := api.UpdateSupplier{
+	updated := apiv3models.UpdateSupplier{
 		Id:   lo.ToPtr("attacker-id"),
 		Name: lo.ToPtr("New Supplier"),
-		TaxId: &api.UpdateBillingPartyTaxIdentity{
+		TaxId: &apiv3models.UpdateBillingPartyTaxIdentity{
 			Code: lo.ToPtr("TAX-1"),
 		},
 	}
@@ -276,17 +341,17 @@ func TestMergeInvoiceSupplierFromAPI(t *testing.T) {
 
 func TestMapRateCardTaxConfig(t *testing.T) {
 	t.Run("maps behavior-only tax config", func(t *testing.T) {
-		price := api.UpdatePrice{}
-		require.NoError(t, price.FromUpdatePriceFlat(api.UpdatePriceFlat{
+		price := apiv3models.UpdatePrice{}
+		require.NoError(t, price.FromUpdatePriceFlat(apiv3models.UpdatePriceFlat{
 			Amount: "1",
-			Type:   api.UpdatePriceFlatTypeFlat,
+			Type:   apiv3models.UpdatePriceFlatTypeFlat,
 		}))
 
 		// given: an update rate card carrying a tax config with behavior only.
-		rc := api.UpdateInvoiceLineRateCard{
+		rc := apiv3models.UpdateInvoiceLineRateCard{
 			Price: price,
-			TaxConfig: &api.UpdateTaxCodeConfig{
-				Behavior: lo.ToPtr(api.BillingTaxBehavior("inclusive")),
+			TaxConfig: &apiv3models.UpdateTaxCodeConfig{
+				Behavior: lo.ToPtr(apiv3models.BillingTaxBehavior("inclusive")),
 			},
 		}
 
@@ -303,16 +368,16 @@ func TestMapRateCardTaxConfig(t *testing.T) {
 	})
 
 	t.Run("rejects empty tax config", func(t *testing.T) {
-		price := api.UpdatePrice{}
-		require.NoError(t, price.FromUpdatePriceFlat(api.UpdatePriceFlat{
+		price := apiv3models.UpdatePrice{}
+		require.NoError(t, price.FromUpdatePriceFlat(apiv3models.UpdatePriceFlat{
 			Amount: "1",
-			Type:   api.UpdatePriceFlatTypeFlat,
+			Type:   apiv3models.UpdatePriceFlatTypeFlat,
 		}))
 
 		// given: an update rate card carrying an empty tax config.
-		rc := api.UpdateInvoiceLineRateCard{
+		rc := apiv3models.UpdateInvoiceLineRateCard{
 			Price:     price,
-			TaxConfig: &api.UpdateTaxCodeConfig{},
+			TaxConfig: &apiv3models.UpdateTaxCodeConfig{},
 		}
 
 		// when: the rate card is mapped onto its domain representations.

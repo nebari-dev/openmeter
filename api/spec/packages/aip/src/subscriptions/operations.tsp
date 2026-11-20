@@ -33,9 +33,12 @@ model SubscriptionChange {
   // `timing` is omitted from the spread and redeclared as required below: on
   // create it is an optional scheduling hint, but a change must always say when it
   // takes effect.
+  //
+  // `billing_starts_at` is omitted because it can only be set on create: the
+  // replacement subscription inherits it from the one being changed.
   ...OmitProperties<
     SubscriptionCreate,
-    "customer_id" | "customer_key" | "timing"
+    "customer_id" | "customer_key" | "timing" | "billing_starts_at"
   >;
 
   /**
@@ -219,8 +222,6 @@ interface SubscriptionsOperations {
   @summary("Unschedule subscription")
   @route("/{subscriptionId}/unschedule")
   @extension(Shared.UnstableExtension, true)
-  @extension(Shared.InternalExtension, true)
-  @extension(Shared.PrivateExtension, true)
   @extension(Shared.RPCEndpointExtension, true)
   unschedule(@path subscriptionId: Shared.ULID):
     | Shared.DeleteResponse
@@ -238,8 +239,6 @@ interface SubscriptionsOperations {
   @summary("Restore subscription")
   @route("/{subscriptionId}/restore")
   @extension(Shared.UnstableExtension, true)
-  @extension(Shared.InternalExtension, true)
-  @extension(Shared.PrivateExtension, true)
   @extension(Shared.RPCEndpointExtension, true)
   restore(@path subscriptionId: Shared.ULID):
     | Shared.UpdateResponse<Subscription>
@@ -281,7 +280,6 @@ interface SubscriptionsOperations {
   @summary("Migrate subscription")
   @extension(Shared.UnstableExtension, true)
   @extension(Shared.RPCEndpointExtension, true)
-  @extension(Shared.InternalExtension, true)
   @route("/{subscriptionId}/migrate")
   migrate(@path subscriptionId: Shared.ULID, @body body: SubscriptionMigrate):
     | SubscriptionMigrateResponse

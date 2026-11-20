@@ -17,14 +17,20 @@ type CustomersCreditsGrantsService struct {
 type CreditGrantFilter struct {
 	// Filter credit grants by status.
 	Status *CreditGrantStatus
-	// Filter credit grants by currency.
-	Currency *string
+	// Filter credit grants by fiat or custom currency code.
+	Currency *BillingCurrencyCode
 	// Filter credit grants by key.
 	Key *StringFilter
+	// Select grants spendable on any requested feature, including grants without
+	// feature restrictions. Keys are case-sensitive. Supports `eq` (or shorthand) and
+	// `oeq` with comma-separated keys. Omit to include all features; use
+	// `exists=false` for grants without feature restrictions.
+	FeatureKey *StringFilter
 }
 
 type CreditGrantListParams struct {
 	Page   *PageParams
+	Sort   *Sort
 	Filter *CreditGrantFilter
 }
 
@@ -33,14 +39,17 @@ func (p CreditGrantListParams) values() url.Values {
 
 	addPageParams(q, p.Page)
 
+	addSort(q, "sort", p.Sort)
+
 	if p.Filter != nil {
 		if p.Filter.Status != nil {
 			q.Set("filter[status]", string(*p.Filter.Status))
 		}
 		if p.Filter.Currency != nil {
-			q.Set("filter[currency]", *p.Filter.Currency)
+			q.Set("filter[currency]", string(*p.Filter.Currency))
 		}
 		addStringFilter(q, "filter[key]", p.Filter.Key)
+		addStringFilter(q, "filter[feature_key]", p.Filter.FeatureKey)
 	}
 
 	return q

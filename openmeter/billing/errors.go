@@ -54,6 +54,7 @@ var (
 	ErrInvoiceLineNoPeriodChangeForSubscriptionManagedLine       = NewValidationError("invoice_line_no_period_change_for_subscription_managed_line", "invoice line period cannot be changed for subscription managed lines")
 	ErrInvoiceLineProgressiveBillingUsageDiscountUpdateForbidden = NewValidationError("invoice_line_progressive_billing_usage_discount_update_forbidden", "usage discount cannot be updated on a partially invoiced line")
 	ErrInvoiceCreateNoLines                                      = NewValidationError("invoice_create_no_lines", "the new invoice would have no lines")
+	ErrInvoiceCreateAllLinesGated                                = NewValidationError("invoice_create_all_lines_gated", "all eligible pending lines are blocked from invoice assignment")
 	ErrInvoiceCreateUBPLineCustomerUsageAttributionInvalid       = NewValidationError("invoice_create_ubp_line_customer_has_no_subjects", "creating an usage based line: customer usage attribution is invalid")
 	ErrInvoiceCreateUBPLinePeriodIsEmpty                         = NewValidationError("invoice_create_ubp_line_period_is_empty", "creating an usage based line: truncated period is empty")
 	ErrInvoiceLineCurrencyMismatch                               = NewValidationError("invoice_line_currency_mismatch", "invoice line currency mismatch")
@@ -74,6 +75,10 @@ var (
 	ErrInvoiceLineZeroAmountDeleteInstead          = NewValidationError("invoice_line_zero_amount_delete_instead", "invoice line amount cannot be updated to zero, please delete the line instead")
 	ErrInvoiceLineZeroAmountCreate                 = NewValidationError("invoice_line_zero_amount_create", "creating zero amount flat fee invoice lines is not supported")
 	ErrInvoiceLineUnsupportedSettlementMode        = NewValidationError("invoice_line_unsupported_settlement_mode", "invoice line settlement mode is not supported")
+
+	// Shared by every billing surface that takes a Tax Code ID (invoice default, lines, charges).
+	ErrTaxCodeNotFound = NewValidationError("billing_tax_code_not_found", "tax code not found")
+	ErrTaxCodeDeleted  = NewValidationError("billing_tax_code_deleted", "tax code deleted")
 )
 
 const (

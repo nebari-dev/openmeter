@@ -260,10 +260,6 @@ func (m *mockCollectionCompletedLineEngine) OnPaymentSettled(ctx context.Context
 	return m.onPaymentSettled(ctx, input)
 }
 
-func (m *mockCollectionCompletedLineEngine) CalculateLines(input ombilling.CalculateLinesInput) (ombilling.StandardLines, error) {
-	return input.Lines, nil
-}
-
 func (m *mockCollectionCompletedLineEngine) Reset() {
 	*m = mockCollectionCompletedLineEngine{
 		engineType: m.engineType,
@@ -292,7 +288,7 @@ func (s *LineEngineTestSuite) TestGateInvoiceAssignmentDuringCollection() {
 	s.registerMockLineEngine(s.T(), mockEngine)
 	defer s.unregisterLineEngine(s.T(), mockEngine)
 
-	s.Run("all otherwise billable lines blocked returns an empty successful result", func() {
+	s.Run("all otherwise billable lines blocked returns a validation error", func() {
 		// given
 		mockEngine.Reset()
 		namespace := s.GetUniqueNamespace("ns-line-engine-gate-all-blocked")
@@ -322,7 +318,8 @@ func (s *LineEngineTestSuite) TestGateInvoiceAssignmentDuringCollection() {
 		}, ombilling.WithBypassCollectionAlignment())
 
 		// then
-		s.Require().NoError(err)
+		s.Require().ErrorIs(err, ombilling.ErrInvoiceCreateAllLinesGated)
+		s.ErrorAs(err, &ombilling.ValidationError{})
 		s.Empty(invoices)
 		s.True(gateCalled)
 		s.False(buildCalled)
@@ -381,6 +378,55 @@ func (s *LineEngineTestSuite) TestGateInvoiceAssignmentDuringCollection() {
 		s.Require().Len(invoices, 1)
 		s.Require().Len(invoices[0].Lines.OrEmpty(), 1)
 		s.Equal(pendingLines[1].ID, invoices[0].Lines.OrEmpty()[0].ID)
+	})
+
+	s.Run("a blocked currency does not prevent another currency from invoicing", func() {
+		// given: the USD line is blocked while the EUR line is allowed.
+		mockEngine.Reset()
+		namespace := s.GetUniqueNamespace("ns-line-engine-gate-currencies")
+		customerID, blockedLines := s.createInvoiceAssignmentGateFixture(ctx, namespace, mockEngine.GetLineEngineType(), now)
+		allowedLine := ombilling.NewFlatFeeGatheringLine(ombilling.NewFlatFeeLineInput{
+			Namespace:     namespace,
+			Period:        timeutil.ClosedPeriod{From: now.Add(-time.Hour), To: now},
+			InvoiceAt:     now,
+			Name:          "allowed EUR line",
+			ManagedBy:     ombilling.ManuallyManagedLine,
+			PerUnitAmount: alpacadecimal.NewFromInt(1),
+			PaymentTerm:   productcatalog.InArrearsPaymentTerm,
+		})
+		allowedLine.Currency = currencyx.FiatCode(currency.EUR)
+		allowedLine.Engine = mockEngine.GetLineEngineType()
+		_, err := s.BillingService.CreatePendingInvoiceLines(ctx, ombilling.CreatePendingInvoiceLinesInput{
+			Customer: customerID,
+			Currency: currencyx.FiatCode(currency.EUR),
+			Lines:    ombilling.NewCreatePendingInvoiceLines([]ombilling.GatheringLine{allowedLine}),
+		})
+		s.Require().NoError(err)
+		mockEngine.gateInvoiceAssignment = func(_ context.Context, input ombilling.GateInvoiceAssignmentInput) (ombilling.GateInvoiceAssignmentResult, error) {
+			result := make(ombilling.GateInvoiceAssignmentResult)
+			for _, line := range input.Lines {
+				if line.ID == blockedLines[0].ID {
+					result[line.GetLineID()] = ombilling.InvoiceAssignmentGateResponse{ExcludeFromInvoice: true}
+				}
+			}
+
+			return result, nil
+		}
+		mockEngine.buildStandardInvoiceLines = func(_ context.Context, input ombilling.BuildStandardInvoiceLinesInput) (ombilling.StandardLines, error) {
+			return mustAsNewStandardLines(input), nil
+		}
+
+		// when: collection considers both currencies.
+		invoices, err := s.BillingService.InvoicePendingLines(ctx, ombilling.InvoicePendingLinesInput{
+			Customer:          customerID,
+			AsOf:              &now,
+			ForceAsyncAdvance: true,
+		}, ombilling.WithBypassCollectionAlignment())
+		s.Require().NoError(err)
+
+		// then: the allowed currency produces its invoice.
+		s.Require().Len(invoices, 1)
+		s.Equal(currencyx.FiatCode(currency.EUR), invoices[0].Currency)
 	})
 
 	s.Run("gate errors abort invoice creation", func() {
@@ -704,62 +750,78 @@ func (s *LineEngineTestSuite) TestGatheringPreviewUsesPreviewLineEngineCallback(
 }
 
 func (s *LineEngineTestSuite) TestCollectionCompletedSystemErrorsAbortCollection() {
-	var (
-		ctx          = s.T().Context()
-		namespace    = s.GetUniqueNamespace("ns-line-engine-collection-completed-validation")
-		mockEngine   = &mockCollectionCompletedLineEngine{engineType: ombilling.LineEngineTypeChargeUsageBased}
-		invoice      ombilling.StandardInvoice
-		collectionAt time.Time
-		err          error
-	)
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "plain error", err: errors.New("mock collection completed failure")},
+		{
+			name: "structured system error with validation cause",
+			err: fmt.Errorf("collect: %w", models.NewError("ledger_failed", "mock collection completed failure",
+				models.WithCause(models.NewValidationIssue("invalid_source", "source is invalid")),
+			).WithAttr("reason", "source_missing")),
+		},
+	} {
+		s.Run(tc.name, func() {
+			var (
+				ctx          = s.T().Context()
+				namespace    = s.GetUniqueNamespace("ns-line-engine-collection-completed-validation")
+				mockEngine   = &mockCollectionCompletedLineEngine{engineType: ombilling.LineEngineTypeChargeUsageBased}
+				invoice      ombilling.StandardInvoice
+				collectionAt time.Time
+				err          error
+			)
 
-	clockBase := lo.Must(time.Parse(time.RFC3339, "2024-09-02T12:13:14Z"))
-	clock.SetTime(clockBase)
-	defer clock.ResetTime()
-	defer func() { _ = s.MeterAdapter.ReplaceMeters(ctx, []meter.Meter{}) }()
-	defer s.MockStreamingConnector.Reset()
-	s.registerMockLineEngine(s.T(), mockEngine)
-	defer s.unregisterLineEngine(s.T(), mockEngine)
+			clockBase := lo.Must(time.Parse(time.RFC3339, "2024-09-02T12:13:14Z"))
+			clock.SetTime(clockBase)
+			defer clock.ResetTime()
+			defer func() { _ = s.MeterAdapter.ReplaceMeters(ctx, []meter.Meter{}) }()
+			defer s.MockStreamingConnector.Reset()
+			s.registerMockLineEngine(s.T(), mockEngine)
+			defer s.unregisterLineEngine(s.T(), mockEngine)
 
-	s.Run("Given a draft invoice waiting for collection with a failing collection-completed engine", func() {
-		defer mockEngine.Reset()
+			s.Run("Given a draft invoice waiting for collection with a failing collection-completed engine", func() {
+				defer mockEngine.Reset()
 
-		mockEngine.buildStandardInvoiceLines = func(_ context.Context, input ombilling.BuildStandardInvoiceLinesInput) (ombilling.StandardLines, error) {
-			return mustAsNewStandardLines(ombilling.BuildStandardInvoiceLinesInput{
-				Invoice:        input.Invoice,
-				GatheringLines: input.GatheringLines,
-			}), nil
-		}
+				mockEngine.buildStandardInvoiceLines = func(_ context.Context, input ombilling.BuildStandardInvoiceLinesInput) (ombilling.StandardLines, error) {
+					return mustAsNewStandardLines(ombilling.BuildStandardInvoiceLinesInput{
+						Invoice:        input.Invoice,
+						GatheringLines: input.GatheringLines,
+					}), nil
+				}
 
-		invoice, collectionAt = s.createMeteredDraftInvoiceWaitingForCollection(
-			ctx,
-			namespace,
-			mockEngine.GetLineEngineType(),
-			"UBP - mock collection completed",
-		)
-	})
+				invoice, collectionAt = s.createMeteredDraftInvoiceWaitingForCollection(
+					ctx,
+					namespace,
+					mockEngine.GetLineEngineType(),
+					"UBP - mock collection completed",
+				)
+			})
 
-	s.Run("When collection is completed", func() {
-		defer mockEngine.Reset()
+			s.Run("When collection is completed", func() {
+				defer mockEngine.Reset()
 
-		mockEngine.onCollectionCompleted = func(_ context.Context, input ombilling.OnCollectionCompletedInput) (ombilling.StandardLines, error) {
-			return nil, fmt.Errorf("mock collection completed failure")
-		}
+				mockEngine.onCollectionCompleted = func(_ context.Context, input ombilling.OnCollectionCompletedInput) (ombilling.StandardLines, error) {
+					return nil, tc.err
+				}
 
-		clock.SetTime(collectionAt.Add(time.Minute))
-		_, err = s.BillingService.AdvanceInvoice(ctx, invoice.GetInvoiceID())
-		s.Require().ErrorContains(err, "mock collection completed failure")
-	})
+				clock.SetTime(collectionAt.Add(time.Minute))
+				_, err = s.BillingService.AdvanceInvoice(ctx, invoice.GetInvoiceID())
+				s.Require().ErrorContains(err, "mock collection completed failure")
+				s.Require().ErrorIs(err, tc.err)
+			})
 
-	s.Run("Then collection is rolled back without recording a validation issue", func() {
-		invoice, err = s.BillingService.GetStandardInvoiceById(ctx, ombilling.GetStandardInvoiceByIdInput{
-			Invoice: invoice.GetInvoiceID(),
+			s.Run("Then collection is rolled back without recording a validation issue", func() {
+				invoice, err = s.BillingService.GetStandardInvoiceById(ctx, ombilling.GetStandardInvoiceByIdInput{
+					Invoice: invoice.GetInvoiceID(),
+				})
+				s.Require().NoError(err)
+				s.Equal(ombilling.StandardInvoiceStatusDraftWaitingForCollection, invoice.Status)
+				s.Empty(invoice.ValidationIssues)
+				s.Nil(invoice.QuantitySnapshotedAt)
+			})
 		})
-		s.Require().NoError(err)
-		s.Equal(ombilling.StandardInvoiceStatusDraftWaitingForCollection, invoice.Status)
-		s.Empty(invoice.ValidationIssues)
-		s.Nil(invoice.QuantitySnapshotedAt)
-	})
+	}
 }
 
 func (s *LineEngineTestSuite) TestCollectionCompletedValidationIssuesRespectSeverity() {
@@ -806,7 +868,9 @@ func (s *LineEngineTestSuite) TestCollectionCompletedValidationIssuesRespectSeve
 				if line.UsageBased == nil {
 					line.UsageBased = &ombilling.UsageBasedLine{}
 				}
+
 				line.UsageBased.Quantity = lo.ToPtr(alpacadecimal.NewFromInt(7))
+
 				return ombilling.StandardLines{line}, tc.issue
 			}
 
@@ -1167,6 +1231,7 @@ func (s *LineEngineTestSuite) TestOnInvoiceIssuedIsCalled() {
 			s.Len(input.Lines, 1)
 			s.Equal(input.Invoice.ID, input.Lines[0].InvoiceID)
 			s.Equal(mockEngine.GetLineEngineType(), input.Lines[0].Engine)
+
 			return nil
 		}
 
@@ -1240,7 +1305,8 @@ func (s *LineEngineTestSuite) TestOnInvoiceIssuedFailureTransitionsToRetryableIs
 		mockEngine.onInvoiceIssued = func(_ context.Context, input ombilling.OnInvoiceIssuedInput) error {
 			onInvoiceIssuedCnt++
 			s.Equal(input.Invoice.ID, invoice.ID)
-			return errors.New("simulated invoice issued failure")
+
+			return ombilling.NewValidationError("test_line_engine_callback_failed", "simulated invoice issued failure")
 		}
 
 		clock.SetTime(collectionAt.Add(time.Minute))
@@ -1268,6 +1334,7 @@ func (s *LineEngineTestSuite) TestOnInvoiceIssuedFailureTransitionsToRetryableIs
 		mockEngine.onInvoiceIssued = func(_ context.Context, input ombilling.OnInvoiceIssuedInput) error {
 			onInvoiceIssuedCnt++
 			s.Equal(input.Invoice.ID, invoice.ID)
+
 			return nil
 		}
 
@@ -1341,7 +1408,7 @@ func (s *LineEngineTestSuite) TestOnPaymentAuthorizedIsCalled() {
 
 		mockEngine.onInvoiceIssued = func(_ context.Context, input ombilling.OnInvoiceIssuedInput) error {
 			s.Equal(invoice.ID, input.Invoice.ID)
-			return nil
+			return ombilling.NewValidationWarning("prior_warning", "warning from an earlier invoice step")
 		}
 
 		mockEngine.onPaymentAuthorized = func(_ context.Context, input ombilling.OnPaymentAuthorizedInput) error {
@@ -1351,7 +1418,8 @@ func (s *LineEngineTestSuite) TestOnPaymentAuthorizedIsCalled() {
 			s.Len(input.Lines, 1)
 			s.Equal(invoice.ID, input.Lines[0].InvoiceID)
 			s.Equal(mockEngine.GetLineEngineType(), input.Lines[0].Engine)
-			return nil
+
+			return ombilling.NewValidationWarning("callback_warning", "payment authorization warning")
 		}
 
 		clock.SetTime(collectionAt.Add(time.Minute))
@@ -1364,9 +1432,17 @@ func (s *LineEngineTestSuite) TestOnPaymentAuthorizedIsCalled() {
 		invoice, err = s.BillingService.ApproveInvoice(ctx, invoice.GetInvoiceID())
 		s.Require().NoError(err)
 		s.Equal(ombilling.StandardInvoiceStatusPaymentProcessingPending, invoice.Status)
+		s.Require().Len(invoice.ValidationIssues, 1)
+		s.Equal("prior_warning", invoice.ValidationIssues[0].Code)
 
 		invoice = s.markInvoiceAuthorized(ctx, invoice.GetInvoiceID())
 		s.Equal(ombilling.StandardInvoiceStatusPaymentProcessingAuthorized, invoice.Status)
+		issueCodes := lo.Map(invoice.ValidationIssues, func(issue ombilling.ValidationIssue, _ int) string {
+			return issue.Code
+		})
+		s.Contains(issueCodes, "prior_warning")
+		s.Contains(issueCodes, "callback_warning")
+		s.False(invoice.HasCriticalValidationIssues())
 	})
 
 	s.Run("Then the payment-authorized hook is called once", func() {
@@ -1440,10 +1516,12 @@ func (s *LineEngineTestSuite) TestOnPaymentAuthorizedFailureTransitionsToRetryab
 			return nil
 		}
 
+		systemErr := errors.New("simulated payment authorized system failure")
 		mockEngine.onPaymentAuthorized = func(_ context.Context, input ombilling.OnPaymentAuthorizedInput) error {
 			onPaymentAuthorizedCnt++
 			s.Equal(invoice.ID, input.Invoice.ID)
-			return errors.New("simulated payment authorized failure")
+
+			return systemErr
 		}
 
 		clock.SetTime(collectionAt.Add(time.Minute))
@@ -1457,6 +1535,28 @@ func (s *LineEngineTestSuite) TestOnPaymentAuthorizedFailureTransitionsToRetryab
 		s.Require().NoError(err)
 		s.Equal(ombilling.StandardInvoiceStatusPaymentProcessingPending, invoice.Status)
 
+		err = s.BillingService.TriggerInvoice(ctx, ombilling.InvoiceTriggerServiceInput{
+			InvoiceTriggerInput: ombilling.InvoiceTriggerInput{
+				Invoice: invoice.GetInvoiceID(),
+				Trigger: ombilling.TriggerAuthorized,
+			},
+			AppType:    app.AppTypeCustomInvoicing,
+			Capability: app.CapabilityTypeCollectPayments,
+		})
+		s.Require().ErrorIs(err, systemErr)
+		invoice, err = s.BillingService.GetStandardInvoiceById(ctx, ombilling.GetStandardInvoiceByIdInput{
+			Invoice: invoice.GetInvoiceID(),
+		})
+		s.Require().NoError(err)
+		s.Equal(ombilling.StandardInvoiceStatusPaymentProcessingPending, invoice.Status)
+		s.Empty(invoice.ValidationIssues)
+
+		mockEngine.onPaymentAuthorized = func(_ context.Context, input ombilling.OnPaymentAuthorizedInput) error {
+			onPaymentAuthorizedCnt++
+			s.Equal(invoice.ID, input.Invoice.ID)
+
+			return ombilling.NewValidationError("test_line_engine_callback_failed", "simulated payment authorized failure")
+		}
 		invoice = s.markInvoiceAuthorized(ctx, invoice.GetInvoiceID())
 
 		s.Equal(ombilling.StandardInvoiceStatusPaymentProcessingBookingAuthorizedFailed, invoice.Status)
@@ -1473,13 +1573,14 @@ func (s *LineEngineTestSuite) TestOnPaymentAuthorizedFailureTransitionsToRetryab
 		mockEngine.onPaymentAuthorized = func(_ context.Context, input ombilling.OnPaymentAuthorizedInput) error {
 			onPaymentAuthorizedCnt++
 			s.Equal(invoice.ID, input.Invoice.ID)
+
 			return nil
 		}
 
 		var err error
 		invoice, err = s.BillingService.RetryInvoice(ctx, invoice.GetInvoiceID())
 		s.Require().NoError(err)
-		s.Equal(2, onPaymentAuthorizedCnt)
+		s.Equal(3, onPaymentAuthorizedCnt)
 		s.Contains(
 			[]ombilling.StandardInvoiceStatus{
 				ombilling.StandardInvoiceStatusPaymentProcessingAuthorized,
@@ -1560,6 +1661,7 @@ func (s *LineEngineTestSuite) TestOnPaymentSettledIsCalled() {
 			s.Len(input.Lines, 1)
 			s.Equal(invoice.ID, input.Lines[0].InvoiceID)
 			s.Equal(mockEngine.GetLineEngineType(), input.Lines[0].Engine)
+
 			return nil
 		}
 
@@ -1641,7 +1743,8 @@ func (s *LineEngineTestSuite) TestOnPaymentSettledFailureTransitionsToRetryableP
 		mockEngine.onPaymentSettled = func(_ context.Context, input ombilling.OnPaymentSettledInput) error {
 			onPaymentSettledCnt++
 			s.Equal(invoice.ID, input.Invoice.ID)
-			return errors.New("simulated payment settled failure")
+
+			return ombilling.NewValidationError("test_line_engine_callback_failed", "simulated payment settled failure")
 		}
 
 		clock.SetTime(collectionAt.Add(time.Minute))
@@ -1675,6 +1778,7 @@ func (s *LineEngineTestSuite) TestOnPaymentSettledFailureTransitionsToRetryableP
 		mockEngine.onPaymentSettled = func(_ context.Context, input ombilling.OnPaymentSettledInput) error {
 			onPaymentSettledCnt++
 			s.Equal(invoice.ID, input.Invoice.ID)
+
 			return nil
 		}
 
@@ -1752,6 +1856,7 @@ func (s *LineEngineTestSuite) TestOnPaymentSettledIsCalledAfterAuthorization() {
 			s.Len(input.Lines, 1)
 			s.Equal(invoice.ID, input.Lines[0].InvoiceID)
 			s.Equal(mockEngine.GetLineEngineType(), input.Lines[0].Engine)
+
 			return nil
 		}
 
@@ -1842,7 +1947,8 @@ func (s *LineEngineTestSuite) TestOnPaymentSettledFailureAfterAuthorizationTrans
 			onPaymentSettledCnt++
 			s.Equal(ombilling.StandardInvoiceStatusPaymentProcessingBookingSettled, input.Invoice.Status)
 			s.Equal(invoice.ID, input.Invoice.ID)
-			return errors.New("simulated payment settled failure")
+
+			return ombilling.NewValidationError("test_line_engine_callback_failed", "simulated payment settled failure")
 		}
 
 		clock.SetTime(collectionAt.Add(time.Minute))
@@ -1874,6 +1980,7 @@ func (s *LineEngineTestSuite) TestOnPaymentSettledFailureAfterAuthorizationTrans
 		mockEngine.onPaymentSettled = func(_ context.Context, input ombilling.OnPaymentSettledInput) error {
 			onPaymentSettledCnt++
 			s.Equal(invoice.ID, input.Invoice.ID)
+
 			return nil
 		}
 

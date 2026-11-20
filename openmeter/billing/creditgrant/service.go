@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
+	"github.com/samber/mo"
 
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/creditpurchase"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/payment"
@@ -17,6 +18,7 @@ import (
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
+	"github.com/openmeterio/openmeter/pkg/sortx"
 )
 
 // Service provides a credit-grant-centric API on top of the charges layer.
@@ -248,15 +250,28 @@ type ListInput struct {
 
 	Namespace  string
 	CustomerID string
+	OrderBy    creditpurchase.OrderBy
+	Order      sortx.Order
 
 	// Optional filters
 	Status   *GrantStatus
 	Currency *currencyx.Code
 	Key      *filter.FilterString
+	// FeatureFilters selects any requested feature plus unrestricted grants.
+	// None selects all; Some(nil) selects only grants without feature restrictions.
+	FeatureFilters mo.Option[ledger.FeatureFilters]
 }
 
 func (i ListInput) Validate() error {
 	var errs []error
+
+	if err := i.OrderBy.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if i.Order != sortx.OrderNone && i.Order != sortx.OrderAsc && i.Order != sortx.OrderDesc {
+		errs = append(errs, fmt.Errorf("invalid order: %s", i.Order))
+	}
 
 	if i.Namespace == "" {
 		errs = append(errs, errors.New("namespace is required"))
@@ -281,6 +296,12 @@ func (i ListInput) Validate() error {
 	if i.Key != nil {
 		if err := i.Key.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("key: %w", err))
+		}
+	}
+
+	if features, ok := i.FeatureFilters.Get(); ok {
+		if err := features.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("feature filters: %w", err))
 		}
 	}
 

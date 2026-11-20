@@ -25,6 +25,13 @@ Its complete desired shape is a `SubscriptionSpec`:
 `ItemsByKey[key]` is a time-ordered version history. Its slice index identifies
 a logical revision of the item; it is not quantity. Removing or inserting an
 element changes the identity used by downstream subscription reconciliation.
+Views order revisions by intended start, then put zero-length revisions before
+nonempty ones at the same start. Tied zero-length edits use the existing patch
+ULID order, with an unmarked plan-origin revision first. Item row IDs and
+creation timestamps can change during materialization and do not define this
+order.
+Patch ULIDs use wall-clock creation time; same-millisecond IDs from different
+processes do not guarantee action order.
 
 A `SubscriptionView` is the hydrated read model: the subscription, its current
 spec, customer, phases, items, features, and entitlements. The spec is the
@@ -83,7 +90,33 @@ are clipped to phase and subscription boundaries. The plan workflow defaults
 the anchor to `ActiveFrom`, but the stored anchor is an explicit subscription
 fact and must be carried through replacements and plan changes.
 
-Subscription specs enforce the [product catalog rate-card minimum](../productcatalog/README.md), including for existing items. Cancellation permits legacy short cadences when the spec has no other validation errors; unrelated updates remain blocked until the cadences are changed.
+`BillingStartsAt` is an optional time before which no service is billed. Access,
+entitlements and metering still start at `ActiveFrom`. It exists for
+subscriptions imported from another billing system, where the earlier time was
+already billed there.
+
+- It can only be set on create, by namespaces listed in
+  `productCatalog.subscription.billingStartsAtNamespaces`, and never changes
+  afterwards. Edits and in-place migrations keep it.
+- A plan change copies it to the replacement while it is not before the
+  replacement's start. After that there is nothing left to skip, so the
+  replacement has none.
+- It cannot be before `ActiveFrom`.
+- On legacy invoice lines it must be a billing period boundary counted from
+  `BillingAnchor`.
+- On charges it can be any time. With a value inside a billing period, that
+  period's flat fees are billed in full unless the subscription uses
+  `prorate_prices`. This is not enforced, only recommended in the API docs.
+
+`ChargesConfig` decides which of the two applies. It must stay in agreement
+with how subscription sync routes items to charges or invoice lines. The core
+service checks these rules on create; the anchor, cadence and
+`BillingStartsAt` cannot change afterwards.
+
+The subscription only stores the value. [Subscription sync](../billing/worker/subscriptionsync/README.md#target-time-model)
+applies it when it builds the billing target.
+
+Subscription specs enforce the [product catalog rate-card minimum](../productcatalog/README.md), including for existing items. Existing subscriptions with legacy short cadences remain readable, including when item features are resolved. Cancellation permits those cadences when the spec has no other validation errors; unrelated updates remain blocked until the cadences are changed.
 
 `Timing` describes when a command should take effect. It contains exactly one
 of a custom timestamp or a supported enum. `immediate` resolves from the
@@ -129,6 +162,10 @@ and phase; do not persist a derived absolute end as independent source truth.
 - newly materialized priced items snapshot their effective currency code; custom
   currencies also retain their managed currency ID, while legacy items may lack
   this snapshot
+- add-item edits preserve explicit currency; otherwise they inherit the referenced
+  plan version's default currency. Inline plans retain no default currency, so
+  their edits fall back to invoice currency. Existing item overrides do not define
+  the default for new items.
 - V1 subscription reads reject custom-currency priced items; customer subscription
   lists and customer expansions omit those subscriptions before pagination.
   Visibility follows the non-deleted subscription schedule, including past and

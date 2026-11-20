@@ -62,21 +62,6 @@ func TestGetPreferredRatingEngineFor(t *testing.T) {
 	require.Equal(t, usagebased.RatingEngineDelta, svc.GetPreferredRatingEngineFor(usagebased.Intent{}))
 }
 
-func TestGetDetailedRatingForUsageDisablesCreditsMutator(t *testing.T) {
-	t.Parallel()
-
-	fixture := newGetDetailedRatingForUsageFixture(t, billingrating.GenerateDetailedLinesResult{})
-	ratingService := fixture.config.RatingService.(*stubRatingService)
-
-	svc, err := New(fixture.config)
-	require.NoError(t, err)
-
-	_, err = svc.GetDetailedRatingForUsage(t.Context(), fixture.input)
-	require.NoError(t, err)
-
-	require.True(t, ratingService.lastOpts.DisableCreditsMutator)
-}
-
 func TestNewDetailedLinesFromBilling(t *testing.T) {
 	t.Parallel()
 
@@ -259,7 +244,7 @@ func TestGetDetailedRatingForUsageUsesPeriodPreservingRatingEngine(t *testing.T)
 	require.Equal(t, ratingtestutils.ExpectedTotals{
 		Amount: 12,
 		Total:  12,
-	}, ratingtestutils.ToExpectedTotals(out.Totals))
+	}, ratingtestutils.ToExpectedTotals(out.Totals.Totals))
 }
 
 func TestGetDetailedRatingForUsageLoadsPriorDetailedLines(t *testing.T) {
@@ -429,6 +414,7 @@ func TestGetTotalsForUsageMinimumCommitment(t *testing.T) {
 						MinimumAmount: lo.ToPtr(alpacadecimal.NewFromInt(100)),
 					},
 				})
+
 				return nil
 			})
 			require.NoError(t, err)
@@ -497,7 +483,7 @@ func newDetailedRatingTestRun(id string, servicePeriodTo time.Time, meteredQuant
 			StoredAtLT:      time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC),
 			ServicePeriodTo: servicePeriodTo,
 			MeteredQuantity: alpacadecimal.NewFromInt(meteredQuantity),
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount: alpacadecimal.NewFromInt(meteredQuantity),
 				Total:  alpacadecimal.NewFromInt(meteredQuantity),
 			},
@@ -552,8 +538,8 @@ func newDetailedRatingTestCharge(t testing.TB, period timeutil.ClosedPeriod, run
 	}
 }
 
-func newDetailedRatingTestCustomer() billing.CustomerOverrideWithDetails {
-	return billing.CustomerOverrideWithDetails{
+func newDetailedRatingTestCustomer() billing.CustomerBillingProfile {
+	return billing.CustomerBillingProfile{
 		Customer: &customer.Customer{
 			ManagedResource: models.NewManagedResource(models.ManagedResourceInput{
 				Namespace: "ns",
@@ -595,8 +581,7 @@ func newDetailedRatingTestFeatureMeter() billingfeaturemeter.FeatureMeter {
 }
 
 type stubRatingService struct {
-	result   billingrating.GenerateDetailedLinesResult
-	lastOpts billingrating.GenerateDetailedLinesOptions
+	result billingrating.GenerateDetailedLinesResult
 }
 
 // detailedLinesFetcherFunc keeps rating tests focused on the FetchDetailedLines behavior under test
@@ -616,6 +601,9 @@ func (s *stubRatingService) ResolveBillablePeriod(in billingrating.ResolveBillab
 }
 
 func (s *stubRatingService) GenerateDetailedLines(in billingrating.StandardLineAccessor, opts ...billingrating.GenerateDetailedLinesOption) (billingrating.GenerateDetailedLinesResult, error) {
-	s.lastOpts = billingrating.NewGenerateDetailedLinesOptions(opts...)
 	return s.result, nil
+}
+
+func (s *stubRatingService) GenerateLegacyProgressiveBilledLines(in billingrating.LegacyProgressivelyBillableLineAccessor, opts ...billingrating.GenerateDetailedLinesOption) (billingrating.GenerateDetailedLinesResult, error) {
+	return s.GenerateDetailedLines(in, opts...)
 }

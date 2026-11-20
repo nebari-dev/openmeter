@@ -29,6 +29,7 @@ type AppStripeAdapter interface {
 	GetStripeAppClientFactory() client.StripeAppClientFactory
 
 	UpdateAPIKey(ctx context.Context, input UpdateAPIKeyAdapterInput) error
+	UpdateWebhookSchemaVersion(ctx context.Context, input UpdateWebhookSchemaVersionInput) error
 	CreateCheckoutSession(ctx context.Context, input CreateCheckoutSessionInput) (CreateCheckoutSessionOutput, error)
 	GetWebhookSecret(ctx context.Context, input GetWebhookSecretInput) (GetWebhookSecretOutput, error)
 	// App
@@ -38,6 +39,10 @@ type AppStripeAdapter interface {
 	// Billing
 	GetSupplierContact(ctx context.Context, input GetSupplierContactInput) (billing.SupplierContact, error)
 	GetStripeInvoice(ctx context.Context, input GetStripeInvoiceInput) (*stripe.Invoice, error)
+	GetLatestInvoiceGeneration(ctx context.Context, invoiceID billing.InvoiceID) (int, error)
+	// IncrementInvoiceGeneration runs outside the caller's transaction, so the new generation is kept
+	// even when the invoice sync that gave up the Stripe invoice is rolled back.
+	IncrementInvoiceGeneration(ctx context.Context, invoiceID billing.InvoiceID) error
 	// Customer
 	GetStripeCustomerData(ctx context.Context, input GetStripeCustomerDataInput) (CustomerData, error)
 	UpsertStripeCustomerData(ctx context.Context, input UpsertStripeCustomerDataInput) error

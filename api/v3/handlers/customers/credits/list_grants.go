@@ -7,9 +7,10 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
+	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/creditpurchase"
 	"github.com/openmeterio/openmeter/openmeter/billing/creditgrant"
@@ -18,14 +19,15 @@ import (
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/slicesx"
+	"github.com/openmeterio/openmeter/pkg/sortx"
 )
 
 type (
 	ListCreditGrantsRequest  = creditgrant.ListInput
-	ListCreditGrantsResponse = response.PagePaginationResponse[api.BillingCreditGrant]
+	ListCreditGrantsResponse = response.PagePaginationResponse[apiv3models.BillingCreditGrant]
 	ListCreditGrantsParams   struct {
-		CustomerID api.ULID
-		Params     api.ListCreditGrantsParams
+		CustomerID apiv3models.ULID
+		Params     apiv3models.ListCreditGrantsParams
 	}
 	ListCreditGrantsHandler httptransport.HandlerWithArgs[ListCreditGrantsRequest, ListCreditGrantsResponse, ListCreditGrantsParams]
 )
@@ -60,6 +62,24 @@ func (h *handler) ListCreditGrants() ListCreditGrantsHandler {
 				Page:       page,
 				Namespace:  ns,
 				CustomerID: args.CustomerID,
+				OrderBy:    creditpurchase.OrderByCreatedAt,
+				Order:      sortx.OrderDesc,
+			}
+
+			if args.Params.Sort != nil {
+				sort, err := request.ParseSortBy(*args.Params.Sort)
+				if err != nil {
+					return ListCreditGrantsRequest{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
+						{Field: "sort", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
+					})
+				}
+
+				req.OrderBy = creditpurchase.OrderBy(sort.Field)
+				if err := req.OrderBy.Validate(); err != nil {
+					return ListCreditGrantsRequest{}, apierrors.NewUnsupportedSortFieldError(ctx, sort.Field, "created_at", "updated_at", "name", "id")
+				}
+
+				req.Order = sort.Order.ToSortxOrder()
 			}
 
 			if args.Params.Filter != nil {
@@ -74,6 +94,7 @@ func (h *handler) ListCreditGrants() ListCreditGrantsHandler {
 							},
 						})
 					}
+
 					req.Status = &status
 				}
 
@@ -92,7 +113,12 @@ func (h *handler) ListCreditGrants() ListCreditGrantsHandler {
 						},
 					})
 				}
+
 				req.Key = key
+				req.FeatureFilters, err = fromAPICreditGrantFeatureFilters(args.Params.Filter.FeatureKey)
+				if err != nil {
+					return ListCreditGrantsRequest{}, newFeatureKeyFilterBadRequest(ctx, err)
+				}
 			}
 
 			return req, nil
@@ -103,7 +129,7 @@ func (h *handler) ListCreditGrants() ListCreditGrantsHandler {
 				return ListCreditGrantsResponse{}, fmt.Errorf("list credit grants: %w", err)
 			}
 
-			grants, err := slicesx.MapWithErr(result.Items, func(item creditpurchase.Charge) (api.BillingCreditGrant, error) {
+			grants, err := slicesx.MapWithErr(result.Items, func(item creditpurchase.Charge) (apiv3models.BillingCreditGrant, error) {
 				return toAPIBillingCreditGrant(item)
 			})
 			if err != nil {

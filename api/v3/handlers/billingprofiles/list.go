@@ -7,9 +7,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/billing"
@@ -20,8 +20,8 @@ import (
 
 type (
 	ListBillingProfilesRequest  = billing.ListProfilesInput
-	ListBillingProfilesResponse = response.PagePaginationResponse[api.BillingProfile]
-	ListBillingProfilesParams   = api.ListBillingProfilesParams
+	ListBillingProfilesResponse = response.PagePaginationResponse[apiv3models.BillingProfile]
+	ListBillingProfilesParams   = apiv3models.ListBillingProfilesParams
 	ListBillingProfilesHandler  httptransport.HandlerWithArgs[ListBillingProfilesRequest, ListBillingProfilesResponse, ListBillingProfilesParams]
 )
 
@@ -66,6 +66,7 @@ func (h *handler) ListBillingProfiles() ListBillingProfilesHandler {
 						{Field: "filter[id]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.ID = id
 
 				name, err := filters.FromAPIFilterString(params.Filter.Name)
@@ -74,6 +75,7 @@ func (h *handler) ListBillingProfiles() ListBillingProfilesHandler {
 						{Field: "filter[name]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Name = name
 			}
 
@@ -84,6 +86,7 @@ func (h *handler) ListBillingProfiles() ListBillingProfilesHandler {
 						{Field: "sort", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.OrderBy = billing.ProfileOrderBy(sort.Field)
 				req.Order = sort.Order.ToSortxOrder()
 			}
@@ -96,7 +99,12 @@ func (h *handler) ListBillingProfiles() ListBillingProfilesHandler {
 				return ListBillingProfilesResponse{}, fmt.Errorf("failed to list billing profiles: %w", err)
 			}
 
-			profiles, err := ToAPIBillingProfiles(resp.Items)
+			taxCodes, err := h.taxCodesForProfiles(ctx, request.Namespace, resp.Items...)
+			if err != nil {
+				return ListBillingProfilesResponse{}, err
+			}
+
+			profiles, err := ToAPIBillingProfiles(resp.Items, taxCodes)
 			if err != nil {
 				return ListBillingProfilesResponse{}, fmt.Errorf("failed to convert billing profiles: %w", err)
 			}

@@ -872,3 +872,97 @@ func TestValidationWithMessage(t *testing.T) {
 		require.NoError(t, ValidationWithMessage(nil, "unused", models.Attributes{"unused": true}))
 	})
 }
+
+func TestStructuredSystemErrorClassification(t *testing.T) {
+	validation := models.NewValidationIssue("invoice_invalid", "invoice cannot proceed")
+	system := models.NewError("ledger_failed", "accounting failed", models.WithCause(validation)).
+		WithAttr("reason", "missing_source")
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "value", err: system},
+		{name: "pointer", err: &system},
+		{name: "formatted wrapper", err: fmt.Errorf("collect: %w", system)},
+		{name: "component wrapper", err: ValidationWithComponent("ledger", system)},
+		{name: "field wrapper", err: ValidationWithFieldPrefix("lines", system)},
+		{name: "attribute wrapper", err: ValidationWithAttributes(models.Annotations{"operation": "collect"}, system)},
+		{name: "joined with warning", err: errors.Join(NewValidationWarning("warning", "warning"), system)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issues, err := ToValidationIssues(tc.err)
+			require.ErrorIs(t, err, system)
+			require.Empty(t, issues)
+			require.False(t, IsValidationIssueOnly(tc.err))
+		})
+	}
+}
+
+func TestExplicitStructuredErrorConversionPreservesContext(t *testing.T) {
+	system := models.NewError("provider_failed", "provider rejected invoice", models.WithComponent("provider")).
+		WithAttr("reason", "missing_address")
+
+	issues, err := ToValidationIssues(WrapAsValidationIssue(fmt.Errorf("sync: %w", system), WithWarningSeverity()))
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	require.Equal(t, "provider_failed", issues[0].Code)
+	require.Equal(t, system.Message(), issues[0].Message)
+	require.Equal(t, ComponentName("provider"), issues[0].Component)
+	require.Equal(t, ValidationIssueSeverityWarning, issues[0].Severity)
+	require.Equal(t, "missing_address", issues[0].Attributes["reason"])
+}
+
+// Lifecycle callbacks in the charge engines wrap their leaf errors with fmt.Errorf to add the
+// trigger and charge ID. The converter walks through Unwrap and never reads the wrapper text, so
+// that context only reaches the persisted issue when it lives on the leaf or in a billing wrapper.
+func TestToValidationIssuesDropsFormattedWrapperContext(t *testing.T) {
+	component := LineEngineValidationComponent(LineEngineTypeChargeFlatFee)
+	const wrapperText = "triggering invoice_issued for charge[charge-1]"
+
+	t.Run("bare error leaf keeps only its own text", func(t *testing.T) {
+		leaf := errors.New("unhandled invoice patches")
+		err := WrapAsValidationIssue(ValidationWithComponent(component, fmt.Errorf("%s: %w", wrapperText, leaf)))
+
+		issues, systemErr := ToValidationIssues(err)
+		require.NoError(t, systemErr)
+		require.Len(t, issues, 1)
+		require.Equal(t, ValidationIssueSeverityCritical, issues[0].Severity)
+		require.Equal(t, component, issues[0].Component)
+		require.Equal(t, leaf.Error(), issues[0].Message)
+		require.NotContains(t, issues[0].Message, wrapperText)
+		require.Empty(t, issues[0].Code)
+		require.Empty(t, issues[0].Attributes)
+	})
+
+	t.Run("typed issue leaf keeps code and attributes but not the wrapper", func(t *testing.T) {
+		leaf := models.NewValidationIssue("payment_already_settled", "payment already settled", models.WithCriticalSeverity()).
+			WithAttrs(models.Attributes{"payment_id": "payment-1"})
+		err := ValidationWithComponent(component, fmt.Errorf("%s: %w", wrapperText, leaf))
+
+		issues, systemErr := ToValidationIssues(err)
+		require.NoError(t, systemErr)
+		require.Len(t, issues, 1)
+		require.Equal(t, ValidationIssueSeverityCritical, issues[0].Severity)
+		require.Equal(t, component, issues[0].Component)
+		require.Equal(t, "payment_already_settled", issues[0].Code)
+		require.Equal(t, "payment already settled", issues[0].Message)
+		require.NotContains(t, issues[0].Message, wrapperText)
+		require.Equal(t, models.Annotations{"payment_id": "payment-1"}, issues[0].Attributes)
+	})
+
+	t.Run("billing wrappers carry the context the formatted wrapper loses", func(t *testing.T) {
+		leaf := errors.New("unhandled invoice patches")
+		err := WrapAsValidationIssue(ValidationWithComponent(
+			component,
+			ValidationWithMessage(leaf, wrapperText, models.Attributes{"trigger": "invoice_issued", "charge_id": "charge-1"}),
+		))
+
+		issues, systemErr := ToValidationIssues(err)
+		require.NoError(t, systemErr)
+		require.Len(t, issues, 1)
+		require.Equal(t, wrapperText+": "+leaf.Error(), issues[0].Message)
+		require.Equal(t, component, issues[0].Component)
+		require.Equal(t, models.Annotations{"trigger": "invoice_issued", "charge_id": "charge-1"}, issues[0].Attributes)
+	})
+}

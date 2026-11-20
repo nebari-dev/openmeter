@@ -26,14 +26,22 @@ model ListCreditGrantsParamsFilter {
   status?: CreditGrantStatus;
 
   /**
-   * Filter credit grants by currency.
+   * Filter credit grants by fiat or custom currency code.
    */
-  currency?: Shared.CurrencyCode;
+  currency?: Currencies.CurrencyCode;
 
   /**
    * Filter credit grants by key.
    */
   key?: Common.StringFieldFilter;
+
+  /**
+   * Select grants spendable on any requested feature, including grants without
+   * feature restrictions. Keys are case-sensitive. Supports `eq` (or shorthand) and
+   * `oeq` with comma-separated keys. Omit to include all features; use
+   * `exists=false` for grants without feature restrictions.
+   */
+  feature_key?: Common.StringFieldFilter;
 }
 
 namespace Credits.Grants {
@@ -79,6 +87,14 @@ namespace Credits.Grants {
       ...Common.PagePaginationQuery,
 
       /**
+       * Sort credit grants by `created_at`, `updated_at`, `name`, or `id`. Defaults to
+       * `created_at desc`. The `asc` suffix is optional when a sort attribute is
+       * supplied. Supports one attribute; ties are broken by `id` in the same direction.
+       */
+      @query(#{ name: "sort" })
+      sort?: Common.SortQuery,
+
+      /**
        * Filter credit grants returned in the response.
        */
       @query(#{ style: "deepObject", explode: true })
@@ -122,8 +138,7 @@ namespace Credits.Grants {
     @operationId("void-credit-grant")
     @summary("Void credit grant")
     @extension(Shared.UnstableExtension, true)
-    @extension(Shared.PrivateExtension, true)
-    @extension(Shared.InternalExtension, true)
+    @extension(Shared.RPCEndpointExtension, true)
     voidGrant(
       @path customerId: Shared.ULID,
       @path creditGrantId: Shared.ULID,
@@ -202,7 +217,9 @@ namespace Credits.Balance {
       @path customerId: Shared.ULID,
 
       /**
-       * Return the credit balance as of this timestamp.
+       * Return credit balances at this timestamp using all currently recorded postings,
+       * including corrections recorded later. This is not a snapshot of what was known
+       * at the requested time.
        *
        * Defaults to the current time. Historical responses return `live` as zero because
        * live charge impacts are only available for current balances.

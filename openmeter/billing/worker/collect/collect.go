@@ -104,6 +104,10 @@ func (a *InvoiceCollector) CollectCustomerInvoice(ctx context.Context, params Co
 			return nil, nil
 		}
 
+		if errors.Is(err, billing.ErrInvoiceCreateAllLinesGated) {
+			return nil, nil
+		}
+
 		if errors.Is(err, billing.ErrInvoiceCreateNoLines) {
 			a.logger.WarnContext(ctx, "no invoices generated for customer during collection (possible data inconsistency), recalculating gathering invoices", "customer", params.CustomerID)
 
@@ -177,6 +181,7 @@ func (a *InvoiceCollector) All(ctx context.Context, namespaces []string, custome
 
 		wg.Wait()
 	}
+
 	closeErrChan()
 
 	var errs []error

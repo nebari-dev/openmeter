@@ -24,7 +24,9 @@ within a namespace.
 
 The historical ledger stores immutable transaction groups, transactions, and
 entries. Balances are projections over those entries; they are not mutable
-facts stored independently from the journal.
+facts stored independently from the journal. Account balances sum the selected
+entries. Minimum balance buckets take the lowest balance from `AsOf` onward;
+[FBO spendable balances](fbo/README.md) apply the credit and breakage policy.
 
 ## Ownership and boundaries
 
@@ -35,9 +37,9 @@ facts stored independently from the journal.
 - `chargeadapter` translates charge lifecycle events into ledger templates.
   Charges decide when an effect is due; the ledger decides how that effect is
   represented and validated. See the [charges domain](../billing/charges/README.md).
-- The collector owns source selection and correction unwind order. Callers
-  provide the target amount and attribution; they must not recreate collection
-  policy.
+- [FBO](fbo/README.md) owns consumption source selection, expiry release, and
+  advance coordination. The collector maps consumptions to billing allocations,
+  commits their group, and owns correction unwind order.
 - `customerbalance` is a customer-facing projection over booked ledger state,
   breakage, and not-yet-booked charge impacts. It does not own posting,
   collection, or correction rules.
@@ -49,8 +51,15 @@ facts stored independently from the journal.
 
 - Every transaction sums to zero. Each entry amount is valid at the posting
   currency's precision.
+- New transaction groups carry `ledger.writer.commit_sha` and `ledger.writer.version`
+  when the writer knows its Git revision and release version, respectively.
+  The application supplies its embedded build identifiers as defaults for
+  `metadata.revision` and `metadata.version`. Historical groups can
+  omit either annotation.
 - `CommitGroup` validates the whole input, locks every affected parent account,
   and books the group atomically in the caller's database transaction.
+- IDs can be assigned to resolved postings before commit; `ledger.PreassignIDs`
+  generates missing transaction and entry IDs without posting.
 - Default routing rules constrain allowed account-type combinations, flow
   direction, authorization stages, route compatibility, and dimension scope.
   A balanced transaction can still be invalid.
@@ -82,6 +91,17 @@ repeated `CommitGroup` call. The initiating domain must make retries safe and
 persist the returned group reference with its own lifecycle state. Ledger
 annotations and entry identity preserve accounting meaning and provenance; they
 are not operation idempotency keys.
+
+## Error diagnostics
+
+Accounting guards use fixed diagnostic reasons, such as
+`ledger_breakage_release_exceeds_open_amount`. Add them with
+`models.NewError` and its `reason` attribute. These remain system errors;
+use `models.NewValidationIssue` only for domain validation.
+Existing validation issues keep their codes and `reason` attributes.
+The shared error handler logs both as `error_codes` and `error_reasons`, including
+through wrapping and joined errors. Keep IDs and amounts in the message, not the
+reason. Direct logger calls do not extract this metadata.
 
 ## Collection provenance
 

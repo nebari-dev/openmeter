@@ -17,6 +17,7 @@ import (
 	dbsubscriptionphase "github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionphase"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	"github.com/openmeterio/openmeter/pkg/clock"
+	"github.com/openmeterio/openmeter/pkg/convert"
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/framework/entutils"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -48,6 +49,7 @@ func (r *subscriptionRepo) AdvancePlanReference(ctx context.Context, input subsc
 	if err := input.Validate(); err != nil {
 		return err
 	}
+
 	_, err := entutils.TransactingRepo(ctx, r, func(ctx context.Context, repo *subscriptionRepo) (struct{}, error) {
 		exists, err := repo.db.Plan.Query().Where(
 			dbplan.Namespace(input.SubscriptionID.Namespace), dbplan.ID(input.TargetPlan.Id),
@@ -56,17 +58,21 @@ func (r *subscriptionRepo) AdvancePlanReference(ctx context.Context, input subsc
 		if err != nil {
 			return struct{}{}, err
 		}
+
 		if !exists {
 			return struct{}{}, models.NewGenericValidationError(errors.New("target plan reference does not exist in the subscription namespace"))
 		}
+
 		_, err = repo.db.Subscription.UpdateOneID(input.SubscriptionID.ID).
 			Where(dbsubscription.Namespace(input.SubscriptionID.Namespace), dbsubscription.PlanID(input.CurrentPlan.Id)).
 			SetPlanID(input.TargetPlan.Id).Save(ctx)
 		if db.IsNotFound(err) {
 			return struct{}{}, models.NewGenericConflictError(errors.New("subscription plan changed during migration"))
 		}
+
 		return struct{}{}, err
 	})
+
 	return err
 }
 
@@ -78,6 +84,7 @@ func (r *subscriptionRepo) SetEndOfCadence(ctx context.Context, id models.Namesp
 				id.ID,
 			)
 		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -103,6 +110,7 @@ func (r *subscriptionRepo) UpdateAnnotations(ctx context.Context, id models.Name
 				id.ID,
 			)
 		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -153,7 +161,8 @@ func (r *subscriptionRepo) Create(ctx context.Context, sub subscription.CreateSu
 			SetNillableDescription(sub.Description).
 			SetMetadata(sub.Metadata).
 			SetAnnotations(sub.Annotations).
-			SetBillingAnchor(sub.BillingAnchor.UTC())
+			SetBillingAnchor(sub.BillingAnchor.UTC()).
+			SetNillableBillingStartsAt(convert.SafeToUTC(sub.BillingStartsAt))
 
 		if sub.ActiveTo != nil {
 			command = command.SetActiveTo(*sub.ActiveTo)
@@ -194,6 +203,7 @@ func (r *subscriptionRepo) CreateCostBasisPins(ctx context.Context, inputs []sub
 			errs = append(errs, fmt.Errorf("input[%d]: %w", idx, err))
 		}
 	}
+
 	if err := errors.Join(errs...); err != nil {
 		return err
 	}
@@ -224,6 +234,7 @@ func (r *subscriptionRepo) Delete(ctx context.Context, id models.NamespacedID) e
 		if db.IsNotFound(err) {
 			return subscription.NewSubscriptionNotFoundError(id.ID)
 		}
+
 		if err != nil {
 			return err
 		}
@@ -264,6 +275,7 @@ func (r *subscriptionRepo) List(ctx context.Context, in subscription.ListSubscri
 				query = query.Where(dbsubscription.HasPlanWith(*p))
 			}
 		}
+
 		query = filter.ApplyToQuery(query, in.ID, dbsubscription.FieldID)
 		query = filter.ApplyToQuery(query, in.CustomerID, dbsubscription.FieldCustomerID)
 		query = filter.ApplyToQuery(query, in.PlanID, dbsubscription.FieldPlanID)

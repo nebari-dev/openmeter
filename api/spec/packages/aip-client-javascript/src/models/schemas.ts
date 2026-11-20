@@ -33,11 +33,13 @@ export const numeric = z
   .regex(new RegExp('^\\-?[0-9]+(\\.[0-9]+)?$'))
   .describe('Numeric represents an arbitrary precision number.')
 
-export const cursorPaginationQueryPage = z
+export const listEventsPage = z
   .object({
     size: z
       .number()
       .int()
+      .gte(1)
+      .lte(100)
       .optional()
       .describe('The number of items to include per page.'),
     after: z
@@ -55,7 +57,10 @@ export const cursorPaginationQueryPage = z
         'Request the previous page of data, starting with the item before this parameter.',
       ),
   })
-  .describe('Determines which page of the collection to retrieve.')
+
+  .describe(
+    'Determines which page of the metering event list to retrieve. A page holds at most 100 events.',
+  )
 
 export const stringFieldFilter = z
   .union([
@@ -596,7 +601,7 @@ export const createVersionFilter = z
       .lte(2147483647)
       .optional()
       .describe('Match this exact version.'),
-    in: z
+    oeq: z
       .array(z.number().int().gte(-2147483648).lte(2147483647))
       .min(1)
       .max(100)
@@ -638,7 +643,7 @@ export const versionFilter = z
       .lte(2147483647)
       .optional()
       .describe('Match this exact version.'),
-    in: z
+    oeq: z
       .array(z.number().int().gte(-2147483648).lte(2147483647))
       .min(1)
       .max(100)
@@ -682,11 +687,37 @@ export const creditGrantVoidPaymentAdjustment = z
     'Describes how voiding a credit grant adjusts related payment state. - `none`: Voiding does not adjust invoices, payment authorization, settlement, payment intents, or external collection state.',
   )
 
+export const cursorPaginationQueryPage = z
+  .object({
+    size: z
+      .number()
+      .int()
+      .gte(1)
+      .lte(1000)
+      .optional()
+      .describe('The number of items to include per page.'),
+    after: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the next page of data, starting with the item after this parameter.',
+      ),
+    before: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the previous page of data, starting with the item before this parameter.',
+      ),
+  })
+  .describe('Determines which page of the collection to retrieve.')
+
 export const creditTransactionType = z
-  .enum(['funded', 'consumed', 'expired', 'voided'])
+  .enum(['funded', 'consumed', 'correction', 'expired', 'voided'])
 
   .describe(
-    'The type of the credit transaction. - `funded`: Credit granted and available for consumption. - `consumed`: Credit consumed by usage or fees. - `expired`: Credit removed because it expired before being used. - `voided`: Credit removed because the grant was voided before being used.',
+    'The type of the credit transaction. - `funded`: Credit granted and available for consumption. - `consumed`: Credit consumed by usage or fees. - `correction`: A balance adjustment reversing previously recorded usage. - `expired`: Credit removed because it expired before being used. - `voided`: Credit removed because the grant was voided before being used.',
   )
 
 export const chargesExpand = z
@@ -701,7 +732,7 @@ export const chargesExpand = z
   ])
 
   .describe(
-    "Expands for customer charges. Values: - `real_time_usage`: The charge's real-time usage; it sets the `usage` and the `totals.realtime` fields, and fills the `outstanding` realization's `usage` with the not-yet-booked remainder of the live read. - `customer`: The complete customer entity of the charge. - `feature`: The complete feature entity of the charge. - `subscription`: The complete subscription of the charge, when present. - `realization.invoice`: The invoice header of each realization (the invoice entity without its `lines` and `customer` snapshot), in place of the ID reference. - `realization.totals`: The `totals` of each realization run, including credit allocations. - `realization.detailed_lines`: The `detailed_lines` of each realization run.",
+    "Expands for customer charges. Values: - `real_time_usage`: Sets `usage` and `totals.realtime` for active usage-based charges and created usage-based charges whose effective service period contains the current time (inclusive start, exclusive end). Deleted charges are skipped. When present, the `outstanding` realization's `usage` shows the unbooked remainder of the live read. - `customer`: The complete customer entity of the charge. - `feature`: The complete feature entity of the charge. - `subscription`: The complete subscription of the charge, when present. - `realization.invoice`: The invoice header of each realization (the invoice entity without its `lines` and `customer` snapshot), in place of the ID reference. - `realization.totals`: The `totals` of each realization run, including credit allocations. - `realization.detailed_lines`: The `detailed_lines` of each realization run.",
   )
 
 export const lifecycleController = z
@@ -983,6 +1014,26 @@ export const featureLlmTokenType = z
   ])
   .describe('Token type for LLM cost lookup.')
 
+export const invoiceDiscountReason = z
+  .enum(['maximum_spend', 'ratecard_percentage', 'ratecard_usage'])
+  .describe('The reason a discount was applied to an invoice line.')
+
+export const invoiceLineExternalReferences = z
+  .object({
+    invoicingId: z
+      .string()
+      .optional()
+      .describe('The ID assigned by the external invoicing app.'),
+  })
+
+  .describe(
+    'External identifiers for an invoice line item assigned by third-party systems.',
+  )
+
+export const invoiceDetailedLineCostCategory = z
+  .enum(['regular', 'commitment'])
+  .describe('Cost category of a detailed invoice line item.')
+
 export const subscriptionCreateTimingEnum = z
   .enum(['immediate'])
 
@@ -1052,11 +1103,26 @@ export const appStatus = z
   .enum(['ready', 'unauthorized'])
   .describe('Connection status of an installed app.')
 
+export const appActionType = z
+  .enum(['reconcile_webhook_events'])
+  .describe('App action type.')
+
 export const updateLabels = z
   .record(z.string(), z.string())
 
   .describe(
     'Labels store metadata of an entity that can be used for filtering an entity list or for searching across entity types. Keys must be of length 1-63 characters, and cannot start with "kong", "konnect", "mesh", "kic", or "\\_".',
+  )
+
+export const appReconcileWebhookEventsActionRequest = z
+  .object({
+    actionType: z
+      .literal('reconcile_webhook_events')
+      .describe('The action to execute.'),
+  })
+
+  .describe(
+    "Request to reconcile the app's webhook events with the latest supported event set.",
   )
 
 export const installAppStripeWithApiKey = z
@@ -1094,10 +1160,10 @@ export const installAppExternalInvoicing = z
       .boolean()
 
       .describe(
-        'If true, a billing profile will be created for the app. The Stripe app will be also set as the default billing profile if the current default is a Sandbox app.',
+        'If true, creates the Auto Collection preset with an OpenMeter supplier in the US (postal code 94114), without replacing the default profile.',
       ),
   })
-  .describe('Base model for installing an app from the catalog.')
+  .describe('Model for installing an External Invoicing app from the catalog.')
 
 export const workflowCollectionAlignmentSubscription = z
   .object({
@@ -1112,25 +1178,9 @@ export const workflowInvoicingSubscriptionEndProrationMode = z
   .enum(['bill_full_period', 'bill_actual_period'])
   .describe('Billing workflow subscription end proration mode.')
 
-export const invoiceDiscountReason = z
-  .enum(['maximum_spend', 'ratecard_percentage', 'ratecard_usage'])
-  .describe('The reason a discount was applied to an invoice line.')
-
-export const invoiceLineExternalReferences = z
-  .object({
-    invoicingId: z
-      .string()
-      .optional()
-      .describe('The ID assigned by the external invoicing app.'),
-  })
-
-  .describe(
-    'External identifiers for an invoice line item assigned by third-party systems.',
-  )
-
-export const invoiceDetailedLineCostCategory = z
-  .enum(['regular', 'commitment'])
-  .describe('Cost category of a detailed invoice line item.')
+export const workflowInvoicingEmptyInvoiceMode = z
+  .enum(['create', 'omit'])
+  .describe('Billing workflow empty invoice mode.')
 
 export const updateBillingInvoiceWorkflowInvoicingSettings = z
   .object({
@@ -1266,6 +1316,35 @@ export const addonStatus = z
     'The status of the add-on defined by the `effective_from` and `effective_to` properties. - `draft`: The add-on has not yet been published and can be edited. - `active`: The add-on is published and available for use. - `archived`: The add-on is no longer available for use.',
   )
 
+export const entitlementAccessQueryPage = z
+  .object({
+    size: z
+      .number()
+      .int()
+      .gte(1)
+      .lte(100)
+      .optional()
+      .describe('The number of items to include per page.'),
+    after: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the next page of data, starting with the item after this parameter.',
+      ),
+    before: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the previous page of data, starting with the item before this parameter.',
+      ),
+  })
+
+  .describe(
+    'Determines which page of the entitlement access query to retrieve. A page holds at most 100 customers.',
+  )
+
 export const entitlementAccessQueryRequestCustomers = z
   .object({
     keys: z
@@ -1322,6 +1401,655 @@ export const notificationChannelType = z
 
   .describe(
     'The type of a notification channel. Currently the only supported channel type is `webhook`; the domain model anticipates additional channel types (e.g. email, Slack) in the future, so this is modeled as an enum rather than a boolean/constant even though it has a single member today.',
+  )
+
+export const notificationBalanceThresholdType = z
+  .enum(['balance_value', 'usage_percentage', 'usage_value'])
+  .describe('What a balance threshold is measured against.')
+
+export const notificationEventType = z
+  .enum([
+    'entitlements.balance.threshold',
+    'entitlements.reset',
+    'invoice.created',
+    'invoice.updated',
+  ])
+
+  .describe(
+    'The type of a notification event. It determines which payload variant the event carries.',
+  )
+
+export const notificationEventDeliveryState = z
+  .enum(['success', 'failed', 'sending', 'pending', 'resending'])
+  .describe('The delivery state of a notification event for a single channel.')
+
+export const notificationEventDeliveryAttemptResponse = z
+  .object({
+    statusCode: z
+      .number()
+      .int()
+      .gte(-2147483648)
+      .lte(2147483647)
+      .optional()
+
+      .describe(
+        'The HTTP status code returned by the recipient. Absent when no response was received.',
+      ),
+    body: z
+      .string()
+
+      .describe(
+        'The response body returned by the recipient. Empty when no body was received.',
+      ),
+    durationMs: z.coerce
+      .bigint()
+      .gte(-9223372036854775808n)
+      .lte(9223372036854775807n)
+      .describe('How long the delivery attempt took, in milliseconds.'),
+    url: z
+      .string()
+      .optional()
+
+      .describe(
+        'The URL the event was delivered to. Only set for webhook channels.',
+      ),
+  })
+
+  .describe(
+    'The response the recipient returned for a delivery attempt. For webhook channels this is the HTTP response.',
+  )
+
+export const notificationEventV1Metadata = z
+  .record(z.string(), z.string())
+
+  .describe(
+    'Set of key-value pairs. Metadata can be used to store additional information about a resource.',
+  )
+
+export const notificationEventV1Annotations = z
+  .record(z.string(), z.unknown())
+
+  .describe(
+    'Set of key-value pairs managed by the system. Cannot be modified by user.',
+  )
+
+export const notificationEventV1Period = z
+  .object({
+    from: z.date().describe('Period start time.'),
+    to: z.date().describe('Period end time.'),
+  })
+  .describe('A period with a start and end time.')
+
+export const notificationEventV1RecurringPeriodIntervalEnum = z
+  .enum(['DAY', 'WEEK', 'MONTH', 'YEAR'])
+
+  .describe(
+    'The unit of time for the interval. One of: `day`, `week`, `month`, or `year`.',
+  )
+
+export const notificationEventV1FilterString = z
+  .object({
+    $eq: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be equal to the provided value.'),
+    $ne: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must not be equal to the provided value.'),
+    $in: z
+      .array(z.string())
+      .nullable()
+      .optional()
+      .describe('The field must be in the provided list of values.'),
+    $nin: z
+      .array(z.string())
+      .nullable()
+      .optional()
+      .describe('The field must not be in the provided list of values.'),
+    $like: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must match the provided value.'),
+    $nlike: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must not match the provided value.'),
+    $ilike: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must match the provided value, ignoring case.'),
+    $nilike: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must not match the provided value, ignoring case.'),
+    $gt: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be greater than the provided value.'),
+    $gte: z
+      .string()
+      .nullable()
+      .optional()
+
+      .describe(
+        'The field must be greater than or equal to the provided value.',
+      ),
+    $lt: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be less than the provided value.'),
+    $lte: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be less than or equal to the provided value.'),
+    get $and() {
+      return z
+        .array(notificationEventV1FilterString)
+        .nullable()
+        .optional()
+
+        .describe(
+          'Provide a list of filters to be combined with a logical AND.',
+        )
+    },
+    get $or() {
+      return z
+        .array(notificationEventV1FilterString)
+        .nullable()
+        .optional()
+
+        .describe('Provide a list of filters to be combined with a logical OR.')
+    },
+  })
+  .describe('A filter for a string field.')
+
+export const notificationEventV1Numeric = z
+  .string()
+  .regex(new RegExp('^\\-?[0-9]+(\\.[0-9]+)?$'))
+  .describe('Numeric represents an arbitrary precision number.')
+
+export const notificationEventV1Subject = z
+  .object({
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z.string().describe('A unique identifier for the subject.'),
+    key: z
+      .string()
+
+      .describe(
+        'A unique, human-readable identifier for the subject. This is typically a database ID or a customer key.',
+      ),
+    displayName: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('A human-readable display name for the subject.'),
+    metadata: z
+      .record(z.string(), z.unknown())
+      .nullable()
+      .optional()
+      .describe('Metadata for the subject.'),
+    currentPeriodStart: z
+      .date()
+      .optional()
+      .describe('The start of the current period for the subject.'),
+    currentPeriodEnd: z
+      .date()
+      .optional()
+      .describe('The end of the current period for the subject.'),
+    stripeCustomerId: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The Stripe customer ID for the subject.'),
+  })
+
+  .describe(
+    'A subject is a unique identifier for a usage attribution by its key. Subjects only exist in the concept of metering. Subjects are optional to create and work as an enrichment for the subject key like displayName, metadata, etc. Subjects are useful when you are reporting usage events with your own database ID but want to enrich the subject with a human-readable name or metadata. For most use cases, a subject is equivalent to a customer. ⚠️ **Deprecated**: Subjects as managable entities are being depracated, use customers with subject key usage attribution instead.',
+  )
+
+export const notificationEventV1EntitlementValue = z
+  .object({
+    hasAccess: z
+      .boolean()
+
+      .describe(
+        'Whether the subject has access to the feature. Shared accross all entitlement types.',
+      ),
+    balance: z
+      .number()
+      .optional()
+
+      .describe(
+        "Only available for metered entitlements. Metered entitlements are built around a balance calculation where feature usage is deducted from the issued grants. Balance represents the remaining balance of the entitlement, it's value never turns negative.",
+      ),
+    usage: z
+      .number()
+      .optional()
+
+      .describe(
+        'Only available for metered entitlements. Returns the total feature usage in the current period.',
+      ),
+    overage: z
+      .number()
+      .optional()
+
+      .describe(
+        "Only available for metered entitlements. Overage represents the usage that wasn't covered by grants, e.g. if the subject had a total feature usage of 100 in the period but they were only granted 80, there would be 20 overage.",
+      ),
+    totalAvailableGrantAmount: z
+      .number()
+      .optional()
+
+      .describe(
+        'Only available for metered entitlements. The summed amount of all grant active at query time PLUS the used amount of since inactive grants.',
+      ),
+    config: z
+      .string()
+      .optional()
+
+      .describe(
+        'Only available for static entitlements. The JSON parsable config of the entitlement.',
+      ),
+  })
+
+  .describe(
+    'Entitlements are the core of OpenMeter access management. They define access to features for subjects. Entitlements can be metered, boolean, or static.',
+  )
+
+export const notificationEventV1CustomerUsageAttribution = z
+  .object({
+    subjectKeys: z
+      .array(z.string())
+      .nullable()
+
+      .describe(
+        'The subjects that are attributed to the customer. Can be empty when no subjects are associated with the customer.',
+      ),
+  })
+
+  .describe(
+    'Mapping to attribute metered usage to the customer. One customer can have zero or more subjects, but one subject can only belong to one customer.',
+  )
+
+export const notificationEventV1CurrencyCode = z
+  .string()
+  .min(3)
+  .max(3)
+  .regex(new RegExp('^[A-Z]{3}$'))
+
+  .describe(
+    'Three-letter [ISO4217](https://www.iso.org/iso-4217-currency-codes.html) currency code. Custom three-letter currency codes are also supported for convenience.',
+  )
+
+export const notificationEventV1CountryCode = z
+  .string()
+  .min(2)
+  .max(2)
+  .regex(new RegExp('^[A-Z]{2}$'))
+
+  .describe(
+    '[ISO 3166-1](https://www.iso.org/iso-3166-country-codes.html) alpha-2 country code. Custom two-letter country codes are also supported for convenience.',
+  )
+
+export const notificationEventV1Alignment = z
+  .object({
+    billablesMustAlign: z
+      .boolean()
+      .optional()
+
+      .describe(
+        "Whether all Billable items and RateCards must align. Alignment means the Price's BillingCadence must align for both duration and anchor time.",
+      ),
+  })
+  .describe('Alignment configuration for a plan or subscription.')
+
+export const notificationEventV1SubscriptionStatus = z
+  .enum(['active', 'inactive', 'canceled', 'scheduled'])
+  .describe('Subscription status.')
+
+export const notificationEventV1PlanReference = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The plan ID.'),
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .describe('The plan key.'),
+    version: z.number().int().describe('The plan version.'),
+  })
+  .describe('References an exact plan.')
+
+export const notificationEventV1SubscriptionCostBasisMode = z
+  .enum(['dynamic', 'pinned'])
+
+  .describe(
+    'Controls how custom-currency cost bases are selected for the subscription.',
+  )
+
+export const notificationEventV1ProRatingMode = z
+  .enum(['prorate_prices'])
+  .describe('Pro-rating mode options for handling billing period changes.')
+
+export const notificationEventV1BillingSettlementMode = z
+  .enum(['credit_then_invoice', 'credit_only'])
+
+  .describe(
+    'The settlement mode of a plan. It determines how the billing system generates invoices and credits for the subscriptions using this plan. - credit_then_invoice: credits from the previous billing period are applied first, then the remaining balance is invoiced. This is the default and most common settlement mode. - credit_only: only credits from the previous billing period are generated and applied. No invoices are generated for the subscription.',
+  )
+
+export const notificationEventV1RuleBalanceThresholdValueType = z
+  .enum([
+    'PERCENT',
+    'NUMBER',
+    'balance_value',
+    'usage_percentage',
+    'usage_value',
+  ])
+
+  .describe(
+    'Type of the rule in the balance threshold specification: - `balance_value`: threshold defined by the remaining balance value based on usage and the total of grants in the current usage period - `usage_percentage`: threshold defined by the usage percentage compared to the total of grants in the current usage period - `usage_value`: threshold defined by the usage value in the current usage period - `NUMBER` (**deprecated**): see `usage_value` - `PERCENT` (**deprecated**): see `usage_percentage`',
+  )
+
+export const notificationEventV1InvoiceType = z
+  .enum(['standard', 'credit_note'])
+
+  .describe(
+    'InvoiceType represents the type of invoice. The type of invoice determines the purpose of the invoice and how it should be handled.',
+  )
+
+export const notificationEventV1BillingTaxIdentificationCode = z
+  .string()
+  .min(1)
+  .max(32)
+
+  .describe(
+    'TaxIdentificationCode is a normalized tax code shown on the original identity document.',
+  )
+
+export const notificationEventV1InvoiceNumber = z
+  .string()
+  .min(1)
+  .max(256)
+
+  .describe(
+    'InvoiceNumber is a unique identifier for the invoice, generated by the invoicing app. The uniqueness depends on a lot of factors: - app setting (unique per app or unique per customer) - multiple app scenarios (multiple apps generating invoices with the same prefix)',
+  )
+
+export const notificationEventV1InvoiceDocumentRefType = z
+  .enum(['credit_note_original_invoice'])
+
+  .describe(
+    'InvoiceDocumentRefType defines the type of document that is being referenced.',
+  )
+
+export const notificationEventV1InvoiceStatus = z
+  .enum([
+    'gathering',
+    'draft',
+    'issuing',
+    'issued',
+    'payment_processing',
+    'overdue',
+    'paid',
+    'uncollectible',
+    'voided',
+  ])
+  .describe('InvoiceStatus describes the status of an invoice.')
+
+export const notificationEventV1InvoiceAvailableActionDetails = z
+  .object({
+    resultingState: z
+      .string()
+
+      .describe(
+        'The state the invoice will reach if the action is activated and all intermediate steps are successful. For example advancing a draft_created invoice will result in a draft_manual_approval_needed invoice.',
+      ),
+  })
+
+  .describe(
+    'InvoiceAvailableActionInvoiceDetails represents the details of the invoice action for non-gathering invoices.',
+  )
+
+export const notificationEventV1InvoiceAvailableActionInvoiceDetails = z
+  .object({})
+
+  .describe(
+    'InvoiceAvailableActionInvoiceDetails represents the details of the invoice action for gathering invoices.',
+  )
+
+export const notificationEventV1AppType = z
+  .enum(['stripe', 'sandbox', 'custom_invoicing'])
+  .describe('Type of the app.')
+
+export const notificationEventV1AppCapabilityType = z
+  .enum([
+    'reportUsage',
+    'reportEvents',
+    'calculateTax',
+    'invoiceCustomers',
+    'collectPayments',
+  ])
+  .describe('App capability type.')
+
+export const notificationEventV1InstallMethod = z
+  .enum(['with_oauth2', 'with_api_key', 'no_credentials_required'])
+  .describe('Install method of the application.')
+
+export const notificationEventV1AppStatus = z
+  .enum(['ready', 'unauthorized'])
+  .describe('App installed status.')
+
+export const notificationEventV1BillingWorkflowCollectionAlignmentSubscription =
+  z
+    .object({
+      type: z.literal('subscription').describe('The type of alignment.'),
+    })
+
+    .describe(
+      'BillingWorkflowCollectionAlignmentSubscription specifies the alignment for collecting the pending line items into an invoice.',
+    )
+
+export const notificationEventV1BillingWorkflowInvoicingSubscriptionEndProrationMode =
+  z
+    .enum(['bill_full_period', 'bill_actual_period'])
+    .describe('Billing workflow subscription end proration mode.')
+
+export const notificationEventV1TaxBehavior = z
+  .enum(['inclusive', 'exclusive'])
+
+  .describe(
+    'Tax behavior. This enum is used to specify whether tax is included in the price or excluded from the price.',
+  )
+
+export const notificationEventV1StripeTaxConfig = z
+  .object({
+    code: z
+      .string()
+      .regex(new RegExp('^txcd_\\d{8}$'))
+      .describe('Product tax code. See: https://docs.stripe.com/tax/tax-codes'),
+  })
+  .describe('The tax config for Stripe.')
+
+export const notificationEventV1CustomInvoicingTaxConfig = z
+  .object({
+    code: z
+      .string()
+
+      .describe(
+        'Tax code. The tax code should be interpreted by the custom invoicing provider.',
+      ),
+  })
+  .describe('Custom invoicing tax config.')
+
+export const notificationEventV1CollectionMethod = z
+  .enum(['charge_automatically', 'send_invoice'])
+
+  .describe(
+    'CollectionMethod specifies how the invoice should be collected (automatic vs manual)',
+  )
+
+export const notificationEventV1BillingWorkflowTaxSettings = z
+  .object({
+    enabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Enable automatic tax calculation when tax is supported by the app. For example, with Stripe Invoicing when enabled, tax is calculated via Stripe Tax.',
+      ),
+    enforced: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Enforce tax calculation when tax is supported by the app. When enabled, OpenMeter will not allow to create an invoice without tax calculation. Enforcement is different per apps, for example, Stripe app requires customer to have a tax location when starting a paid subscription.',
+      ),
+  })
+
+  .describe(
+    'BillingWorkflowTaxSettings represents the tax settings for a billing workflow',
+  )
+
+export const notificationEventV1InvoiceLineManagedBy = z
+  .enum(['subscription', 'system', 'manual'])
+  .describe('InvoiceLineManagedBy specifies who manages the line.')
+
+export const notificationEventV1InvoiceLineStatus = z
+  .enum(['valid', 'detailed', 'split'])
+  .describe('Line status specifies the status of the line.')
+
+export const notificationEventV1DiscountReasonMaximumSpend = z
+  .object({
+    type: z.literal('maximum_spend').describe('type.'),
+  })
+  .describe('The reason for the discount is a maximum spend.')
+
+export const notificationEventV1Percentage = z
+  .number()
+  .describe('Numeric representation of a percentage 50% is represented as 50')
+
+export const notificationEventV1InvoiceLineAppExternalIds = z
+  .object({
+    invoicing: z
+      .string()
+      .optional()
+
+      .describe(
+        'The external ID of the invoice in the invoicing app if available.',
+      ),
+    tax: z
+      .string()
+      .optional()
+      .describe('The external ID of the invoice in the tax app if available.'),
+  })
+
+  .describe(
+    'InvoiceLineAppExternalIds contains the external IDs of the invoice in other apps such as Stripe.',
+  )
+
+export const notificationEventV1InvoiceLineTaxBehavior = z
+  .enum(['inclusive', 'exclusive'])
+
+  .describe(
+    'InvoiceLineTaxBehavior details how the tax item is applied to the base amount. Inclusive means the tax is included in the base amount. Exclusive means the tax is added to the base amount.',
+  )
+
+export const notificationEventV1IdResource = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+  })
+  .describe('IDResource is a resouce with an ID.')
+
+export const notificationEventV1PricePaymentTerm = z
+  .enum(['in_advance', 'in_arrears'])
+
+  .describe(
+    'The payment term of a flat price. One of: in_advance or in_arrears.',
+  )
+
+export const notificationEventV1TieredPriceMode = z
+  .enum(['volume', 'graduated'])
+  .describe('The mode of the tiered price.')
+
+export const notificationEventV1InvoiceDetailedLineCostCategory = z
+  .enum(['regular', 'commitment'])
+
+  .describe(
+    'InvoiceDetailedLineCostCategory determines if the flat fee is a regular fee due to use due to a commitment.',
+  )
+
+export const notificationEventV1PaymentTermInstant = z
+  .object({
+    type: z.literal('instant').describe('Type of terms to be applied.'),
+    detail: z
+      .string()
+      .optional()
+      .describe('Text detail of the chosen payment terms.'),
+    notes: z
+      .string()
+      .optional()
+      .describe('Description of the conditions for payment.'),
+  })
+
+  .describe(
+    'PaymentTermInstant defines the terms for payment on receipt of invoice.',
+  )
+
+export const notificationEventV1ValidationIssueSeverity = z
+  .enum(['critical', 'warning'])
+
+  .describe(
+    'ValidationIssueSeverity describes the severity of a validation issue. Issues with severity "critical" will prevent the invoice from being issued.',
+  )
+
+export const notificationEventV1InvoiceAppExternalIds = z
+  .object({
+    invoicing: z
+      .string()
+      .optional()
+
+      .describe(
+        'The external ID of the invoice in the invoicing app if available.',
+      ),
+    tax: z
+      .string()
+      .optional()
+      .describe('The external ID of the invoice in the tax app if available.'),
+    payment: z
+      .string()
+      .optional()
+
+      .describe(
+        'The external ID of the invoice in the payment app if available.',
+      ),
+  })
+
+  .describe(
+    'InvoiceAppExternalIds contains the external IDs of the invoice in other apps such as Stripe.',
   )
 
 export const queryFilterInteger = z
@@ -1455,9 +2183,11 @@ export const pagePaginationQuery = z
         size: z
           .number()
           .int()
+          .gte(1)
+          .lte(1000)
           .optional()
           .describe('The number of items to include per page.'),
-        number: z.number().int().optional().describe('The page number.'),
+        number: z.number().int().gte(1).optional().describe('The page number.'),
       })
       .optional()
       .describe('Determines which page of the collection to retrieve.'),
@@ -1569,6 +2299,20 @@ export const subscriptionEditOperationType = z
 
   .describe(
     'The type of a subscription edit operation. - `add_item`: Add a rate card to a phase. - `remove_item`: Remove a rate card from a phase. - `add_phase`: Add a new phase to the subscription. - `remove_phase`: Remove a phase from the subscription. - `stretch_phase`: Extend the duration of a phase. - `unschedule_edit`: Discard scheduled edits on the current phase.',
+  )
+
+export const invoiceCreatedV1RuleConfig = z
+  .object({})
+
+  .describe(
+    'Rule configuration of `v1.billing.invoice.created`. Invoice Rules have no type-specific settings.',
+  )
+
+export const invoiceUpdatedV1RuleConfig = z
+  .object({})
+
+  .describe(
+    'Rule configuration of `v1.billing.invoice.updated`. Invoice Rules have no type-specific settings.',
   )
 
 export const systemAccountAccessToken = z
@@ -2069,11 +2813,14 @@ export const queryFilterNumeric = z
     'A query filter for a numeric attribute. Operators are mutually exclusive, only one operator is allowed at a time.',
   )
 
-export const cursorPaginationQuery = z
+export const listEventsPagination = z
   .object({
-    page: cursorPaginationQueryPage.optional(),
+    page: listEventsPage.optional(),
   })
-  .describe('Cursor page query.')
+
+  .describe(
+    'Cursor pagination for the metering event list, with a smaller page size limit than the common one.',
+  )
 
 export const listMetersParamsFilter = z
   .object({
@@ -2163,6 +2910,12 @@ export const createResourceReference = z
   })
   .describe('TaxCode reference.')
 
+export const currencyCustomReference = z
+  .object({
+    id: ulid,
+  })
+  .describe('CurrencyCustom reference.')
+
 export const chargeCostBasisPinned = z
   .object({
     type: z
@@ -2193,12 +2946,6 @@ export const creditGrantInvoiceReference = z
       .describe('Identifier of the invoice line associated with the grant.'),
   })
   .describe('Invoice references for the grant.')
-
-export const currencyCustomReference = z
-  .object({
-    id: ulid,
-  })
-  .describe('CurrencyCustom reference.')
 
 export const subscriptionCostBasisPin = z
   .object({
@@ -2249,23 +2996,29 @@ export const chargeRealizationInvoiceReference = z
   })
   .describe('ChargeRealizationInvoice reference.')
 
-export const addonReference = z
-  .object({
-    id: ulid,
-  })
-  .describe('Addon reference.')
-
 export const chargeReference = z
   .object({
     id: ulid,
   })
   .describe('Reference to a charge associated with an invoice line.')
 
+export const addonReference = z
+  .object({
+    id: ulid,
+  })
+  .describe('Addon reference.')
+
 export const updateResourceReference = z
   .object({
     id: ulid,
   })
   .describe('TaxCode reference.')
+
+export const notificationChannelReference = z
+  .object({
+    id: ulid,
+  })
+  .describe('NotificationChannel reference.')
 
 export const billingCustomerReference = z
   .object({
@@ -2477,6 +3230,22 @@ export const chargeResolvedCostBasis = z
 
   .describe(
     'Fiat conversion rate a custom-currency charge is invoiced at. Present once the cost basis is resolved; dynamic cost bases are exposed only after the service period has started.',
+  )
+
+export const invoiceCustomerChargesInput = z
+  .object({
+    asOf: dateTime.optional(),
+    progressiveBillingOverride: z
+      .boolean()
+      .optional()
+
+      .describe(
+        "Override the customer's progressive billing setting for this collection. When enabled, eligible usage-based lines can be collected for a partial period.",
+      ),
+  })
+
+  .describe(
+    "Options for manually collecting a customer's pending lines into invoices.",
   )
 
 export const subscriptionAddonTimelineSegment = z
@@ -3308,14 +4077,6 @@ export const creditGrantPlanFilter = z
     'A plan key and an optional version constraint for matching credit grants.',
   )
 
-export const listCreditGrantsParamsFilter = z
-  .object({
-    status: creditGrantStatus.optional(),
-    currency: currencyCode.optional(),
-    key: stringFieldFilter.optional(),
-  })
-  .describe('Filter options for listing credit grants.')
-
 export const validationIssue = z
   .object({
     code: z.string().describe('Machine-readable error code.'),
@@ -3346,6 +4107,12 @@ export const voidCreditGrantRequest = z
       .default('none'),
   })
   .describe('Request body for voiding a credit grant.')
+
+export const cursorPaginationQuery = z
+  .object({
+    page: cursorPaginationQueryPage.optional(),
+  })
+  .describe('Cursor page query.')
 
 export const subscriptionProRatingConfig = z
   .object({
@@ -3431,6 +4198,44 @@ export const chargeRealizationPayment = z
   })
   .describe('Payment state of a charge realization.')
 
+export const invoiceLineAmountDiscount = z
+  .object({
+    id: ulid,
+    reason: invoiceDiscountReason,
+    description: z
+      .string()
+      .optional()
+      .describe('Optional human-readable description of the discount.'),
+    externalReferences: invoiceLineExternalReferences.optional(),
+    amount: numeric,
+  })
+  .describe('A monetary amount discount applied to an invoice line item.')
+
+export const invoiceLineUsageDiscount = z
+  .object({
+    id: ulid,
+    reason: invoiceDiscountReason,
+    description: z
+      .string()
+      .optional()
+      .describe('Optional human-readable description of the discount.'),
+    externalReferences: invoiceLineExternalReferences.optional(),
+    quantity: numeric,
+  })
+  .describe('A usage quantity discount applied to an invoice line item.')
+
+export const invoiceLineBaseDiscount = z
+  .object({
+    id: ulid,
+    reason: invoiceDiscountReason,
+    description: z
+      .string()
+      .optional()
+      .describe('Optional human-readable description of the discount.'),
+    externalReferences: invoiceLineExternalReferences.optional(),
+  })
+  .describe('Base fields shared by all invoice line item discounts.')
+
 export const subscriptionCreateTiming = z
   .union([subscriptionCreateTimingEnum, dateTime])
 
@@ -3470,6 +4275,15 @@ export const appCapability = z
     description: z.string().describe('Description of the capability.'),
   })
   .describe('App capability describes a function that an App can perform.')
+
+export const appAction = z
+  .object({
+    type: appActionType,
+    description: z
+      .string()
+      .describe('Human readable explanation of why the action is needed.'),
+  })
+  .describe('An action the operator should take on an installed app.')
 
 export const updateAppStripeRequest = z
   .object({
@@ -3547,6 +4361,10 @@ export const updateAppExternalInvoicingRequest = z
   })
   .describe('AppExternalInvoicing update request.')
 
+export const appActionRequest = z
+  .discriminatedUnion('actionType', [appReconcileWebhookEventsActionRequest])
+  .describe('Request to execute an operator action on an installed app.')
+
 export const installAppRequest = z
   .discriminatedUnion('type', [
     installAppStripeWithApiKey,
@@ -3581,46 +4399,11 @@ export const workflowInvoicingSettings = z
     subscriptionEndProrationMode: workflowInvoicingSubscriptionEndProrationMode
       .optional()
       .default('bill_actual_period'),
+    emptyInvoiceMode: workflowInvoicingEmptyInvoiceMode
+      .optional()
+      .default('create'),
   })
   .describe('Invoice settings for a billing workflow.')
-
-export const invoiceLineAmountDiscount = z
-  .object({
-    id: ulid,
-    reason: invoiceDiscountReason,
-    description: z
-      .string()
-      .optional()
-      .describe('Optional human-readable description of the discount.'),
-    externalReferences: invoiceLineExternalReferences.optional(),
-    amount: numeric,
-  })
-  .describe('A monetary amount discount applied to an invoice line item.')
-
-export const invoiceLineUsageDiscount = z
-  .object({
-    id: ulid,
-    reason: invoiceDiscountReason,
-    description: z
-      .string()
-      .optional()
-      .describe('Optional human-readable description of the discount.'),
-    externalReferences: invoiceLineExternalReferences.optional(),
-    quantity: numeric,
-  })
-  .describe('A usage quantity discount applied to an invoice line item.')
-
-export const invoiceLineBaseDiscount = z
-  .object({
-    id: ulid,
-    reason: invoiceDiscountReason,
-    description: z
-      .string()
-      .optional()
-      .describe('Optional human-readable description of the discount.'),
-    externalReferences: invoiceLineExternalReferences.optional(),
-  })
-  .describe('Base fields shared by all invoice line item discounts.')
 
 export const updateBillingWorkflowPaymentSettings = z
   .discriminatedUnion('collectionMethod', [
@@ -3635,6 +4418,15 @@ export const listCurrenciesParamsFilter = z
     code: stringFieldFilter.optional(),
   })
   .describe('Filter options for listing currencies.')
+
+export const entitlementAccessQueryPagination = z
+  .object({
+    page: entitlementAccessQueryPage.optional(),
+  })
+
+  .describe(
+    'Cursor pagination for the entitlement access query, with a smaller page size limit than the common one.',
+  )
 
 export const entitlementAccessQueryRequest = z
   .object({
@@ -3764,7 +4556,7 @@ export const createNotificationChannelRequest = z
   })
   .describe('NotificationChannel create request.')
 
-export const updateNotificationChannelRequest = z
+export const updateBillingNotificationChannelRequest = z
   .object({
     name: z
       .string()
@@ -3802,6 +4594,415 @@ export const updateNotificationChannelRequest = z
 
   .describe(
     "Request body for updating a notification channel. Updates replace the channel's mutable state rather than merging it: `type`, `name`, and `url` must always be provided, and omitting `disabled`, `labels`, or `custom_headers` resets them to their defaults (enabled, no labels, no custom headers). `signing_secret` is the one exception: omitting it keeps the channel's current signing secret instead of clearing the credential.",
+  )
+
+export const notificationBalanceThreshold = z
+  .object({
+    type: notificationBalanceThresholdType,
+    value: z.number().describe('The threshold value.'),
+  })
+
+  .describe(
+    'A balance threshold of a notification rule. Crossing it generates an `entitlements.balance.threshold` event.',
+  )
+
+export const notificationRuleReference = z
+  .object({
+    id: ulid,
+    type: notificationEventType,
+    name: z.string().describe('The user-provided name of the rule.'),
+  })
+  .describe('A reference to the notification rule that generated an event.')
+
+export const notificationEventDeliveryAttempt = z
+  .object({
+    state: notificationEventDeliveryState,
+    response: notificationEventDeliveryAttemptResponse,
+    timestamp: dateTime,
+  })
+  .describe('A single delivery attempt to a channel.')
+
+export const notificationEventV1RecurringPeriodInterval = z
+  .union([z.string(), notificationEventV1RecurringPeriodIntervalEnum])
+  .describe('Period duration for the recurrence')
+
+export const notificationEventV1FeatureManualUnitCost = z
+  .object({
+    type: z.literal('manual').describe('type.'),
+    amount: notificationEventV1Numeric,
+  })
+  .describe('A fixed per-unit cost amount.')
+
+export const notificationEventV1FeatureLlmUnitCostPricing = z
+  .object({
+    inputPerToken: notificationEventV1Numeric,
+    outputPerToken: notificationEventV1Numeric,
+    cacheReadPerToken: notificationEventV1Numeric.optional(),
+    reasoningPerToken: notificationEventV1Numeric.optional(),
+    cacheWritePerToken: notificationEventV1Numeric.optional(),
+  })
+  .describe('Resolved per-token pricing from the LLM cost database.')
+
+export const notificationEventV1InvoiceTotals = z
+  .object({
+    amount: notificationEventV1Numeric,
+    chargesTotal: notificationEventV1Numeric,
+    discountsTotal: notificationEventV1Numeric,
+    creditsTotal: notificationEventV1Numeric,
+    taxesInclusiveTotal: notificationEventV1Numeric,
+    taxesExclusiveTotal: notificationEventV1Numeric,
+    taxesTotal: notificationEventV1Numeric,
+    total: notificationEventV1Numeric,
+  })
+
+  .describe(
+    'Totals contains the summaries of all calculations for the invoice.',
+  )
+
+export const notificationEventV1DiscountReasonRatecardUsage = z
+  .object({
+    type: z.literal('ratecard_usage').describe('type.'),
+    quantity: notificationEventV1Numeric,
+    correlationId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('The reason for the discount is a ratecard usage.')
+
+export const notificationEventV1InvoiceLineCreditAllocation = z
+  .object({
+    amount: notificationEventV1Numeric,
+    description: z
+      .string()
+      .optional()
+      .describe('Text description as to why the credit was allocated.'),
+  })
+
+  .describe(
+    'InvoiceLineCreditAllocation represents a credit amount allocated to the line before taxes are applied.',
+  )
+
+export const notificationEventV1UnitPriceWithCommitments = z
+  .object({
+    type: z.literal('unit').describe('The type of the price.'),
+    amount: notificationEventV1Numeric,
+    minimumAmount: notificationEventV1Numeric.optional(),
+    maximumAmount: notificationEventV1Numeric.optional(),
+  })
+  .describe('Unit price with spend commitments.')
+
+export const notificationEventV1FlatPrice = z
+  .object({
+    type: z.literal('flat').describe('The type of the price.'),
+    amount: notificationEventV1Numeric,
+  })
+  .describe('Flat price.')
+
+export const notificationEventV1UnitPrice = z
+  .object({
+    type: z.literal('unit').describe('The type of the price.'),
+    amount: notificationEventV1Numeric,
+  })
+  .describe('Unit price.')
+
+export const notificationEventV1DynamicPriceWithCommitments = z
+  .object({
+    type: z.literal('dynamic').describe('The type of the price.'),
+    multiplier: notificationEventV1Numeric.optional(),
+    minimumAmount: notificationEventV1Numeric.optional(),
+    maximumAmount: notificationEventV1Numeric.optional(),
+  })
+  .describe('Dynamic price with spend commitments.')
+
+export const notificationEventV1PackagePriceWithCommitments = z
+  .object({
+    type: z.literal('package').describe('The type of the price.'),
+    amount: notificationEventV1Numeric,
+    quantityPerPackage: notificationEventV1Numeric,
+    minimumAmount: notificationEventV1Numeric.optional(),
+    maximumAmount: notificationEventV1Numeric.optional(),
+  })
+  .describe('Package price with spend commitments.')
+
+export const notificationEventV1BillingDiscountUsage = z
+  .object({
+    quantity: notificationEventV1Numeric,
+    correlationId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('A usage discount.')
+
+export const notificationEventV1SubscriptionCostBasisPin = z
+  .object({
+    customCurrencyId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The managed custom currency ID.'),
+    invoiceCurrency: notificationEventV1CurrencyCode,
+    costBasisId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The pinned cost basis resource ID.'),
+  })
+
+  .describe(
+    'A cost basis pinned to a custom-currency pair for the subscription.',
+  )
+
+export const notificationEventV1Address = z
+  .object({
+    country: notificationEventV1CountryCode.optional(),
+    postalCode: z.string().optional().describe('Postal code.'),
+    state: z.string().optional().describe('State or province.'),
+    city: z.string().optional().describe('City.'),
+    line1: z.string().optional().describe('First line of the address.'),
+    line2: z.string().optional().describe('Second line of the address.'),
+    phoneNumber: z.string().optional().describe('Phone number.'),
+  })
+  .describe('Address')
+
+export const notificationEventV1ProRatingConfig = z
+  .object({
+    enabled: z
+      .boolean()
+      .describe('Whether pro-rating is enabled for this plan.'),
+    mode: notificationEventV1ProRatingMode,
+  })
+  .describe('Configuration for pro-rating behavior.')
+
+export const notificationEventV1RuleBalanceThresholdValue = z
+  .object({
+    value: z.number().describe('Value of the threshold.'),
+    type: notificationEventV1RuleBalanceThresholdValueType,
+  })
+  .describe('Threshold value with multiple supported types.')
+
+export const notificationEventV1BillingPartyTaxIdentity = z
+  .object({
+    code: notificationEventV1BillingTaxIdentificationCode.optional(),
+  })
+
+  .describe(
+    'Identity stores the details required to identify an entity for tax purposes in a specific country.',
+  )
+
+export const notificationEventV1InvoiceReference = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The ID of the invoice.'),
+    number: notificationEventV1InvoiceNumber.optional(),
+  })
+  .describe('Reference to an invoice.')
+
+export const notificationEventV1InvoiceDocumentRef = z
+  .object({
+    type: notificationEventV1InvoiceDocumentRefType,
+    reason: z
+      .string()
+      .optional()
+
+      .describe(
+        'Human readable description on why this reference is here or needs to be used.',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe('Additional details about the document.'),
+  })
+
+  .describe(
+    'InvoiceDocumentRef is used to describe a reference to an existing document (invoice). The v1 schema describes credit note references with issued_at, number and url, but the v1 API only ever sends the generic fields below.',
+  )
+
+export const notificationEventV1InvoiceGenericDocumentRef = z
+  .object({
+    type: notificationEventV1InvoiceDocumentRefType,
+    reason: z
+      .string()
+      .optional()
+
+      .describe(
+        'Human readable description on why this reference is here or needs to be used.',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe('Additional details about the document.'),
+  })
+
+  .describe(
+    'Omitted fields: period: Tax period in which the referred document had an effect required by some tax regimes and formats. stamps: Seals of approval from other organisations that may need to be listed. ext: Extensions for additional codes that may be required.',
+  )
+
+export const notificationEventV1InvoiceAvailableActions = z
+  .object({
+    advance: notificationEventV1InvoiceAvailableActionDetails.optional(),
+    approve: notificationEventV1InvoiceAvailableActionDetails.optional(),
+    delete: notificationEventV1InvoiceAvailableActionDetails.optional(),
+    retry: notificationEventV1InvoiceAvailableActionDetails.optional(),
+    snapshotQuantities:
+      notificationEventV1InvoiceAvailableActionDetails.optional(),
+    void: notificationEventV1InvoiceAvailableActionDetails.optional(),
+    invoice: notificationEventV1InvoiceAvailableActionInvoiceDetails.optional(),
+  })
+
+  .describe(
+    'InvoiceAvailableActions represents the actions that can be performed on the invoice.',
+  )
+
+export const notificationEventV1AppCapability = z
+  .object({
+    type: notificationEventV1AppCapabilityType,
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .describe('Key'),
+    name: z.string().describe('The capability name.'),
+    description: z.string().describe('The capability description.'),
+  })
+
+  .describe(
+    "App capability. Capabilities only exist in config so they don't extend the Resource model.",
+  )
+
+export const notificationEventV1TaxConfig = z
+  .object({
+    behavior: notificationEventV1TaxBehavior.optional(),
+    stripe: notificationEventV1StripeTaxConfig.optional(),
+    customInvoicing: notificationEventV1CustomInvoicingTaxConfig.optional(),
+    taxCodeId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Tax code reference. When both `taxCodeId` and `stripe.code` are provided, `taxCodeId` takes precedence: the referenced tax code entity is used and `stripe.code` is ignored.',
+      ),
+  })
+  .describe('Set of provider specific tax configs.')
+
+export const notificationEventV1BillingWorkflowPaymentSettings = z
+  .object({
+    collectionMethod: notificationEventV1CollectionMethod.optional(),
+  })
+
+  .describe(
+    'BillingWorkflowPaymentSettings represents the payment settings for a billing workflow',
+  )
+
+export const notificationEventV1DiscountReasonRatecardPercentage = z
+  .object({
+    type: z.literal('ratecard_percentage').describe('type.'),
+    percentage: notificationEventV1Percentage,
+    correlationId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('The reason for the discount is a ratecard percentage.')
+
+export const notificationEventV1BillingDiscountPercentage = z
+  .object({
+    percentage: notificationEventV1Percentage,
+    correlationId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('A percentage discount.')
+
+export const notificationEventV1PaymentDueDate = z
+  .object({
+    dueAt: z.date().describe('When the payment is due.'),
+    notes: z
+      .string()
+      .optional()
+      .describe('Other details to take into account for the due date.'),
+    amount: notificationEventV1Numeric,
+    percent: notificationEventV1Percentage.optional(),
+    currency: notificationEventV1CurrencyCode.optional(),
+  })
+
+  .describe(
+    'PaymentDueDate contains an amount that should be paid by the given date.',
+  )
+
+export const notificationEventV1InvoiceLineSubscriptionReference = z
+  .object({
+    subscription: notificationEventV1IdResource,
+    phase: notificationEventV1IdResource,
+    item: notificationEventV1IdResource,
+    billingPeriod: notificationEventV1Period,
+  })
+
+  .describe(
+    'InvoiceLineSubscriptionReference contains the references to the subscription that this line is related to.',
+  )
+
+export const notificationEventV1FlatPriceWithPaymentTerm = z
+  .object({
+    type: z.literal('flat').describe('The type of the price.'),
+    amount: notificationEventV1Numeric,
+    paymentTerm: notificationEventV1PricePaymentTerm.optional(),
+  })
+  .describe('Flat price with payment term.')
+
+export const notificationEventV1ValidationIssue = z
+  .object({
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the charge or discount.'),
+    severity: notificationEventV1ValidationIssueSeverity,
+    field: z
+      .string()
+      .optional()
+
+      .describe(
+        'The field that the issue is related to, if available in JSON path format.',
+      ),
+    code: z
+      .string()
+      .optional()
+      .describe('Machine indentifiable code for the issue, if available.'),
+    component: z.string().describe('Component reporting the issue.'),
+    message: z.string().describe('A human-readable description of the issue.'),
+    metadata: notificationEventV1Metadata.optional(),
+  })
+
+  .describe(
+    'ValidationIssue captures any validation issues related to the invoice. Issues with severity "critical" will prevent the invoice from being issued.',
   )
 
 export const appCustomerData = z
@@ -3863,6 +5064,15 @@ export const creditAdjustment = z
   .describe(
     "A credit adjustment can be used to make manual adjustments to a customer's credit balance. Supported use-cases: - Usage correction",
   )
+
+export const listCreditGrantsParamsFilter = z
+  .object({
+    status: creditGrantStatus.optional(),
+    currency: billingCurrencyCode.optional(),
+    key: stringFieldFilter.optional(),
+    featureKey: stringFieldFilter.optional(),
+  })
+  .describe('Filter options for listing credit grants.')
 
 export const createCreditAdjustmentRequest = z
   .object({
@@ -4148,6 +5358,56 @@ export const listPlanAddonsParamsFilter = z
   })
   .describe('Filter options for listing plan add-ons.')
 
+export const upsertCustomerBillingProfileRequest = z
+  .object({
+    billingProfile: profileReference
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
+  })
+  .describe('CustomerBillingProfile upsert request.')
+
+export const customerProfile = z
+  .object({
+    billingProfile: profileReference
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
+    effectiveBillingProfile: profileReference,
+  })
+  .describe('Customer billing profile selection.')
+
+export const entitlementFeaturesRuleConfig = z
+  .object({
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe('The feature filter shared by the entitlement Rule configurations.')
+
+export const entitlementUsagePeriodResetV1RuleConfig = z
+  .object({
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+  .describe('Rule configuration of `v1.entitlement.usage_period.reset`.')
+
 export const createChargeCostBasis = z
   .discriminatedUnion('type', [
     createChargeCostBasisDynamic,
@@ -4167,6 +5427,56 @@ export const createTaxCodeConfig = z
 
   .describe(
     'Tax configuration for a billable resource. Applies a tax code and tax behavior to the resulting invoice line items. When not set, the applicable default is used: the billing profile default tax configuration, then the organization default tax code.',
+  )
+
+export const creditBalance = z
+  .object({
+    currency: billingCurrencyCode,
+    customCurrency: currencyCustomReference.optional(),
+    live: numeric,
+    booked: numeric,
+    settled: numeric,
+    spendable: numeric,
+    pending: numeric,
+  })
+  .describe('The credit balance by currency.')
+
+export const creditTransaction = z
+  .object({
+    id: ulid,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    labels: labels.optional(),
+    createdAt: dateTime,
+    bookedAt: dateTime,
+    type: creditTransactionType,
+    currency: billingCurrencyCode,
+    customCurrency: currencyCustomReference.optional(),
+    amount: numeric,
+    availableBalance: z
+      .object({
+        before: numeric,
+        after: numeric,
+      })
+
+      .describe(
+        'The booked credit balance before and after the transaction, including credit-only advance debt.',
+      ),
+  })
+
+  .describe(
+    "A credit transaction represents a single credit movement on the customer's balance. Credit transactions are immutable.",
   )
 
 export const chargeCostBasis = z
@@ -4218,51 +5528,6 @@ export const updateOrganizationDefaultTaxCodesRequest = z
     creditGrantTaxCode: taxCodeReference.optional(),
   })
   .describe('OrganizationDefaultTaxCodes update request.')
-
-export const creditBalance = z
-  .object({
-    currency: billingCurrencyCode,
-    customCurrency: currencyCustomReference.optional(),
-    live: numeric,
-    settled: numeric,
-    pending: numeric,
-  })
-  .describe('The credit balance by currency.')
-
-export const creditTransaction = z
-  .object({
-    id: ulid,
-    name: z
-      .string()
-      .min(1)
-      .max(256)
-      .describe('Display name of the resource. Between 1 and 256 characters.'),
-    description: z
-      .string()
-      .max(1024)
-      .optional()
-
-      .describe(
-        'Optional description of the resource. Maximum 1024 characters.',
-      ),
-    labels: labels.optional(),
-    createdAt: dateTime,
-    bookedAt: dateTime,
-    type: creditTransactionType,
-    currency: billingCurrencyCode,
-    customCurrency: currencyCustomReference.optional(),
-    amount: numeric,
-    availableBalance: z
-      .object({
-        before: numeric,
-        after: numeric,
-      })
-      .describe('The available balance before and after the transaction.'),
-  })
-
-  .describe(
-    "A credit transaction represents a single credit movement on the customer's balance. Credit transactions are immutable.",
-  )
 
 export const invoiceWorkflowAppsReferences = z
   .object({
@@ -4364,6 +5629,239 @@ export const updateTaxCodeConfig = z
     'Tax configuration for a billable resource. Applies a tax code and tax behavior to the resulting invoice line items. When not set, the applicable default is used: the billing profile default tax configuration, then the organization default tax code.',
   )
 
+export const notificationRuleEntitlementReset = z
+  .object({
+    id: ulid,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    createdAt: dateTime,
+    updatedAt: dateTime,
+    deletedAt: dateTime.optional(),
+    type: z
+      .literal('entitlements.reset')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe(
+    'A rule that generates an event when an entitlement usage period is reset.',
+  )
+
+export const notificationRuleInvoiceCreated = z
+  .object({
+    id: ulid,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    createdAt: dateTime,
+    updatedAt: dateTime,
+    deletedAt: dateTime.optional(),
+    type: z
+      .literal('invoice.created')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('A rule that generates an event when an invoice is created.')
+
+export const notificationRuleInvoiceUpdated = z
+  .object({
+    id: ulid,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    createdAt: dateTime,
+    updatedAt: dateTime,
+    deletedAt: dateTime.optional(),
+    type: z
+      .literal('invoice.updated')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('A rule that generates an event when an invoice is updated.')
+
+export const notificationRuleEntitlementResetRequest = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    type: z
+      .literal('entitlements.reset')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+  .describe('Request body for an entitlement reset rule.')
+
+export const notificationRuleInvoiceCreatedRequest = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    type: z
+      .literal('invoice.created')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('Request body for an invoice created rule.')
+
+export const notificationRuleInvoiceUpdatedRequest = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    type: z
+      .literal('invoice.updated')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('Request body for an invoice updated rule.')
+
+export const resendBillingNotificationEventRequest = z
+  .object({
+    channels: z
+      .array(notificationChannelReference)
+      .optional()
+
+      .describe(
+        'The channels to resend the event to. When omitted or empty, the event is resent to every enabled channel of the rule. Channels not targeted by the rule or disabled are rejected.',
+      ),
+  })
+  .describe('Request body for resending a notification event.')
+
 export const listEventsParamsFilter = z
   .object({
     id: stringFieldFilter.optional(),
@@ -4405,6 +5903,7 @@ export const listChargesParamsFilter = z
     servicePeriodFrom: dateTimeFieldFilter.optional(),
     servicePeriodTo: dateTimeFieldFilter.optional(),
     customerId: ulidFieldFilter.optional(),
+    subscriptionId: ulidFieldFilter.optional(),
   })
   .describe('Filter options for listing charges across customers.')
 
@@ -4418,6 +5917,33 @@ export const listNotificationChannelsParamsFilter = z
     updatedAt: dateTimeFieldFilter.optional(),
   })
   .describe('Filter options for listing notification channels.')
+
+export const listNotificationRulesParamsFilter = z
+  .object({
+    id: ulidFieldFilter.optional(),
+    name: stringFieldFilter.optional(),
+    type: stringFieldFilterExact.optional(),
+    disabled: booleanFieldFilter.optional(),
+    createdAt: dateTimeFieldFilter.optional(),
+    updatedAt: dateTimeFieldFilter.optional(),
+    channelId: ulidFieldFilter.optional(),
+  })
+  .describe('Filter options for listing notification rules.')
+
+export const listNotificationEventsParamsFilter = z
+  .object({
+    id: ulidFieldFilter.optional(),
+    type: stringFieldFilterExact.optional(),
+    createdAt: dateTimeFieldFilter.optional(),
+    ruleId: ulidFieldFilter.optional(),
+    channelId: ulidFieldFilter.optional(),
+    deliveryStatus: stringFieldFilterExact.optional(),
+    subjectKey: stringFieldFilterExact.optional(),
+    subjectId: ulidFieldFilter.optional(),
+    featureKey: stringFieldFilterExact.optional(),
+    featureId: ulidFieldFilter.optional(),
+  })
+  .describe('Filter options for listing notification events.')
 
 export const resourceFilters = z
   .object({
@@ -4945,6 +6471,7 @@ export const entitlementGrant = z
   .object({
     id: ulid,
     entitlementId: ulid,
+    customerId: ulid.optional(),
     amount: numeric,
     priority: z
       .number()
@@ -5080,6 +6607,7 @@ export const subscriptionBase = z
     billingCadence: iso8601Duration,
     proRatingConfig: subscriptionProRatingConfig.optional(),
     billingAnchor: dateTime,
+    billingStartsAt: dateTime.optional(),
     status: subscriptionStatus,
     settlementMode: settlementMode.optional(),
   })
@@ -5114,6 +6642,22 @@ export const invoiceWorkflow = z
   .describe(
     'Invoice-level snapshot of the workflow configuration. Contains only the settings that are meaningful for an already-created invoice: invoicing behaviour and payment settings. Collection alignment and tax policy are gather-time / profile-wide concerns and are not included.',
   )
+
+export const invoiceLineDiscounts = z
+  .object({
+    amount: z
+      .array(invoiceLineAmountDiscount)
+      .optional()
+
+      .describe(
+        'Monetary amount discounts (e.g. from maximum spend commitments).',
+      ),
+    usage: z
+      .array(invoiceLineUsageDiscount)
+      .optional()
+      .describe('Usage quantity discounts (e.g. free tier usage allowances).'),
+  })
+  .describe('Discounts applied to an invoice line item.')
 
 export const subscriptionCancel = z
   .object({
@@ -5276,22 +6820,6 @@ export const updateAppRequest = z
   ])
   .describe('Request to update an installed app.')
 
-export const invoiceLineDiscounts = z
-  .object({
-    amount: z
-      .array(invoiceLineAmountDiscount)
-      .optional()
-
-      .describe(
-        'Monetary amount discounts (e.g. from maximum spend commitments).',
-      ),
-    usage: z
-      .array(invoiceLineUsageDiscount)
-      .optional()
-      .describe('Usage quantity discounts (e.g. free tier usage allowances).'),
-  })
-  .describe('Discounts applied to an invoice line item.')
-
 export const updateBillingInvoiceWorkflow = z
   .object({
     invoicing: updateBillingInvoiceWorkflowInvoicingSettings.optional(),
@@ -5321,16 +6849,496 @@ export const notificationChannelPagePaginatedResponse = z
   })
   .describe('Page paginated response.')
 
+export const notificationRuleBalanceThreshold = z
+  .object({
+    id: ulid,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    createdAt: dateTime,
+    updatedAt: dateTime,
+    deletedAt: dateTime.optional(),
+    type: z
+      .literal('entitlements.balance.threshold')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    thresholds: z
+      .array(notificationBalanceThreshold)
+      .min(1)
+      .max(10)
+      .describe('The thresholds that generate an event when crossed.'),
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe(
+    'A rule that generates an event when an entitlement balance crosses one of its thresholds.',
+  )
+
+export const notificationRuleBalanceThresholdRequest = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labels.optional(),
+    type: z
+      .literal('entitlements.balance.threshold')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+      .default(false)
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReference)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    thresholds: z
+      .array(notificationBalanceThreshold)
+      .min(1)
+      .max(10)
+      .describe('The thresholds that generate an event when crossed.'),
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+  .describe('Request body for a balance threshold rule.')
+
+export const entitlementBalanceThresholdTriggeredV1RuleConfig = z
+  .object({
+    thresholds: z
+      .array(notificationBalanceThreshold)
+      .min(1)
+      .max(10)
+      .describe('The thresholds that generate an event when crossed.'),
+    features: z
+      .array(featureReference)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe(
+    'Rule configuration of `v1.entitlement.balance_threshold.triggered`.',
+  )
+
+export const notificationEventDeliveryStatus = z
+  .object({
+    channelId: ulid,
+    state: notificationEventDeliveryState,
+    reason: z
+      .string()
+
+      .describe(
+        'The reason for the last state change. Empty for successful deliveries.',
+      ),
+    updatedAt: dateTime,
+    nextAttempt: dateTime.optional(),
+    attempts: z
+      .array(notificationEventDeliveryAttempt)
+      .describe('The delivery attempts made so far, most recent first.'),
+  })
+
+  .describe(
+    'The delivery status of a notification event for one channel of the generating rule.',
+  )
+
+export const notificationEventV1RecurringPeriod = z
+  .object({
+    interval: notificationEventV1RecurringPeriodInterval,
+    anchor: z
+      .date()
+      .describe('A date-time anchor to base the recurring period on.'),
+    intervalIso: z
+      .string()
+      .duration()
+      .describe('The unit of time for the interval in ISO8601 format.'),
+  })
+  .describe('Recurring period with an interval and an anchor.')
+
+export const notificationEventV1RecurringPeriodV2 = z
+  .object({
+    interval: notificationEventV1RecurringPeriodInterval,
+    anchor: z
+      .date()
+      .describe('A date-time anchor to base the recurring period on.'),
+  })
+  .describe('Recurring period with an interval and an anchor.')
+
+export const notificationEventV1FeatureLlmUnitCost = z
+  .object({
+    type: z.literal('llm').describe('type.'),
+    providerProperty: z
+      .string()
+      .optional()
+
+      .describe(
+        'Meter group-by property that holds the LLM provider. Use this when the meter has a group-by dimension for provider. Mutually exclusive with `provider`.',
+      ),
+    provider: z
+      .string()
+      .optional()
+
+      .describe(
+        'Static LLM provider value (e.g., "openai", "anthropic"). Use this when the feature tracks a single provider. Mutually exclusive with `providerProperty`.',
+      ),
+    modelProperty: z
+      .string()
+      .optional()
+
+      .describe(
+        'Meter group-by property that holds the model ID. Use this when the meter has a group-by dimension for model. Mutually exclusive with `model`.',
+      ),
+    model: z
+      .string()
+      .optional()
+
+      .describe(
+        'Static model ID value (e.g., "gpt-4", "claude-3-5-sonnet"). Use this when the feature tracks a single model. Mutually exclusive with `modelProperty`.',
+      ),
+    tokenTypeProperty: z
+      .string()
+      .optional()
+
+      .describe(
+        'Meter group-by property that holds the token type. Use this when the meter has a group-by dimension for token type. Mutually exclusive with `tokenType`.',
+      ),
+    tokenType: z
+      .string()
+      .optional()
+
+      .describe(
+        'Static token type value. Use this when the feature tracks a single token type (e.g., only input tokens). Expected values: input, output, cache_read, reasoning, cache_write, request, response. `request` is an alias for `input`, `response` is an alias for `output`. Mutually exclusive with `tokenTypeProperty`.',
+      ),
+    pricing: notificationEventV1FeatureLlmUnitCostPricing.optional(),
+  })
+
+  .describe(
+    'LLM cost lookup configuration. Maps meter group-by dimensions to LLM cost database fields.',
+  )
+
+export const notificationEventV1PriceTier = z
+  .object({
+    upToAmount: notificationEventV1Numeric.optional(),
+    flatPrice: notificationEventV1FlatPrice
+      .nullable()
+      .describe('The flat price component of the tier.'),
+    unitPrice: notificationEventV1UnitPrice
+      .nullable()
+      .describe('The unit price component of the tier.'),
+  })
+
+  .describe(
+    'A price tier. At least one price component is required in each tier.',
+  )
+
+export const notificationEventV1Subscription = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    activeFrom: z.date().describe('The cadence start of the resource.'),
+    activeTo: z.date().optional().describe('The cadence end of the resource.'),
+    annotations: notificationEventV1Annotations.optional(),
+    alignment: notificationEventV1Alignment.optional(),
+    status: notificationEventV1SubscriptionStatus,
+    customerId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The customer ID of the subscription.'),
+    plan: notificationEventV1PlanReference.optional(),
+    currency: notificationEventV1CurrencyCode,
+    costBasisMode: notificationEventV1SubscriptionCostBasisMode,
+    costBasisPins: z
+      .array(notificationEventV1SubscriptionCostBasisPin)
+
+      .describe(
+        'Cost bases pinned to custom-currency pairs for this subscription.',
+      ),
+    billingCadence: z
+      .string()
+      .duration()
+
+      .describe(
+        'The billing cadence for the subscriptions. Defines how often customers are billed using ISO8601 duration format. Examples: "P1M" (monthly), "P3M" (quarterly), "P1Y" (annually).',
+      ),
+    proRatingConfig: notificationEventV1ProRatingConfig.optional(),
+    billingAnchor: z
+      .date()
+      .describe('The normalizedbilling anchor of the subscription.'),
+    settlementMode: notificationEventV1BillingSettlementMode,
+  })
+  .describe('Subscription is an exact subscription instance.')
+
+export const notificationEventV1BillingParty = z
+  .object({
+    id: z
+      .string()
+      .optional()
+      .describe('Unique identifier for the party (if available)'),
+    key: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+      .describe('An optional unique key of the party (if available)'),
+    name: z
+      .string()
+      .optional()
+      .describe('Legal name or representation of the organization.'),
+    taxId: notificationEventV1BillingPartyTaxIdentity.optional(),
+    addresses: z
+      .array(notificationEventV1Address)
+      .max(1)
+      .optional()
+
+      .describe(
+        'Regular post addresses for where information should be sent if needed.',
+      ),
+  })
+  .describe('Party represents a person or business entity.')
+
+export const notificationEventV1BillingInvoiceCustomerExtendedDetails = z
+  .object({
+    id: z
+      .string()
+      .optional()
+      .describe('Unique identifier for the party (if available)'),
+    key: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+      .describe('An optional unique key of the party (if available)'),
+    name: z
+      .string()
+      .optional()
+      .describe('Legal name or representation of the organization.'),
+    taxId: notificationEventV1BillingPartyTaxIdentity.optional(),
+    addresses: z
+      .array(notificationEventV1Address)
+      .max(1)
+      .optional()
+
+      .describe(
+        'Regular post addresses for where information should be sent if needed.',
+      ),
+    usageAttribution: notificationEventV1CustomerUsageAttribution,
+  })
+
+  .describe(
+    'BillingInvoiceCustomerExtendedDetails is a collection of fields that are used to extend the billing party details for invoices. These fields contain the OpenMeter specific details for the customer, that are not strictly required for the invoice itself.',
+  )
+
+export const notificationEventV1InvoiceStatusDetails = z
+  .object({
+    immutable: z.boolean().describe('Is the invoice editable?'),
+    failed: z.boolean().describe('Is the invoice in a failed state?'),
+    extendedStatus: z
+      .string()
+      .describe('Extended status information for the invoice.'),
+    availableActions: notificationEventV1InvoiceAvailableActions,
+  })
+
+  .describe(
+    'InvoiceStatusDetails represents the details of the invoice status. API users are encouraged to rely on the immutable/failed/avaliableActions fields to determine the next steps of the invoice instead of the extendedStatus field.',
+  )
+
+export const notificationEventV1MarketplaceListing = z
+  .object({
+    type: notificationEventV1AppType,
+    name: z.string().describe("The app's name."),
+    description: z.string().describe("The app's description."),
+    capabilities: z
+      .array(notificationEventV1AppCapability)
+      .describe("The app's capabilities."),
+    installMethods: z
+      .array(notificationEventV1InstallMethod)
+      .describe('Install methods. List of methods to install the app.'),
+  })
+
+  .describe(
+    "A marketplace listing. Represent an available app in the app marketplace that can be installed to the organization. Marketplace apps only exist in config so they don't extend the Resource model.",
+  )
+
+export const notificationEventV1BillingWorkflowInvoicingSettings = z
+  .object({
+    autoAdvance: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether to automatically issue the invoice after the draftPeriod has passed.',
+      ),
+    draftPeriod: z
+      .string()
+      .optional()
+
+      .describe(
+        'The period for the invoice to be kept in draft status for manual reviews.',
+      ),
+    dueAfter: z
+      .string()
+      .optional()
+
+      .describe(
+        "The period after which the invoice is due. With some payment solutions it's only applicable for manual collection method.",
+      ),
+    progressiveBilling: z
+      .boolean()
+      .optional()
+      .describe('Should progressive billing be allowed for this workflow?'),
+    subscriptionEndProrationMode:
+      notificationEventV1BillingWorkflowInvoicingSubscriptionEndProrationMode.optional(),
+    defaultTaxConfig: notificationEventV1TaxConfig.optional(),
+  })
+
+  .describe(
+    'BillingWorkflowInvoicingSettings represents the invoice settings for a billing workflow',
+  )
+
+export const notificationEventV1InvoiceLineTaxItem = z
+  .object({
+    config: notificationEventV1TaxConfig.optional(),
+    percent: notificationEventV1Percentage.optional(),
+    surcharge: notificationEventV1Numeric.optional(),
+    behavior: notificationEventV1InvoiceLineTaxBehavior.optional(),
+  })
+
+  .describe(
+    'TaxConfig stores the configuration for a tax line relative to an invoice line.',
+  )
+
+export const notificationEventV1BillingDiscountReason = z
+  .discriminatedUnion('type', [
+    notificationEventV1DiscountReasonMaximumSpend,
+    notificationEventV1DiscountReasonRatecardPercentage,
+    notificationEventV1DiscountReasonRatecardUsage,
+  ])
+  .describe('The reason for the discount.')
+
+export const notificationEventV1BillingDiscounts = z
+  .object({
+    percentage: notificationEventV1BillingDiscountPercentage.optional(),
+    usage: notificationEventV1BillingDiscountUsage.optional(),
+  })
+  .describe('A discount by type.')
+
+export const notificationEventV1PaymentTermDueDate = z
+  .object({
+    type: z.literal('due_date').describe('Type of terms to be applied.'),
+    detail: z
+      .string()
+      .optional()
+      .describe('Text detail of the chosen payment terms.'),
+    notes: z
+      .string()
+      .optional()
+      .describe('Description of the conditions for payment.'),
+    dueAt: z
+      .array(notificationEventV1PaymentDueDate)
+      .min(1)
+      .describe('When the payment is due.'),
+  })
+
+  .describe(
+    'PaymentTermDueDate defines the terms for payment on a specific date.',
+  )
+
 export const customerData = z
   .object({
-    billingProfile: profileReference.optional(),
+    billingProfile: profileReference
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
+    effectiveBillingProfile: profileReference,
     appData: appCustomerData.optional(),
   })
   .describe('Billing customer data.')
 
 export const upsertCustomerBillingDataRequest = z
   .object({
-    billingProfile: profileReference.optional(),
+    billingProfile: profileReference
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
     appData: appCustomerData.optional(),
   })
   .describe('CustomerBillingData upsert request.')
@@ -5463,6 +7471,20 @@ export const createCreditGrantPurchase = z
   })
   .describe('Purchase and payment terms of the grant.')
 
+export const creditBalances = z
+  .object({
+    retrievedAt: dateTime,
+    balances: z.array(creditBalance).describe('The balances by currencies.'),
+  })
+  .describe('The balances of the credits of a customer.')
+
+export const creditTransactionPaginatedResponse = z
+  .object({
+    data: z.array(creditTransaction),
+    meta: cursorMeta,
+  })
+  .describe('Cursor paginated response.')
+
 export const creditGrantPurchase = z
   .object({
     currency: currencyCode,
@@ -5534,20 +7556,6 @@ export const workflowTaxSettings = z
     defaultTaxConfig: taxConfig.optional(),
   })
   .describe('Tax settings for a billing workflow.')
-
-export const creditBalances = z
-  .object({
-    retrievedAt: dateTime,
-    balances: z.array(creditBalance).describe('The balances by currencies.'),
-  })
-  .describe('The balances of the credits of a customer.')
-
-export const creditTransactionPaginatedResponse = z
-  .object({
-    data: z.array(creditTransaction),
-    meta: cursorMeta,
-  })
-  .describe('Cursor paginated response.')
 
 export const planAddonPagePaginatedResponse = z
   .object({
@@ -5833,6 +7841,43 @@ export const invoiceWorkflowSettings = z
     'Snapshot of the billing workflow configuration captured at invoice creation.',
   )
 
+export const invoiceDetailedLine = z
+  .object({
+    id: ulid,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    labels: labels.optional(),
+    createdAt: dateTime,
+    updatedAt: dateTime,
+    deletedAt: dateTime.optional(),
+    servicePeriod: closedPeriod,
+    totals: totals,
+    category: invoiceDetailedLineCostCategory.default('regular'),
+    discounts: invoiceLineDiscounts.optional(),
+    creditsApplied: z
+      .array(invoiceLineCreditsApplied)
+      .optional()
+      .describe('Credit applied to this detailed line.'),
+    externalReferences: invoiceLineExternalReferences.optional(),
+    quantity: numeric,
+    unitPrice: numeric,
+  })
+
+  .describe(
+    'A detailed (child) sub-line belonging to a parent invoice line. Detailed lines represent the individual flat-fee components that make up a usage-based parent line after quantity snapshotting.',
+  )
+
 export const taxCodePagePaginatedResponse = z
   .object({
     data: z.array(taxCode),
@@ -5863,6 +7908,13 @@ export const appStripe = z
     type: z.literal('stripe').describe('The app type.'),
     definition: appCatalogItem,
     status: appStatus,
+    actions: z
+      .array(appAction)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     accountId: z
       .string()
 
@@ -5907,6 +7959,13 @@ export const appSandbox = z
     type: z.literal('sandbox').describe('The app type.'),
     definition: appCatalogItem,
     status: appStatus,
+    actions: z
+      .array(appAction)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
   })
   .describe('Sandbox app can be used for testing billing features.')
 
@@ -5933,6 +7992,13 @@ export const appExternalInvoicing = z
     type: z.literal('external_invoicing').describe('The app type.'),
     definition: appCatalogItem,
     status: appStatus,
+    actions: z
+      .array(appAction)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     enableDraftSyncHook: z
       .boolean()
 
@@ -5981,6 +8047,13 @@ export const installedAppStripe = z
     type: z.literal('stripe').describe('The app type.'),
     definition: appCatalogItem,
     status: appStatus,
+    actions: z
+      .array(appAction)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     accountId: z
       .string()
 
@@ -6028,6 +8101,13 @@ export const installedAppSandbox = z
     type: z.literal('sandbox').describe('The app type.'),
     definition: appCatalogItem,
     status: appStatus,
+    actions: z
+      .array(appAction)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     defaultForCapabilityTypes: z
       .array(appCapabilityType)
       .describe('Default capabilities of the installed app.'),
@@ -6057,6 +8137,13 @@ export const installedAppExternalInvoicing = z
     type: z.literal('external_invoicing').describe('The app type.'),
     definition: appCatalogItem,
     status: appStatus,
+    actions: z
+      .array(appAction)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     enableDraftSyncHook: z
       .boolean()
 
@@ -6074,43 +8161,6 @@ export const installedAppExternalInvoicing = z
       .describe('Default capabilities of the installed app.'),
   })
   .describe('Response of an installed app.')
-
-export const invoiceDetailedLine = z
-  .object({
-    id: ulid,
-    name: z
-      .string()
-      .min(1)
-      .max(256)
-      .describe('Display name of the resource. Between 1 and 256 characters.'),
-    description: z
-      .string()
-      .max(1024)
-      .optional()
-
-      .describe(
-        'Optional description of the resource. Maximum 1024 characters.',
-      ),
-    labels: labels.optional(),
-    createdAt: dateTime,
-    updatedAt: dateTime,
-    deletedAt: dateTime.optional(),
-    servicePeriod: closedPeriod,
-    totals: totals,
-    category: invoiceDetailedLineCostCategory.default('regular'),
-    discounts: invoiceLineDiscounts.optional(),
-    creditsApplied: z
-      .array(invoiceLineCreditsApplied)
-      .optional()
-      .describe('Credit applied to this detailed line.'),
-    externalReferences: invoiceLineExternalReferences.optional(),
-    quantity: numeric,
-    unitPrice: numeric,
-  })
-
-  .describe(
-    'A detailed (child) sub-line belonging to a parent invoice line. Detailed lines represent the individual flat-fee components that make up a usage-based parent line after quantity snapshotting.',
-  )
 
 export const updateInvoiceWorkflowSettings = z
   .object({
@@ -6139,6 +8189,445 @@ export const entitlementAccessQueryResult = z
     updatedAt: dateTime,
   })
   .describe('Access evaluation result for a single resolved customer.')
+
+export const notificationRule = z
+  .discriminatedUnion('type', [
+    notificationRuleBalanceThreshold,
+    notificationRuleEntitlementReset,
+    notificationRuleInvoiceCreated,
+    notificationRuleInvoiceUpdated,
+  ])
+
+  .describe(
+    'A notification rule selects the type of event to generate, the conditions specific to that type, and the channels to deliver the events to.',
+  )
+
+export const notificationRuleRequest = z
+  .discriminatedUnion('type', [
+    notificationRuleBalanceThresholdRequest,
+    notificationRuleEntitlementResetRequest,
+    notificationRuleInvoiceCreatedRequest,
+    notificationRuleInvoiceUpdatedRequest,
+  ])
+
+  .describe(
+    "Request body for creating or updating a notification rule. Updates replace the rule's mutable state: omitting `disabled`, `labels`, or `features` resets them to their defaults. The `type` must match the existing rule on update.",
+  )
+
+export const notificationEventV1EntitlementMetered = z
+  .object({
+    type: z.literal('metered').describe('type.'),
+    isSoftLimit: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'If softLimit=true the subject can use the feature even if the entitlement is exhausted, hasAccess will always be true.',
+      ),
+    isUnlimited: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Deprecated, ignored by the backend. Please use isSoftLimit instead; this field will be removed in the future.',
+      ),
+    issueAfterReset: z
+      .number()
+      .nonnegative()
+      .optional()
+
+      .describe(
+        'You can grant usage automatically alongside the entitlement, the example scenario would be creating a starting balance. If an amount is specified here, a grant will be created alongside the entitlement with the specified amount. That grant will have it\'s rollover settings configured in a way that after each reset operation, the balance will return the original amount specified here. Manually creating such a grant would mean having the "amount", "minRolloverAmount", and "maxRolloverAmount" fields all be the same.',
+      ),
+    issueAfterResetPriority: z
+      .number()
+      .int()
+      .gte(1)
+      .lte(255)
+      .optional()
+      .describe('Defines the grant priority for the default grant.'),
+    preserveOverageAtReset: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'If true, the overage is preserved at reset. If false, the usage is reset to 0.',
+      ),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    metadata: notificationEventV1Metadata.optional(),
+    activeFrom: z.date().describe('The cadence start of the resource.'),
+    activeTo: z.date().optional().describe('The cadence end of the resource.'),
+    annotations: notificationEventV1Annotations.optional(),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('Readonly unique ULID identifier.'),
+    subjectKey: z
+      .string()
+
+      .describe(
+        'The identifier key unique to the subject. NOTE: Subjects are being deprecated, please use the new customer APIs.',
+      ),
+    featureKey: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .describe('The feature the subject is entitled to use.'),
+    featureId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The feature the subject is entitled to use.'),
+    lastReset: z.date().describe('The time the last reset happened.'),
+    currentUsagePeriod: notificationEventV1Period,
+    measureUsageFrom: z
+      .date()
+
+      .describe(
+        'The time from which usage is measured. If not specified on creation, defaults to entitlement creation time.',
+      ),
+    usagePeriod: notificationEventV1RecurringPeriod,
+  })
+
+  .describe(
+    'Metered entitlements are useful for many different use cases, from setting up usage based access to implementing complex credit systems. Access is determined based on feature usage using a balance calculation (the "usage allowance" provided by the issued grants is "burnt down" by the usage).',
+  )
+
+export const notificationEventV1BillingWorkflowCollectionAlignmentAnchored = z
+  .object({
+    type: z.literal('anchored').describe('The type of alignment.'),
+    recurringPeriod: notificationEventV1RecurringPeriodV2,
+  })
+
+  .describe(
+    'BillingWorkflowCollectionAlignmentAnchored specifies the alignment for collecting the pending line items into an invoice.',
+  )
+
+export const notificationEventV1FeatureUnitCost = z
+  .discriminatedUnion('type', [
+    notificationEventV1FeatureManualUnitCost,
+    notificationEventV1FeatureLlmUnitCost,
+  ])
+
+  .describe(
+    'Per-unit cost configuration for a feature. Either a fixed manual amount or a dynamic LLM cost lookup.',
+  )
+
+export const notificationEventV1TieredPriceWithCommitments = z
+  .object({
+    type: z
+      .literal('tiered')
+      .describe('The type of the price. One of: flat, unit, or tiered.'),
+    mode: notificationEventV1TieredPriceMode,
+    tiers: z
+      .array(notificationEventV1PriceTier)
+      .min(1)
+
+      .describe(
+        'The tiers of the tiered price. At least one price component is required in each tier.',
+      ),
+    minimumAmount: notificationEventV1Numeric.optional(),
+    maximumAmount: notificationEventV1Numeric.optional(),
+  })
+  .describe('Tiered price with spend commitments.')
+
+export const notificationEventV1Customer = z
+  .object({
+    id: z.string().describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    key: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+
+      .describe(
+        'An optional unique key of the customer. Either key or usageAttribution.subjectKeys must be provided. Useful to reference the customer in external systems. For example, your database ID.',
+      ),
+    usageAttribution: notificationEventV1CustomerUsageAttribution.optional(),
+    primaryEmail: z
+      .string()
+      .optional()
+      .describe('The primary email address of the customer.'),
+    currency: notificationEventV1CurrencyCode.optional(),
+    billingAddress: notificationEventV1Address.optional(),
+    currentSubscriptionId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+      .describe('The ID of the Subscription if the customer has one.'),
+    subscriptions: z
+      .array(notificationEventV1Subscription)
+      .optional()
+
+      .describe(
+        'The subscriptions of the customer. Only with the `subscriptions` expand option.',
+      ),
+    annotations: notificationEventV1Annotations.optional(),
+  })
+  .describe('A customer object.')
+
+export const notificationEventV1StripeApp = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    listing: notificationEventV1MarketplaceListing,
+    status: notificationEventV1AppStatus,
+    type: z.literal('stripe').describe("The app's type is Stripe."),
+    stripeAccountId: z.string().describe('The Stripe account ID.'),
+    livemode: z
+      .boolean()
+      .describe('Livemode, true if the app is in production mode.'),
+    maskedApiKey: z
+      .string()
+
+      .describe(
+        'The masked API key. Only shows the first 8 and last 3 characters.',
+      ),
+  })
+  .describe('A installed Stripe app object.')
+
+export const notificationEventV1SandboxApp = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    listing: notificationEventV1MarketplaceListing,
+    status: notificationEventV1AppStatus,
+    type: z.literal('sandbox').describe("The app's type is Sandbox."),
+  })
+
+  .describe(
+    'Sandbox app can be used for testing OpenMeter features. The app is not creating anything in external systems, thus it is safe to use for verifying OpenMeter features.',
+  )
+
+export const notificationEventV1CustomInvoicingApp = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    listing: notificationEventV1MarketplaceListing,
+    status: notificationEventV1AppStatus,
+    type: z
+      .literal('custom_invoicing')
+      .describe("The app's type is CustomInvoicing."),
+    enableDraftSyncHook: z
+      .boolean()
+
+      .describe(
+        'Enable draft.sync hook. If the hook is not enabled, the invoice will be progressed to the next state automatically.',
+      ),
+    enableIssuingSyncHook: z
+      .boolean()
+
+      .describe(
+        'Enable issuing.sync hook. If the hook is not enabled, the invoice will be progressed to the next state automatically.',
+      ),
+  })
+
+  .describe(
+    'Custom Invoicing app can be used for interface with any invoicing or payment system. This app provides ways to manipulate invoices and payments, however the integration must rely on Notifications API to get notified about invoice changes.',
+  )
+
+export const notificationEventV1InvoiceLineAmountDiscount = z
+  .object({
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the charge or discount.'),
+    reason: notificationEventV1BillingDiscountReason,
+    description: z
+      .string()
+      .optional()
+      .describe('Text description as to why the discount was applied.'),
+    externalIds: notificationEventV1InvoiceLineAppExternalIds.optional(),
+    amount: notificationEventV1Numeric,
+  })
+
+  .describe(
+    'InvoiceLineAmountDiscount represents an amount deducted from the line, and will be applied before taxes.',
+  )
+
+export const notificationEventV1InvoiceLineUsageDiscount = z
+  .object({
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the charge or discount.'),
+    reason: notificationEventV1BillingDiscountReason,
+    description: z
+      .string()
+      .optional()
+      .describe('Text description as to why the discount was applied.'),
+    externalIds: notificationEventV1InvoiceLineAppExternalIds.optional(),
+    quantity: notificationEventV1Numeric,
+    preLinePeriodQuantity: notificationEventV1Numeric.optional(),
+  })
+
+  .describe(
+    'InvoiceLineUsageDiscount represents an usage-based discount applied to the line. The deduction is done before the pricing algorithm is applied.',
+  )
+
+export const notificationEventV1InvoiceDetailedLineRateCard = z
+  .object({
+    taxConfig: notificationEventV1TaxConfig.optional(),
+    price: notificationEventV1FlatPriceWithPaymentTerm
+      .nullable()
+
+      .describe(
+        'The price of the rate card. When null, the feature or service is free.',
+      ),
+    quantity: notificationEventV1Numeric.optional(),
+    discounts: notificationEventV1BillingDiscounts.optional(),
+  })
+
+  .describe(
+    'InvoiceDetailedLineRateCard represents the rate card (intent) for a flat fee line.',
+  )
+
+export const notificationEventV1PaymentTerms = z
+  .discriminatedUnion('type', [
+    notificationEventV1PaymentTermInstant,
+    notificationEventV1PaymentTermDueDate,
+  ])
+  .describe('PaymentTerms defines the terms for payment.')
 
 export const price = z
   .discriminatedUnion('type', [
@@ -6291,6 +8780,7 @@ export const creditGrant = z
     deletedAt: dateTime.optional(),
     fundingMethod: creditFundingMethod,
     currency: billingCurrencyCode,
+    customCurrency: currencyCustomReference.optional(),
     amount: numeric,
     purchase: creditGrantPurchase.optional(),
     taxConfig: taxCodeConfig.optional(),
@@ -6489,6 +8979,127 @@ export const entitlementAccessQueryResponse = z
   })
   .describe('Response of the entitlement access query.')
 
+export const notificationRulePagePaginatedResponse = z
+  .object({
+    data: z.array(notificationRule),
+    meta: paginatedMeta,
+  })
+  .describe('Page paginated response.')
+
+export const notificationEventV1BillingWorkflowCollectionAlignment = z
+  .discriminatedUnion('type', [
+    notificationEventV1BillingWorkflowCollectionAlignmentSubscription,
+    notificationEventV1BillingWorkflowCollectionAlignmentAnchored,
+  ])
+
+  .describe(
+    'The alignment for collecting the pending line items into an invoice. Defaults to subscription, which means that we are to create a new invoice every time the a subscription period starts (for in advance items) or ends (for in arrears items).',
+  )
+
+export const notificationEventV1Feature = z
+  .object({
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    archivedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was archived.'),
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+
+      .describe(
+        'A key is a unique string that is used to identify a resource.',
+      ),
+    name: z.string().describe('The human-readable name of the feature.'),
+    metadata: notificationEventV1Metadata.optional(),
+    meterSlug: z
+      .string()
+      .min(1)
+      .optional()
+
+      .describe(
+        'A key is a unique string that is used to identify a resource.',
+      ),
+    meterGroupByFilters: z
+      .record(z.string(), z.string())
+      .optional()
+
+      .describe(
+        'Optional meter group by filters. Useful if the meter scope is broader than what feature tracks. Example scenario would be a meter tracking all token use with groupBy fields for the model, then the feature could filter for model=gpt-4. ⚠️ **Deprecated**: Use advancedMeterGroupByFilters instead',
+      ),
+    advancedMeterGroupByFilters: z
+      .record(z.string(), notificationEventV1FilterString)
+      .optional()
+
+      .describe(
+        'Optional advanced meter group by filters. You can use this to filter for values of the meter groupBy fields.',
+      ),
+    unitCost: notificationEventV1FeatureUnitCost.optional(),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('Readonly unique ULID identifier.'),
+  })
+
+  .describe(
+    'Represents a feature that can be enabled or disabled for a plan. Used both for product catalog and entitlements.',
+  )
+
+export const notificationEventV1RateCardUsageBasedPrice = z
+  .discriminatedUnion('type', [
+    notificationEventV1FlatPriceWithPaymentTerm,
+    notificationEventV1UnitPriceWithCommitments,
+    notificationEventV1TieredPriceWithCommitments,
+    notificationEventV1DynamicPriceWithCommitments,
+    notificationEventV1PackagePriceWithCommitments,
+  ])
+  .describe('The price of the usage based rate card.')
+
+export const notificationEventV1App = z
+  .discriminatedUnion('type', [
+    notificationEventV1StripeApp,
+    notificationEventV1SandboxApp,
+    notificationEventV1CustomInvoicingApp,
+  ])
+  .describe('App. One of: stripe')
+
+export const notificationEventV1InvoiceLineDiscounts = z
+  .object({
+    amount: z
+      .array(notificationEventV1InvoiceLineAmountDiscount)
+      .optional()
+
+      .describe(
+        'Amount based discounts applied to the line. Amount based discounts are deduced from the total price of the line.',
+      ),
+    usage: z
+      .array(notificationEventV1InvoiceLineUsageDiscount)
+      .optional()
+
+      .describe(
+        'Usage based discounts applied to the line. Usage based discounts are deduced from the usage of the line before price calculations are applied.',
+      ),
+  })
+
+  .describe(
+    'InvoiceLineDiscounts represents the discounts applied to the invoice line by type.',
+  )
+
+export const notificationEventV1InvoicePaymentTerms = z
+  .object({
+    terms: notificationEventV1PaymentTerms.optional(),
+  })
+  .describe('Payment contains details as to how the invoice should be paid.')
+
 export const rateCard = z
   .object({
     name: z
@@ -6654,6 +9265,182 @@ export const profileApps = z
     payment: app,
   })
   .describe('Applications used by a billing profile.')
+
+export const notificationEventV1BillingWorkflowCollectionSettings = z
+  .object({
+    alignment: notificationEventV1BillingWorkflowCollectionAlignment.optional(),
+    interval: z
+      .string()
+      .optional()
+
+      .describe(
+        'This grace period can be used to delay the collection of the pending line items specified in alignment. This is useful, in case of multiple subscriptions having slightly different billing periods.',
+      ),
+  })
+
+  .describe(
+    'Workflow collection specifies how to collect the pending line items for an invoice',
+  )
+
+export const entitlementBalanceThresholdTriggeredV1Payload = z
+  .object({
+    entitlement: notificationEventV1EntitlementMetered,
+    feature: notificationEventV1Feature,
+    subject: notificationEventV1Subject,
+    value: notificationEventV1EntitlementValue,
+    customer: notificationEventV1Customer.optional(),
+    threshold: notificationEventV1RuleBalanceThresholdValue,
+  })
+
+  .describe(
+    'Payload of `v1.entitlement.balance_threshold.triggered`, the legacy `entitlements.balance.threshold` Event type.',
+  )
+
+export const entitlementUsagePeriodResetV1Payload = z
+  .object({
+    entitlement: notificationEventV1EntitlementMetered,
+    feature: notificationEventV1Feature,
+    subject: notificationEventV1Subject,
+    value: notificationEventV1EntitlementValue,
+    customer: notificationEventV1Customer.optional(),
+  })
+
+  .describe(
+    'Payload of `v1.entitlement.usage_period.reset`, the legacy `entitlements.reset` Event type.',
+  )
+
+export const notificationEventV1BalanceThresholdPayloadData = z
+  .object({
+    entitlement: notificationEventV1EntitlementMetered,
+    feature: notificationEventV1Feature,
+    subject: notificationEventV1Subject,
+    value: notificationEventV1EntitlementValue,
+    customer: notificationEventV1Customer.optional(),
+    threshold: notificationEventV1RuleBalanceThresholdValue,
+  })
+
+  .describe(
+    'Data of the payload for notification event with `entitlements.balance.threshold` type.',
+  )
+
+export const notificationEventV1EntitlementValuePayloadBase = z
+  .object({
+    entitlement: notificationEventV1EntitlementMetered,
+    feature: notificationEventV1Feature,
+    subject: notificationEventV1Subject,
+    value: notificationEventV1EntitlementValue,
+    customer: notificationEventV1Customer.optional(),
+  })
+  .describe('Base data for any payload with entitlement entitlement value.')
+
+export const notificationEventV1InvoiceUsageBasedRateCard = z
+  .object({
+    featureKey: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .optional()
+      .describe('The feature the customer is entitled to use.'),
+    taxConfig: notificationEventV1TaxConfig.optional(),
+    price: notificationEventV1RateCardUsageBasedPrice
+      .nullable()
+
+      .describe(
+        'The price of the rate card. When null, the feature or service is free.',
+      ),
+    discounts: notificationEventV1BillingDiscounts.optional(),
+  })
+
+  .describe(
+    'InvoiceUsageBasedRateCard represents the rate card (intent) for an usage-based line.',
+  )
+
+export const notificationEventV1BillingProfileApps = z
+  .object({
+    tax: notificationEventV1App
+      .nullable()
+      .describe('The tax app used for this workflow'),
+    invoicing: notificationEventV1App
+      .nullable()
+      .describe('The invoicing app used for this workflow'),
+    payment: notificationEventV1App
+      .nullable()
+      .describe('The payment app used for this workflow'),
+  })
+
+  .describe(
+    'BillingProfileApps represents the applications used by a billing profile',
+  )
+
+export const notificationEventV1InvoiceDetailedLine = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the line.'),
+    managedBy: notificationEventV1InvoiceLineManagedBy,
+    status: notificationEventV1InvoiceLineStatus,
+    discounts: notificationEventV1InvoiceLineDiscounts.optional(),
+    creditAllocations: z
+      .array(notificationEventV1InvoiceLineCreditAllocation)
+      .optional()
+
+      .describe(
+        'Credit allocations applied to this line. Credits are deducted from the line total before taxes are applied.',
+      ),
+    invoice: notificationEventV1InvoiceReference.optional(),
+    currency: notificationEventV1CurrencyCode,
+    taxes: z
+      .array(notificationEventV1InvoiceLineTaxItem)
+      .optional()
+      .describe('Taxes applied to the invoice totals.'),
+    taxConfig: notificationEventV1TaxConfig.optional(),
+    totals: notificationEventV1InvoiceTotals,
+    period: notificationEventV1Period,
+    externalIds: notificationEventV1InvoiceLineAppExternalIds.optional(),
+    subscription:
+      notificationEventV1InvoiceLineSubscriptionReference.optional(),
+    invoiceAt: z.date().describe('The time this line item should be invoiced.'),
+    type: z.literal('flat_fee').describe('Type of the line.'),
+    perUnitAmount: notificationEventV1Numeric.optional(),
+    paymentTerm: notificationEventV1PricePaymentTerm.optional(),
+    quantity: notificationEventV1Numeric.optional(),
+    rateCard: notificationEventV1InvoiceDetailedLineRateCard.optional(),
+    category: notificationEventV1InvoiceDetailedLineCostCategory.optional(),
+  })
+
+  .describe(
+    'InvoiceDetailedLine represents a line item that is sold to the customer as a manually added fee.',
+  )
 
 export const subscriptionItem = z
   .object({
@@ -7000,6 +9787,116 @@ export const chargeRealization = z
     "A realization run of a charge. `totals` and `detailed_lines` are only populated with the `realization.totals` and `realization.detailed_lines` expands, respectively, since computing them requires re-deriving the run's rated breakdown. `invoice` is an ID reference unless the `realization.invoice` expand is used, which resolves it to the invoice header of the run's booked line: the invoice entity without its `lines` and without the `customer` snapshot (the charge itself already identifies the customer).",
   )
 
+export const notificationEventV1BillingWorkflow = z
+  .object({
+    collection: notificationEventV1BillingWorkflowCollectionSettings.optional(),
+    invoicing: notificationEventV1BillingWorkflowInvoicingSettings.optional(),
+    payment: notificationEventV1BillingWorkflowPaymentSettings.optional(),
+    tax: notificationEventV1BillingWorkflowTaxSettings.optional(),
+  })
+  .describe('BillingWorkflow represents the settings for a billing workflow.')
+
+export const notificationEventBalanceThresholdPayload = z
+  .object({
+    id: ulid,
+    type: z
+      .literal('entitlements.balance.threshold')
+      .describe('The type of the event.'),
+    timestamp: dateTime,
+    data: entitlementBalanceThresholdTriggeredV1Payload,
+  })
+  .describe('A balance threshold notification event payload.')
+
+export const notificationEventResetPayload = z
+  .object({
+    id: ulid,
+    type: z.literal('entitlements.reset').describe('The type of the event.'),
+    timestamp: dateTime,
+    data: entitlementUsagePeriodResetV1Payload,
+  })
+  .describe('An entitlement reset notification event payload.')
+
+export const notificationEventV1InvoiceLine = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the line.'),
+    managedBy: notificationEventV1InvoiceLineManagedBy,
+    status: notificationEventV1InvoiceLineStatus,
+    discounts: notificationEventV1InvoiceLineDiscounts.optional(),
+    creditAllocations: z
+      .array(notificationEventV1InvoiceLineCreditAllocation)
+      .optional()
+
+      .describe(
+        'Credit allocations applied to this line. Credits are deducted from the line total before taxes are applied.',
+      ),
+    invoice: notificationEventV1InvoiceReference.optional(),
+    currency: notificationEventV1CurrencyCode,
+    taxes: z
+      .array(notificationEventV1InvoiceLineTaxItem)
+      .optional()
+      .describe('Taxes applied to the invoice totals.'),
+    taxConfig: notificationEventV1TaxConfig.optional(),
+    totals: notificationEventV1InvoiceTotals,
+    period: notificationEventV1Period,
+    invoiceAt: z.date().describe('The time this line item should be invoiced.'),
+    externalIds: notificationEventV1InvoiceLineAppExternalIds.optional(),
+    subscription:
+      notificationEventV1InvoiceLineSubscriptionReference.optional(),
+    type: z.literal('usage_based').describe('Type of the line.'),
+    price: notificationEventV1RateCardUsageBasedPrice.optional(),
+    featureKey: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .optional()
+      .describe('The feature that the usage is based on.'),
+    children: z
+      .array(notificationEventV1InvoiceDetailedLine)
+      .optional()
+      .describe('The lines detailing the item or service sold.'),
+    rateCard: notificationEventV1InvoiceUsageBasedRateCard.optional(),
+    quantity: notificationEventV1Numeric.optional(),
+    meteredQuantity: notificationEventV1Numeric.optional(),
+    preLinePeriodQuantity: notificationEventV1Numeric.optional(),
+    meteredPreLinePeriodQuantity: notificationEventV1Numeric.optional(),
+  })
+
+  .describe(
+    'InvoiceUsageBasedLine represents a line item that is sold to the customer based on usage.',
+  )
+
 export const subscriptionPhase = z
   .object({
     id: ulid,
@@ -7288,6 +10185,23 @@ export const profilePagePaginatedResponse = z
   })
   .describe('Page paginated response.')
 
+export const notificationEventV1InvoiceWorkflowSettings = z
+  .object({
+    apps: notificationEventV1BillingProfileApps.optional(),
+    sourceBillingProfileId: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+
+      .describe(
+        'sourceBillingProfileID is the billing profile on which the workflow was based on. The profile is snapshotted on invoice creation, after which it can be altered independently of the profile itself.',
+      ),
+    workflow: notificationEventV1BillingWorkflow,
+  })
+
+  .describe(
+    "InvoiceWorkflowSettings represents the workflow settings used by the invoice. This is a clone of the billing profile's workflow settings at the time of invoice creation with customer overrides considered.",
+  )
+
 export const subscription = z
   .object({
     id: ulid,
@@ -7324,6 +10238,7 @@ export const subscription = z
     billingCadence: iso8601Duration,
     proRatingConfig: subscriptionProRatingConfig.optional(),
     billingAnchor: dateTime,
+    billingStartsAt: dateTime.optional(),
     status: subscriptionStatus,
     settlementMode: settlementMode.optional(),
     currentPeriod: closedPeriod.optional(),
@@ -7338,6 +10253,7 @@ export const subscription = z
 
 export const subscriptionCreate = z.object({
   labels: labels.optional(),
+  billingStartsAt: dateTime.optional(),
   settlementMode: settlementMode.optional(),
   customer: z
     .object({
@@ -7528,6 +10444,309 @@ export const updateInvoiceStandardRequest = z
   })
   .describe('InvoiceStandard update request.')
 
+export const invoiceCreatedV1Payload = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    type: notificationEventV1InvoiceType,
+    supplier: notificationEventV1BillingParty,
+    customer: notificationEventV1BillingInvoiceCustomerExtendedDetails,
+    number: notificationEventV1InvoiceNumber,
+    currency: notificationEventV1CurrencyCode,
+    preceding: z
+      .array(notificationEventV1InvoiceDocumentRef)
+      .optional()
+
+      .describe(
+        'Key information regarding previous invoices and potentially details as to why they were corrected.',
+      ),
+    totals: notificationEventV1InvoiceTotals,
+    status: notificationEventV1InvoiceStatus,
+    statusDetails: notificationEventV1InvoiceStatusDetails,
+    issuedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time the invoice was issued. Depending on the status of the invoice this can mean multiple things: - draft, gathering: The time the invoice will be issued based on the workflow settings. - issued: The time the invoice was issued.',
+      ),
+    draftUntil: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time until the invoice is in draft status. On draft invoice creation it is calculated from the workflow settings. If manual approval is required, the draftUntil time is set.',
+      ),
+    quantitySnapshotedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time when the quantity snapshots on the invoice lines were taken.',
+      ),
+    collectionAt: z
+      .date()
+      .optional()
+      .describe('The time when the invoice will be/has been collected.'),
+    dueAt: z
+      .date()
+      .optional()
+      .describe('Due time of the fulfillment of the invoice (if available).'),
+    period: notificationEventV1Period.optional(),
+    voidedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time the invoice was voided. If the invoice was voided, this field will be set to the time the invoice was voided.',
+      ),
+    sentToCustomerAt: z
+      .date()
+      .optional()
+      .describe('The time the invoice was sent to customer.'),
+    workflow: notificationEventV1InvoiceWorkflowSettings,
+    lines: z
+      .array(notificationEventV1InvoiceLine)
+      .optional()
+
+      .describe(
+        'List of invoice lines representing each of the items sold to the customer.',
+      ),
+    payment: notificationEventV1InvoicePaymentTerms.optional(),
+    validationIssues: z
+      .array(notificationEventV1ValidationIssue)
+      .optional()
+      .describe('Validation issues reported by the invoice workflow.'),
+    externalIds: notificationEventV1InvoiceAppExternalIds.optional(),
+  })
+
+  .describe(
+    'Payload of `v1.billing.invoice.created`, the legacy `invoice.created` Event type: the invoice as it was created.',
+  )
+
+export const invoiceUpdatedV1Payload = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    type: notificationEventV1InvoiceType,
+    supplier: notificationEventV1BillingParty,
+    customer: notificationEventV1BillingInvoiceCustomerExtendedDetails,
+    number: notificationEventV1InvoiceNumber,
+    currency: notificationEventV1CurrencyCode,
+    preceding: z
+      .array(notificationEventV1InvoiceDocumentRef)
+      .optional()
+
+      .describe(
+        'Key information regarding previous invoices and potentially details as to why they were corrected.',
+      ),
+    totals: notificationEventV1InvoiceTotals,
+    status: notificationEventV1InvoiceStatus,
+    statusDetails: notificationEventV1InvoiceStatusDetails,
+    issuedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time the invoice was issued. Depending on the status of the invoice this can mean multiple things: - draft, gathering: The time the invoice will be issued based on the workflow settings. - issued: The time the invoice was issued.',
+      ),
+    draftUntil: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time until the invoice is in draft status. On draft invoice creation it is calculated from the workflow settings. If manual approval is required, the draftUntil time is set.',
+      ),
+    quantitySnapshotedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time when the quantity snapshots on the invoice lines were taken.',
+      ),
+    collectionAt: z
+      .date()
+      .optional()
+      .describe('The time when the invoice will be/has been collected.'),
+    dueAt: z
+      .date()
+      .optional()
+      .describe('Due time of the fulfillment of the invoice (if available).'),
+    period: notificationEventV1Period.optional(),
+    voidedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time the invoice was voided. If the invoice was voided, this field will be set to the time the invoice was voided.',
+      ),
+    sentToCustomerAt: z
+      .date()
+      .optional()
+      .describe('The time the invoice was sent to customer.'),
+    workflow: notificationEventV1InvoiceWorkflowSettings,
+    lines: z
+      .array(notificationEventV1InvoiceLine)
+      .optional()
+
+      .describe(
+        'List of invoice lines representing each of the items sold to the customer.',
+      ),
+    payment: notificationEventV1InvoicePaymentTerms.optional(),
+    validationIssues: z
+      .array(notificationEventV1ValidationIssue)
+      .optional()
+      .describe('Validation issues reported by the invoice workflow.'),
+    externalIds: notificationEventV1InvoiceAppExternalIds.optional(),
+  })
+
+  .describe(
+    'Payload of `v1.billing.invoice.updated`, the legacy `invoice.updated` Event type: the invoice after the update.',
+  )
+
+export const notificationEventV1Invoice = z
+  .object({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1Metadata
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    createdAt: z.date().describe('Timestamp of when the resource was created.'),
+    updatedAt: z
+      .date()
+      .describe('Timestamp of when the resource was last updated.'),
+    deletedAt: z
+      .date()
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    type: notificationEventV1InvoiceType,
+    supplier: notificationEventV1BillingParty,
+    customer: notificationEventV1BillingInvoiceCustomerExtendedDetails,
+    number: notificationEventV1InvoiceNumber,
+    currency: notificationEventV1CurrencyCode,
+    preceding: z
+      .array(notificationEventV1InvoiceDocumentRef)
+      .optional()
+
+      .describe(
+        'Key information regarding previous invoices and potentially details as to why they were corrected.',
+      ),
+    totals: notificationEventV1InvoiceTotals,
+    status: notificationEventV1InvoiceStatus,
+    statusDetails: notificationEventV1InvoiceStatusDetails,
+    issuedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time the invoice was issued. Depending on the status of the invoice this can mean multiple things: - draft, gathering: The time the invoice will be issued based on the workflow settings. - issued: The time the invoice was issued.',
+      ),
+    draftUntil: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time until the invoice is in draft status. On draft invoice creation it is calculated from the workflow settings. If manual approval is required, the draftUntil time is set.',
+      ),
+    quantitySnapshotedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time when the quantity snapshots on the invoice lines were taken.',
+      ),
+    collectionAt: z
+      .date()
+      .optional()
+      .describe('The time when the invoice will be/has been collected.'),
+    dueAt: z
+      .date()
+      .optional()
+      .describe('Due time of the fulfillment of the invoice (if available).'),
+    period: notificationEventV1Period.optional(),
+    voidedAt: z
+      .date()
+      .optional()
+
+      .describe(
+        'The time the invoice was voided. If the invoice was voided, this field will be set to the time the invoice was voided.',
+      ),
+    sentToCustomerAt: z
+      .date()
+      .optional()
+      .describe('The time the invoice was sent to customer.'),
+    workflow: notificationEventV1InvoiceWorkflowSettings,
+    lines: z
+      .array(notificationEventV1InvoiceLine)
+      .optional()
+
+      .describe(
+        'List of invoice lines representing each of the items sold to the customer.',
+      ),
+    payment: notificationEventV1InvoicePaymentTerms.optional(),
+    validationIssues: z
+      .array(notificationEventV1ValidationIssue)
+      .optional()
+      .describe('Validation issues reported by the invoice workflow.'),
+    externalIds: notificationEventV1InvoiceAppExternalIds.optional(),
+  })
+  .describe('Invoice represents an invoice in the system.')
+
 export const subscriptionOrReference = z
   .union([subscription, subscriptionReference])
   .describe('Subscription or reference.')
@@ -7563,6 +10782,24 @@ export const invoice = z
 export const updateInvoiceRequest = z
   .discriminatedUnion('type', [updateInvoiceStandardRequest])
   .describe('UpdateInvoiceRequest update request.')
+
+export const notificationEventInvoiceCreatedPayload = z
+  .object({
+    id: ulid,
+    type: z.literal('invoice.created').describe('The type of the event.'),
+    timestamp: dateTime,
+    data: invoiceCreatedV1Payload,
+  })
+  .describe('An invoice created notification event payload.')
+
+export const notificationEventInvoiceUpdatedPayload = z
+  .object({
+    id: ulid,
+    type: z.literal('invoice.updated').describe('The type of the event.'),
+    timestamp: dateTime,
+    data: invoiceUpdatedV1Payload,
+  })
+  .describe('An invoice updated notification event payload.')
 
 export const chargeFlatFee = z
   .object({
@@ -7681,6 +10918,17 @@ export const chargeUsageBased = z
   })
   .describe('A usage-based charge for a customer.')
 
+export const invoiceCustomerChargesResult = z
+  .object({
+    invoices: z
+      .array(invoice)
+      .describe('Created standard invoices, one per collected currency.'),
+  })
+
+  .describe(
+    "Result of manually collecting a customer's pending lines into invoices.",
+  )
+
 export const invoicePagePaginatedResponse = z
   .object({
     data: z.array(invoice),
@@ -7688,9 +10936,40 @@ export const invoicePagePaginatedResponse = z
   })
   .describe('Page paginated response.')
 
+export const notificationEventPayload = z
+  .discriminatedUnion('type', [
+    notificationEventBalanceThresholdPayload,
+    notificationEventResetPayload,
+    notificationEventInvoiceCreatedPayload,
+    notificationEventInvoiceUpdatedPayload,
+  ])
+
+  .describe(
+    'The payload delivered to the channels, discriminated by the event type.',
+  )
+
 export const charge = z
   .discriminatedUnion('type', [chargeFlatFee, chargeUsageBased])
   .describe('Customer charge.')
+
+export const notificationEvent = z
+  .object({
+    id: ulid,
+    type: notificationEventType,
+    createdAt: dateTime,
+    rule: notificationRuleReference,
+    deliveryStatus: z
+      .array(notificationEventDeliveryStatus)
+
+      .describe(
+        'The delivery status of the event, one entry per channel of the rule.',
+      ),
+    payload: notificationEventPayload,
+  })
+
+  .describe(
+    'A notification event records that a notification rule fired and tracks the delivery of its payload to each channel of the rule. Events are created by the system and cannot be modified.',
+  )
 
 export const chargePagePaginatedResponse = z
   .object({
@@ -7699,8 +10978,15 @@ export const chargePagePaginatedResponse = z
   })
   .describe('Page paginated response.')
 
+export const notificationEventPagePaginatedResponse = z
+  .object({
+    data: z.array(notificationEvent),
+    meta: paginatedMeta,
+  })
+  .describe('Page paginated response.')
+
 export const listMeteringEventsQueryParams = z.object({
-  page: cursorPaginationQueryPage.optional(),
+  page: listEventsPage.optional(),
   filter: listEventsParamsFilter.optional(),
   sort: sortQuery.optional(),
 })
@@ -7728,9 +11014,16 @@ export const listMetersQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -7787,9 +11080,16 @@ export const listCustomersQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -7827,6 +11127,15 @@ export const updateCustomerBillingPathParams = z.object({
 export const updateCustomerBillingBody = upsertCustomerBillingDataRequest
 
 export const updateCustomerBillingResponse = customerData
+
+export const updateCustomerBillingProfilePathParams = z.object({
+  customerId: ulid,
+})
+
+export const updateCustomerBillingProfileBody =
+  upsertCustomerBillingProfileRequest
+
+export const updateCustomerBillingProfileResponse = customerProfile
 
 export const updateCustomerBillingAppDataPathParams = z.object({
   customerId: ulid,
@@ -7941,9 +11250,16 @@ export const listCustomerEntitlementsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -7975,9 +11291,16 @@ export const listEntitlementsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8016,9 +11339,16 @@ export const listCustomerEntitlementGrantsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8058,9 +11388,16 @@ export const listGrantsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8110,12 +11447,20 @@ export const listCreditGrantsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
+  sort: sortQuery.optional(),
   filter: listCreditGrantsParamsFilter.optional(),
 })
 
@@ -8186,9 +11531,16 @@ export const listCustomerChargesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8199,7 +11551,7 @@ export const listCustomerChargesQueryParams = z.object({
     .optional()
 
     .describe(
-      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage` and the `totals.realtime` fields. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
+      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based charges and created usage-based charges whose effective service period contains the current time (inclusive start, exclusive end). Deleted charges are skipped. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
     ),
 })
 
@@ -8216,6 +11568,14 @@ export const createCustomerChargesBody = createChargeRequest
 
 export const createCustomerChargesResponse = charge
 
+export const invoiceCustomerChargesPathParams = z.object({
+  customerId: ulid,
+})
+
+export const invoiceCustomerChargesBody = invoiceCustomerChargesInput
+
+export const invoiceCustomerChargesResponse = invoiceCustomerChargesResult
+
 export const createSubscriptionBody = subscriptionCreate
 
 export const createSubscriptionResponse = subscription
@@ -8226,9 +11586,16 @@ export const listSubscriptionsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8313,9 +11680,16 @@ export const listSubscriptionAddonsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8349,9 +11723,16 @@ export const listAppsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8382,15 +11763,30 @@ export const updateAppBody = updateAppRequest
 
 export const updateAppResponse = app
 
+export const executeAppActionPathParams = z.object({
+  appId: ulid,
+})
+
+export const executeAppActionBody = appActionRequest
+
+export const executeAppActionResponse = app
+
 export const listAppCatalogQueryParams = z.object({
   page: z
     .object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8417,9 +11813,16 @@ export const listBillingProfilesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8460,9 +11863,16 @@ export const listInvoicesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8517,15 +11927,38 @@ export const snapshotQuantitiesInvoicePathParams = z.object({
 
 export const snapshotQuantitiesInvoiceResponse = invoice
 
+export const getChargePathParams = z.object({
+  chargeId: ulid,
+})
+
+export const getChargeQueryParams = z.object({
+  expand: z
+    .array(chargesExpand)
+    .optional()
+
+    .describe(
+      'Expand related entities, realization details, or real-time usage.',
+    ),
+})
+
+export const getChargeResponse = charge
+
 export const listChargesQueryParams = z.object({
   page: z
     .object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8536,7 +11969,7 @@ export const listChargesQueryParams = z.object({
     .optional()
 
     .describe(
-      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage` and the `totals.realtime` fields. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
+      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based charges and created usage-based charges whose effective service period contains the current time (inclusive start, exclusive end). Deleted charges are skipped. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
     ),
 })
 
@@ -8561,9 +11994,16 @@ export const listTaxCodesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8596,9 +12036,16 @@ export const listCurrenciesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8639,9 +12086,16 @@ export const listCostBasesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8666,9 +12120,16 @@ export const listFeaturesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8719,9 +12180,16 @@ export const listLlmCostPricesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8745,9 +12213,16 @@ export const listLlmCostOverridesQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8772,9 +12247,16 @@ export const listPlansQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8827,9 +12309,16 @@ export const listAddonsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8886,9 +12375,16 @@ export const listPlanAddonsQueryParams = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8940,22 +12436,29 @@ export const updateOrganizationDefaultTaxCodesResponse =
   organizationDefaultTaxCodes
 
 export const queryEntitlementAccessQueryParams = z.object({
-  page: cursorPaginationQueryPage.optional(),
+  page: entitlementAccessQueryPage.optional(),
 })
 
 export const queryEntitlementAccessBody = entitlementAccessQueryRequest
 
 export const queryEntitlementAccessResponse = entitlementAccessQueryResponse
 
-export const listNotificationChannelsQueryParams = z.object({
+export const listBillingNotificationChannelsQueryParams = z.object({
   page: z
     .object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -8963,32 +12466,131 @@ export const listNotificationChannelsQueryParams = z.object({
   filter: listNotificationChannelsParamsFilter.optional(),
 })
 
-export const listNotificationChannelsResponse = z.object({
+export const listBillingNotificationChannelsResponse = z.object({
   data: z.array(notificationChannel),
   meta: paginatedMeta,
 })
 
-export const createNotificationChannelBody = createNotificationChannelRequest
+export const createBillingNotificationChannelBody =
+  createNotificationChannelRequest
 
-export const createNotificationChannelResponse = notificationChannel
+export const createBillingNotificationChannelResponse = notificationChannel
 
-export const getNotificationChannelPathParams = z.object({
+export const getBillingNotificationChannelPathParams = z.object({
   notificationChannelId: ulid,
 })
 
-export const getNotificationChannelResponse = notificationChannel
+export const getBillingNotificationChannelResponse = notificationChannel
 
-export const updateNotificationChannelPathParams = z.object({
+export const updateBillingNotificationChannelPathParams = z.object({
   notificationChannelId: ulid,
 })
 
-export const updateNotificationChannelBody = updateNotificationChannelRequest
+export const updateBillingNotificationChannelBody =
+  updateBillingNotificationChannelRequest
 
-export const updateNotificationChannelResponse = notificationChannel
+export const updateBillingNotificationChannelResponse = notificationChannel
 
-export const deleteNotificationChannelPathParams = z.object({
+export const deleteBillingNotificationChannelPathParams = z.object({
   notificationChannelId: ulid,
 })
+
+export const listBillingNotificationRulesQueryParams = z.object({
+  page: z
+    .object({
+      size: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .lte(1000)
+        .optional()
+        .describe('The number of items to include per page.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
+    })
+    .optional()
+    .describe('Determines which page of the collection to retrieve.'),
+  sort: sortQuery.optional(),
+  filter: listNotificationRulesParamsFilter.optional(),
+})
+
+export const listBillingNotificationRulesResponse = z.object({
+  data: z.array(notificationRule),
+  meta: paginatedMeta,
+})
+
+export const createBillingNotificationRuleBody = notificationRuleRequest
+
+export const createBillingNotificationRuleResponse = notificationRule
+
+export const getBillingNotificationRulePathParams = z.object({
+  notificationRuleId: ulid,
+})
+
+export const getBillingNotificationRuleResponse = notificationRule
+
+export const updateBillingNotificationRulePathParams = z.object({
+  notificationRuleId: ulid,
+})
+
+export const updateBillingNotificationRuleBody = notificationRuleRequest
+
+export const updateBillingNotificationRuleResponse = notificationRule
+
+export const deleteBillingNotificationRulePathParams = z.object({
+  notificationRuleId: ulid,
+})
+
+export const testBillingNotificationRulePathParams = z.object({
+  notificationRuleId: ulid,
+})
+
+export const testBillingNotificationRuleResponse = notificationEvent
+
+export const listBillingNotificationEventsQueryParams = z.object({
+  page: z
+    .object({
+      size: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .lte(1000)
+        .optional()
+        .describe('The number of items to include per page.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
+    })
+    .optional()
+    .describe('Determines which page of the collection to retrieve.'),
+  sort: sortQuery.optional(),
+  filter: listNotificationEventsParamsFilter.optional(),
+})
+
+export const listBillingNotificationEventsResponse = z.object({
+  data: z.array(notificationEvent),
+  meta: paginatedMeta,
+})
+
+export const getBillingNotificationEventPathParams = z.object({
+  notificationEventId: ulid,
+})
+
+export const getBillingNotificationEventResponse = notificationEvent
+
+export const resendBillingNotificationEventPathParams = z.object({
+  notificationEventId: ulid,
+})
+
+export const resendBillingNotificationEventBody =
+  resendBillingNotificationEventRequest
 
 export const labelsWire = z
   .record(z.string(), z.string())
@@ -9021,11 +12623,13 @@ export const numericWire = z
   .regex(new RegExp('^\\-?[0-9]+(\\.[0-9]+)?$'))
   .describe('Numeric represents an arbitrary precision number.')
 
-export const cursorPaginationQueryPageWire = z
+export const listEventsPageWire = z
   .strictObject({
     size: z
       .number()
       .int()
+      .gte(1)
+      .lte(100)
       .optional()
       .describe('The number of items to include per page.'),
     after: z
@@ -9043,7 +12647,10 @@ export const cursorPaginationQueryPageWire = z
         'Request the previous page of data, starting with the item before this parameter.',
       ),
   })
-  .describe('Determines which page of the collection to retrieve.')
+
+  .describe(
+    'Determines which page of the metering event list to retrieve. A page holds at most 100 events.',
+  )
 
 export const stringFieldFilterWire = z
   .union([
@@ -9584,7 +13191,7 @@ export const createVersionFilterWire = z
       .lte(2147483647)
       .optional()
       .describe('Match this exact version.'),
-    in: z
+    oeq: z
       .array(z.number().int().gte(-2147483648).lte(2147483647))
       .min(1)
       .max(100)
@@ -9626,7 +13233,7 @@ export const versionFilterWire = z
       .lte(2147483647)
       .optional()
       .describe('Match this exact version.'),
-    in: z
+    oeq: z
       .array(z.number().int().gte(-2147483648).lte(2147483647))
       .min(1)
       .max(100)
@@ -9670,11 +13277,37 @@ export const creditGrantVoidPaymentAdjustmentWire = z
     'Describes how voiding a credit grant adjusts related payment state. - `none`: Voiding does not adjust invoices, payment authorization, settlement, payment intents, or external collection state.',
   )
 
+export const cursorPaginationQueryPageWire = z
+  .strictObject({
+    size: z
+      .number()
+      .int()
+      .gte(1)
+      .lte(1000)
+      .optional()
+      .describe('The number of items to include per page.'),
+    after: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the next page of data, starting with the item after this parameter.',
+      ),
+    before: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the previous page of data, starting with the item before this parameter.',
+      ),
+  })
+  .describe('Determines which page of the collection to retrieve.')
+
 export const creditTransactionTypeWire = z
-  .enum(['funded', 'consumed', 'expired', 'voided'])
+  .enum(['funded', 'consumed', 'correction', 'expired', 'voided'])
 
   .describe(
-    'The type of the credit transaction. - `funded`: Credit granted and available for consumption. - `consumed`: Credit consumed by usage or fees. - `expired`: Credit removed because it expired before being used. - `voided`: Credit removed because the grant was voided before being used.',
+    'The type of the credit transaction. - `funded`: Credit granted and available for consumption. - `consumed`: Credit consumed by usage or fees. - `correction`: A balance adjustment reversing previously recorded usage. - `expired`: Credit removed because it expired before being used. - `voided`: Credit removed because the grant was voided before being used.',
   )
 
 export const chargesExpandWire = z
@@ -9689,7 +13322,7 @@ export const chargesExpandWire = z
   ])
 
   .describe(
-    "Expands for customer charges. Values: - `real_time_usage`: The charge's real-time usage; it sets the `usage` and the `totals.realtime` fields, and fills the `outstanding` realization's `usage` with the not-yet-booked remainder of the live read. - `customer`: The complete customer entity of the charge. - `feature`: The complete feature entity of the charge. - `subscription`: The complete subscription of the charge, when present. - `realization.invoice`: The invoice header of each realization (the invoice entity without its `lines` and `customer` snapshot), in place of the ID reference. - `realization.totals`: The `totals` of each realization run, including credit allocations. - `realization.detailed_lines`: The `detailed_lines` of each realization run.",
+    "Expands for customer charges. Values: - `real_time_usage`: Sets `usage` and `totals.realtime` for active usage-based charges and created usage-based charges whose effective service period contains the current time (inclusive start, exclusive end). Deleted charges are skipped. When present, the `outstanding` realization's `usage` shows the unbooked remainder of the live read. - `customer`: The complete customer entity of the charge. - `feature`: The complete feature entity of the charge. - `subscription`: The complete subscription of the charge, when present. - `realization.invoice`: The invoice header of each realization (the invoice entity without its `lines` and `customer` snapshot), in place of the ID reference. - `realization.totals`: The `totals` of each realization run, including credit allocations. - `realization.detailed_lines`: The `detailed_lines` of each realization run.",
   )
 
 export const lifecycleControllerWire = z
@@ -9968,6 +13601,26 @@ export const featureLlmTokenTypeWire = z
   ])
   .describe('Token type for LLM cost lookup.')
 
+export const invoiceDiscountReasonWire = z
+  .enum(['maximum_spend', 'ratecard_percentage', 'ratecard_usage'])
+  .describe('The reason a discount was applied to an invoice line.')
+
+export const invoiceLineExternalReferencesWire = z
+  .strictObject({
+    invoicing_id: z
+      .string()
+      .optional()
+      .describe('The ID assigned by the external invoicing app.'),
+  })
+
+  .describe(
+    'External identifiers for an invoice line item assigned by third-party systems.',
+  )
+
+export const invoiceDetailedLineCostCategoryWire = z
+  .enum(['regular', 'commitment'])
+  .describe('Cost category of a detailed invoice line item.')
+
 export const subscriptionCreateTimingEnumWire = z
   .enum(['immediate'])
 
@@ -10037,11 +13690,26 @@ export const appStatusWire = z
   .enum(['ready', 'unauthorized'])
   .describe('Connection status of an installed app.')
 
+export const appActionTypeWire = z
+  .enum(['reconcile_webhook_events'])
+  .describe('App action type.')
+
 export const updateLabelsWire = z
   .record(z.string(), z.string())
 
   .describe(
     'Labels store metadata of an entity that can be used for filtering an entity list or for searching across entity types. Keys must be of length 1-63 characters, and cannot start with "kong", "konnect", "mesh", "kic", or "\\_".',
+  )
+
+export const appReconcileWebhookEventsActionRequestWire = z
+  .strictObject({
+    action_type: z
+      .literal('reconcile_webhook_events')
+      .describe('The action to execute.'),
+  })
+
+  .describe(
+    "Request to reconcile the app's webhook events with the latest supported event set.",
   )
 
 export const installAppStripeWithApiKeyWire = z
@@ -10079,10 +13747,10 @@ export const installAppExternalInvoicingWire = z
       .boolean()
 
       .describe(
-        'If true, a billing profile will be created for the app. The Stripe app will be also set as the default billing profile if the current default is a Sandbox app.',
+        'If true, creates the Auto Collection preset with an OpenMeter supplier in the US (postal code 94114), without replacing the default profile.',
       ),
   })
-  .describe('Base model for installing an app from the catalog.')
+  .describe('Model for installing an External Invoicing app from the catalog.')
 
 export const workflowCollectionAlignmentSubscriptionWire = z
   .strictObject({
@@ -10097,25 +13765,9 @@ export const workflowInvoicingSubscriptionEndProrationModeWire = z
   .enum(['bill_full_period', 'bill_actual_period'])
   .describe('Billing workflow subscription end proration mode.')
 
-export const invoiceDiscountReasonWire = z
-  .enum(['maximum_spend', 'ratecard_percentage', 'ratecard_usage'])
-  .describe('The reason a discount was applied to an invoice line.')
-
-export const invoiceLineExternalReferencesWire = z
-  .strictObject({
-    invoicing_id: z
-      .string()
-      .optional()
-      .describe('The ID assigned by the external invoicing app.'),
-  })
-
-  .describe(
-    'External identifiers for an invoice line item assigned by third-party systems.',
-  )
-
-export const invoiceDetailedLineCostCategoryWire = z
-  .enum(['regular', 'commitment'])
-  .describe('Cost category of a detailed invoice line item.')
+export const workflowInvoicingEmptyInvoiceModeWire = z
+  .enum(['create', 'omit'])
+  .describe('Billing workflow empty invoice mode.')
 
 export const updateBillingInvoiceWorkflowInvoicingSettingsWire = z
   .strictObject({
@@ -10248,6 +13900,35 @@ export const addonStatusWire = z
     'The status of the add-on defined by the `effective_from` and `effective_to` properties. - `draft`: The add-on has not yet been published and can be edited. - `active`: The add-on is published and available for use. - `archived`: The add-on is no longer available for use.',
   )
 
+export const entitlementAccessQueryPageWire = z
+  .strictObject({
+    size: z
+      .number()
+      .int()
+      .gte(1)
+      .lte(100)
+      .optional()
+      .describe('The number of items to include per page.'),
+    after: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the next page of data, starting with the item after this parameter.',
+      ),
+    before: z
+      .string()
+      .optional()
+
+      .describe(
+        'Request the previous page of data, starting with the item before this parameter.',
+      ),
+  })
+
+  .describe(
+    'Determines which page of the entitlement access query to retrieve. A page holds at most 100 customers.',
+  )
+
 export const entitlementAccessQueryRequestCustomersWire = z
   .strictObject({
     keys: z
@@ -10304,6 +13985,662 @@ export const notificationChannelTypeWire = z
 
   .describe(
     'The type of a notification channel. Currently the only supported channel type is `webhook`; the domain model anticipates additional channel types (e.g. email, Slack) in the future, so this is modeled as an enum rather than a boolean/constant even though it has a single member today.',
+  )
+
+export const notificationBalanceThresholdTypeWire = z
+  .enum(['balance_value', 'usage_percentage', 'usage_value'])
+  .describe('What a balance threshold is measured against.')
+
+export const notificationEventTypeWire = z
+  .enum([
+    'entitlements.balance.threshold',
+    'entitlements.reset',
+    'invoice.created',
+    'invoice.updated',
+  ])
+
+  .describe(
+    'The type of a notification event. It determines which payload variant the event carries.',
+  )
+
+export const notificationEventDeliveryStateWire = z
+  .enum(['success', 'failed', 'sending', 'pending', 'resending'])
+  .describe('The delivery state of a notification event for a single channel.')
+
+export const notificationEventDeliveryAttemptResponseWire = z
+  .strictObject({
+    status_code: z
+      .number()
+      .int()
+      .gte(-2147483648)
+      .lte(2147483647)
+      .optional()
+
+      .describe(
+        'The HTTP status code returned by the recipient. Absent when no response was received.',
+      ),
+    body: z
+      .string()
+
+      .describe(
+        'The response body returned by the recipient. Empty when no body was received.',
+      ),
+    duration_ms: z.coerce
+      .bigint()
+      .gte(-9223372036854775808n)
+      .lte(9223372036854775807n)
+      .describe('How long the delivery attempt took, in milliseconds.'),
+    url: z
+      .string()
+      .optional()
+
+      .describe(
+        'The URL the event was delivered to. Only set for webhook channels.',
+      ),
+  })
+
+  .describe(
+    'The response the recipient returned for a delivery attempt. For webhook channels this is the HTTP response.',
+  )
+
+export const notificationEventV1MetadataWire = z
+  .record(z.string(), z.string())
+
+  .describe(
+    'Set of key-value pairs. Metadata can be used to store additional information about a resource.',
+  )
+
+export const notificationEventV1AnnotationsWire = z
+  .record(z.string(), z.unknown())
+
+  .describe(
+    'Set of key-value pairs managed by the system. Cannot be modified by user.',
+  )
+
+export const notificationEventV1PeriodWire = z
+  .strictObject({
+    from: z.string().datetime({ offset: true }).describe('Period start time.'),
+    to: z.string().datetime({ offset: true }).describe('Period end time.'),
+  })
+  .describe('A period with a start and end time.')
+
+export const notificationEventV1RecurringPeriodIntervalEnumWire = z
+  .enum(['DAY', 'WEEK', 'MONTH', 'YEAR'])
+
+  .describe(
+    'The unit of time for the interval. One of: `day`, `week`, `month`, or `year`.',
+  )
+
+export const notificationEventV1FilterStringWire = z
+  .strictObject({
+    $eq: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be equal to the provided value.'),
+    $ne: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must not be equal to the provided value.'),
+    $in: z
+      .array(z.string())
+      .nullable()
+      .optional()
+      .describe('The field must be in the provided list of values.'),
+    $nin: z
+      .array(z.string())
+      .nullable()
+      .optional()
+      .describe('The field must not be in the provided list of values.'),
+    $like: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must match the provided value.'),
+    $nlike: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must not match the provided value.'),
+    $ilike: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must match the provided value, ignoring case.'),
+    $nilike: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must not match the provided value, ignoring case.'),
+    $gt: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be greater than the provided value.'),
+    $gte: z
+      .string()
+      .nullable()
+      .optional()
+
+      .describe(
+        'The field must be greater than or equal to the provided value.',
+      ),
+    $lt: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be less than the provided value.'),
+    $lte: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The field must be less than or equal to the provided value.'),
+    get $and() {
+      return z
+        .array(notificationEventV1FilterStringWire)
+        .nullable()
+        .optional()
+
+        .describe(
+          'Provide a list of filters to be combined with a logical AND.',
+        )
+    },
+    get $or() {
+      return z
+        .array(notificationEventV1FilterStringWire)
+        .nullable()
+        .optional()
+
+        .describe('Provide a list of filters to be combined with a logical OR.')
+    },
+  })
+  .describe('A filter for a string field.')
+
+export const notificationEventV1NumericWire = z
+  .string()
+  .regex(new RegExp('^\\-?[0-9]+(\\.[0-9]+)?$'))
+  .describe('Numeric represents an arbitrary precision number.')
+
+export const notificationEventV1SubjectWire = z
+  .strictObject({
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z.string().describe('A unique identifier for the subject.'),
+    key: z
+      .string()
+
+      .describe(
+        'A unique, human-readable identifier for the subject. This is typically a database ID or a customer key.',
+      ),
+    display_name: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('A human-readable display name for the subject.'),
+    metadata: z
+      .record(z.string(), z.unknown())
+      .nullable()
+      .optional()
+      .describe('Metadata for the subject.'),
+    current_period_start: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The start of the current period for the subject.'),
+    current_period_end: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The end of the current period for the subject.'),
+    stripe_customer_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('The Stripe customer ID for the subject.'),
+  })
+
+  .describe(
+    'A subject is a unique identifier for a usage attribution by its key. Subjects only exist in the concept of metering. Subjects are optional to create and work as an enrichment for the subject key like displayName, metadata, etc. Subjects are useful when you are reporting usage events with your own database ID but want to enrich the subject with a human-readable name or metadata. For most use cases, a subject is equivalent to a customer. ⚠️ **Deprecated**: Subjects as managable entities are being depracated, use customers with subject key usage attribution instead.',
+  )
+
+export const notificationEventV1EntitlementValueWire = z
+  .strictObject({
+    has_access: z
+      .boolean()
+
+      .describe(
+        'Whether the subject has access to the feature. Shared accross all entitlement types.',
+      ),
+    balance: z
+      .number()
+      .optional()
+
+      .describe(
+        "Only available for metered entitlements. Metered entitlements are built around a balance calculation where feature usage is deducted from the issued grants. Balance represents the remaining balance of the entitlement, it's value never turns negative.",
+      ),
+    usage: z
+      .number()
+      .optional()
+
+      .describe(
+        'Only available for metered entitlements. Returns the total feature usage in the current period.',
+      ),
+    overage: z
+      .number()
+      .optional()
+
+      .describe(
+        "Only available for metered entitlements. Overage represents the usage that wasn't covered by grants, e.g. if the subject had a total feature usage of 100 in the period but they were only granted 80, there would be 20 overage.",
+      ),
+    total_available_grant_amount: z
+      .number()
+      .optional()
+
+      .describe(
+        'Only available for metered entitlements. The summed amount of all grant active at query time PLUS the used amount of since inactive grants.',
+      ),
+    config: z
+      .string()
+      .optional()
+
+      .describe(
+        'Only available for static entitlements. The JSON parsable config of the entitlement.',
+      ),
+  })
+
+  .describe(
+    'Entitlements are the core of OpenMeter access management. They define access to features for subjects. Entitlements can be metered, boolean, or static.',
+  )
+
+export const notificationEventV1CustomerUsageAttributionWire = z
+  .strictObject({
+    subject_keys: z
+      .array(z.string())
+      .nullable()
+
+      .describe(
+        'The subjects that are attributed to the customer. Can be empty when no subjects are associated with the customer.',
+      ),
+  })
+
+  .describe(
+    'Mapping to attribute metered usage to the customer. One customer can have zero or more subjects, but one subject can only belong to one customer.',
+  )
+
+export const notificationEventV1CurrencyCodeWire = z
+  .string()
+  .min(3)
+  .max(3)
+  .regex(new RegExp('^[A-Z]{3}$'))
+
+  .describe(
+    'Three-letter [ISO4217](https://www.iso.org/iso-4217-currency-codes.html) currency code. Custom three-letter currency codes are also supported for convenience.',
+  )
+
+export const notificationEventV1CountryCodeWire = z
+  .string()
+  .min(2)
+  .max(2)
+  .regex(new RegExp('^[A-Z]{2}$'))
+
+  .describe(
+    '[ISO 3166-1](https://www.iso.org/iso-3166-country-codes.html) alpha-2 country code. Custom two-letter country codes are also supported for convenience.',
+  )
+
+export const notificationEventV1AlignmentWire = z
+  .strictObject({
+    billables_must_align: z
+      .boolean()
+      .optional()
+
+      .describe(
+        "Whether all Billable items and RateCards must align. Alignment means the Price's BillingCadence must align for both duration and anchor time.",
+      ),
+  })
+  .describe('Alignment configuration for a plan or subscription.')
+
+export const notificationEventV1SubscriptionStatusWire = z
+  .enum(['active', 'inactive', 'canceled', 'scheduled'])
+  .describe('Subscription status.')
+
+export const notificationEventV1PlanReferenceWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The plan ID.'),
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .describe('The plan key.'),
+    version: z.number().int().describe('The plan version.'),
+  })
+  .describe('References an exact plan.')
+
+export const notificationEventV1SubscriptionCostBasisModeWire = z
+  .enum(['dynamic', 'pinned'])
+
+  .describe(
+    'Controls how custom-currency cost bases are selected for the subscription.',
+  )
+
+export const notificationEventV1ProRatingModeWire = z
+  .enum(['prorate_prices'])
+  .describe('Pro-rating mode options for handling billing period changes.')
+
+export const notificationEventV1BillingSettlementModeWire = z
+  .enum(['credit_then_invoice', 'credit_only'])
+
+  .describe(
+    'The settlement mode of a plan. It determines how the billing system generates invoices and credits for the subscriptions using this plan. - credit_then_invoice: credits from the previous billing period are applied first, then the remaining balance is invoiced. This is the default and most common settlement mode. - credit_only: only credits from the previous billing period are generated and applied. No invoices are generated for the subscription.',
+  )
+
+export const notificationEventV1RuleBalanceThresholdValueTypeWire = z
+  .enum([
+    'PERCENT',
+    'NUMBER',
+    'balance_value',
+    'usage_percentage',
+    'usage_value',
+  ])
+
+  .describe(
+    'Type of the rule in the balance threshold specification: - `balance_value`: threshold defined by the remaining balance value based on usage and the total of grants in the current usage period - `usage_percentage`: threshold defined by the usage percentage compared to the total of grants in the current usage period - `usage_value`: threshold defined by the usage value in the current usage period - `NUMBER` (**deprecated**): see `usage_value` - `PERCENT` (**deprecated**): see `usage_percentage`',
+  )
+
+export const notificationEventV1InvoiceTypeWire = z
+  .enum(['standard', 'credit_note'])
+
+  .describe(
+    'InvoiceType represents the type of invoice. The type of invoice determines the purpose of the invoice and how it should be handled.',
+  )
+
+export const notificationEventV1BillingTaxIdentificationCodeWire = z
+  .string()
+  .min(1)
+  .max(32)
+
+  .describe(
+    'TaxIdentificationCode is a normalized tax code shown on the original identity document.',
+  )
+
+export const notificationEventV1InvoiceNumberWire = z
+  .string()
+  .min(1)
+  .max(256)
+
+  .describe(
+    'InvoiceNumber is a unique identifier for the invoice, generated by the invoicing app. The uniqueness depends on a lot of factors: - app setting (unique per app or unique per customer) - multiple app scenarios (multiple apps generating invoices with the same prefix)',
+  )
+
+export const notificationEventV1InvoiceDocumentRefTypeWire = z
+  .enum(['credit_note_original_invoice'])
+
+  .describe(
+    'InvoiceDocumentRefType defines the type of document that is being referenced.',
+  )
+
+export const notificationEventV1InvoiceStatusWire = z
+  .enum([
+    'gathering',
+    'draft',
+    'issuing',
+    'issued',
+    'payment_processing',
+    'overdue',
+    'paid',
+    'uncollectible',
+    'voided',
+  ])
+  .describe('InvoiceStatus describes the status of an invoice.')
+
+export const notificationEventV1InvoiceAvailableActionDetailsWire = z
+  .strictObject({
+    resulting_state: z
+      .string()
+
+      .describe(
+        'The state the invoice will reach if the action is activated and all intermediate steps are successful. For example advancing a draft_created invoice will result in a draft_manual_approval_needed invoice.',
+      ),
+  })
+
+  .describe(
+    'InvoiceAvailableActionInvoiceDetails represents the details of the invoice action for non-gathering invoices.',
+  )
+
+export const notificationEventV1InvoiceAvailableActionInvoiceDetailsWire = z
+  .strictObject({})
+
+  .describe(
+    'InvoiceAvailableActionInvoiceDetails represents the details of the invoice action for gathering invoices.',
+  )
+
+export const notificationEventV1AppTypeWire = z
+  .enum(['stripe', 'sandbox', 'custom_invoicing'])
+  .describe('Type of the app.')
+
+export const notificationEventV1AppCapabilityTypeWire = z
+  .enum([
+    'reportUsage',
+    'reportEvents',
+    'calculateTax',
+    'invoiceCustomers',
+    'collectPayments',
+  ])
+  .describe('App capability type.')
+
+export const notificationEventV1InstallMethodWire = z
+  .enum(['with_oauth2', 'with_api_key', 'no_credentials_required'])
+  .describe('Install method of the application.')
+
+export const notificationEventV1AppStatusWire = z
+  .enum(['ready', 'unauthorized'])
+  .describe('App installed status.')
+
+export const notificationEventV1BillingWorkflowCollectionAlignmentSubscriptionWire =
+  z
+    .strictObject({
+      type: z.literal('subscription').describe('The type of alignment.'),
+    })
+
+    .describe(
+      'BillingWorkflowCollectionAlignmentSubscription specifies the alignment for collecting the pending line items into an invoice.',
+    )
+
+export const notificationEventV1BillingWorkflowInvoicingSubscriptionEndProrationModeWire =
+  z
+    .enum(['bill_full_period', 'bill_actual_period'])
+    .describe('Billing workflow subscription end proration mode.')
+
+export const notificationEventV1TaxBehaviorWire = z
+  .enum(['inclusive', 'exclusive'])
+
+  .describe(
+    'Tax behavior. This enum is used to specify whether tax is included in the price or excluded from the price.',
+  )
+
+export const notificationEventV1StripeTaxConfigWire = z
+  .strictObject({
+    code: z
+      .string()
+      .regex(new RegExp('^txcd_\\d{8}$'))
+      .describe('Product tax code. See: https://docs.stripe.com/tax/tax-codes'),
+  })
+  .describe('The tax config for Stripe.')
+
+export const notificationEventV1CustomInvoicingTaxConfigWire = z
+  .strictObject({
+    code: z
+      .string()
+
+      .describe(
+        'Tax code. The tax code should be interpreted by the custom invoicing provider.',
+      ),
+  })
+  .describe('Custom invoicing tax config.')
+
+export const notificationEventV1CollectionMethodWire = z
+  .enum(['charge_automatically', 'send_invoice'])
+
+  .describe(
+    'CollectionMethod specifies how the invoice should be collected (automatic vs manual)',
+  )
+
+export const notificationEventV1BillingWorkflowTaxSettingsWire = z
+  .strictObject({
+    enabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Enable automatic tax calculation when tax is supported by the app. For example, with Stripe Invoicing when enabled, tax is calculated via Stripe Tax.',
+      ),
+    enforced: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Enforce tax calculation when tax is supported by the app. When enabled, OpenMeter will not allow to create an invoice without tax calculation. Enforcement is different per apps, for example, Stripe app requires customer to have a tax location when starting a paid subscription.',
+      ),
+  })
+
+  .describe(
+    'BillingWorkflowTaxSettings represents the tax settings for a billing workflow',
+  )
+
+export const notificationEventV1InvoiceLineManagedByWire = z
+  .enum(['subscription', 'system', 'manual'])
+  .describe('InvoiceLineManagedBy specifies who manages the line.')
+
+export const notificationEventV1InvoiceLineStatusWire = z
+  .enum(['valid', 'detailed', 'split'])
+  .describe('Line status specifies the status of the line.')
+
+export const notificationEventV1DiscountReasonMaximumSpendWire = z
+  .strictObject({
+    type: z.literal('maximum_spend').describe('type.'),
+  })
+  .describe('The reason for the discount is a maximum spend.')
+
+export const notificationEventV1PercentageWire = z
+  .number()
+  .describe('Numeric representation of a percentage 50% is represented as 50')
+
+export const notificationEventV1InvoiceLineAppExternalIdsWire = z
+  .strictObject({
+    invoicing: z
+      .string()
+      .optional()
+
+      .describe(
+        'The external ID of the invoice in the invoicing app if available.',
+      ),
+    tax: z
+      .string()
+      .optional()
+      .describe('The external ID of the invoice in the tax app if available.'),
+  })
+
+  .describe(
+    'InvoiceLineAppExternalIds contains the external IDs of the invoice in other apps such as Stripe.',
+  )
+
+export const notificationEventV1InvoiceLineTaxBehaviorWire = z
+  .enum(['inclusive', 'exclusive'])
+
+  .describe(
+    'InvoiceLineTaxBehavior details how the tax item is applied to the base amount. Inclusive means the tax is included in the base amount. Exclusive means the tax is added to the base amount.',
+  )
+
+export const notificationEventV1IdResourceWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+  })
+  .describe('IDResource is a resouce with an ID.')
+
+export const notificationEventV1PricePaymentTermWire = z
+  .enum(['in_advance', 'in_arrears'])
+
+  .describe(
+    'The payment term of a flat price. One of: in_advance or in_arrears.',
+  )
+
+export const notificationEventV1TieredPriceModeWire = z
+  .enum(['volume', 'graduated'])
+  .describe('The mode of the tiered price.')
+
+export const notificationEventV1InvoiceDetailedLineCostCategoryWire = z
+  .enum(['regular', 'commitment'])
+
+  .describe(
+    'InvoiceDetailedLineCostCategory determines if the flat fee is a regular fee due to use due to a commitment.',
+  )
+
+export const notificationEventV1PaymentTermInstantWire = z
+  .strictObject({
+    type: z.literal('instant').describe('Type of terms to be applied.'),
+    detail: z
+      .string()
+      .optional()
+      .describe('Text detail of the chosen payment terms.'),
+    notes: z
+      .string()
+      .optional()
+      .describe('Description of the conditions for payment.'),
+  })
+
+  .describe(
+    'PaymentTermInstant defines the terms for payment on receipt of invoice.',
+  )
+
+export const notificationEventV1ValidationIssueSeverityWire = z
+  .enum(['critical', 'warning'])
+
+  .describe(
+    'ValidationIssueSeverity describes the severity of a validation issue. Issues with severity "critical" will prevent the invoice from being issued.',
+  )
+
+export const notificationEventV1InvoiceAppExternalIdsWire = z
+  .strictObject({
+    invoicing: z
+      .string()
+      .optional()
+
+      .describe(
+        'The external ID of the invoice in the invoicing app if available.',
+      ),
+    tax: z
+      .string()
+      .optional()
+      .describe('The external ID of the invoice in the tax app if available.'),
+    payment: z
+      .string()
+      .optional()
+
+      .describe(
+        'The external ID of the invoice in the payment app if available.',
+      ),
+  })
+
+  .describe(
+    'InvoiceAppExternalIds contains the external IDs of the invoice in other apps such as Stripe.',
   )
 
 export const queryFilterIntegerWire = z
@@ -10437,9 +14774,11 @@ export const pagePaginationQueryWire = z
         size: z
           .number()
           .int()
+          .gte(1)
+          .lte(1000)
           .optional()
           .describe('The number of items to include per page.'),
-        number: z.number().int().optional().describe('The page number.'),
+        number: z.number().int().gte(1).optional().describe('The page number.'),
       })
       .optional()
       .describe('Determines which page of the collection to retrieve.'),
@@ -10551,6 +14890,20 @@ export const subscriptionEditOperationTypeWire = z
 
   .describe(
     'The type of a subscription edit operation. - `add_item`: Add a rate card to a phase. - `remove_item`: Remove a rate card from a phase. - `add_phase`: Add a new phase to the subscription. - `remove_phase`: Remove a phase from the subscription. - `stretch_phase`: Extend the duration of a phase. - `unschedule_edit`: Discard scheduled edits on the current phase.',
+  )
+
+export const invoiceCreatedV1RuleConfigWire = z
+  .strictObject({})
+
+  .describe(
+    'Rule configuration of `v1.billing.invoice.created`. Invoice Rules have no type-specific settings.',
+  )
+
+export const invoiceUpdatedV1RuleConfigWire = z
+  .strictObject({})
+
+  .describe(
+    'Rule configuration of `v1.billing.invoice.updated`. Invoice Rules have no type-specific settings.',
   )
 
 export const systemAccountAccessTokenWire = z
@@ -11050,11 +15403,14 @@ export const queryFilterNumericWire = z
     'A query filter for a numeric attribute. Operators are mutually exclusive, only one operator is allowed at a time.',
   )
 
-export const cursorPaginationQueryWire = z
+export const listEventsPaginationWire = z
   .strictObject({
-    page: cursorPaginationQueryPageWire.optional(),
+    page: listEventsPageWire.optional(),
   })
-  .describe('Cursor page query.')
+
+  .describe(
+    'Cursor pagination for the metering event list, with a smaller page size limit than the common one.',
+  )
 
 export const listMetersParamsFilterWire = z
   .strictObject({
@@ -11144,6 +15500,12 @@ export const createResourceReferenceWire = z
   })
   .describe('TaxCode reference.')
 
+export const currencyCustomReferenceWire = z
+  .strictObject({
+    id: ulidWire,
+  })
+  .describe('CurrencyCustom reference.')
+
 export const chargeCostBasisPinnedWire = z
   .strictObject({
     type: z
@@ -11174,12 +15536,6 @@ export const creditGrantInvoiceReferenceWire = z
       .describe('Identifier of the invoice line associated with the grant.'),
   })
   .describe('Invoice references for the grant.')
-
-export const currencyCustomReferenceWire = z
-  .strictObject({
-    id: ulidWire,
-  })
-  .describe('CurrencyCustom reference.')
 
 export const subscriptionCostBasisPinWire = z
   .strictObject({
@@ -11230,23 +15586,29 @@ export const chargeRealizationInvoiceReferenceWire = z
   })
   .describe('ChargeRealizationInvoice reference.')
 
-export const addonReferenceWire = z
-  .strictObject({
-    id: ulidWire,
-  })
-  .describe('Addon reference.')
-
 export const chargeReferenceWire = z
   .strictObject({
     id: ulidWire,
   })
   .describe('Reference to a charge associated with an invoice line.')
 
+export const addonReferenceWire = z
+  .strictObject({
+    id: ulidWire,
+  })
+  .describe('Addon reference.')
+
 export const updateResourceReferenceWire = z
   .strictObject({
     id: ulidWire,
   })
   .describe('TaxCode reference.')
+
+export const notificationChannelReferenceWire = z
+  .strictObject({
+    id: ulidWire,
+  })
+  .describe('NotificationChannel reference.')
 
 export const billingCustomerReferenceWire = z
   .strictObject({
@@ -11456,6 +15818,22 @@ export const chargeResolvedCostBasisWire = z
 
   .describe(
     'Fiat conversion rate a custom-currency charge is invoiced at. Present once the cost basis is resolved; dynamic cost bases are exposed only after the service period has started.',
+  )
+
+export const invoiceCustomerChargesInputWire = z
+  .strictObject({
+    as_of: dateTimeWire.optional(),
+    progressive_billing_override: z
+      .boolean()
+      .optional()
+
+      .describe(
+        "Override the customer's progressive billing setting for this collection. When enabled, eligible usage-based lines can be collected for a partial period.",
+      ),
+  })
+
+  .describe(
+    "Options for manually collecting a customer's pending lines into invoices.",
   )
 
 export const subscriptionAddonTimelineSegmentWire = z
@@ -12282,14 +16660,6 @@ export const creditGrantPlanFilterWire = z
     'A plan key and an optional version constraint for matching credit grants.',
   )
 
-export const listCreditGrantsParamsFilterWire = z
-  .strictObject({
-    status: creditGrantStatusWire.optional(),
-    currency: currencyCodeWire.optional(),
-    key: stringFieldFilterWire.optional(),
-  })
-  .describe('Filter options for listing credit grants.')
-
 export const validationIssueWire = z
   .strictObject({
     code: z.string().describe('Machine-readable error code.'),
@@ -12318,6 +16688,12 @@ export const voidCreditGrantRequestWire = z
     payment_adjustment: creditGrantVoidPaymentAdjustmentWire.optional(),
   })
   .describe('Request body for voiding a credit grant.')
+
+export const cursorPaginationQueryWire = z
+  .strictObject({
+    page: cursorPaginationQueryPageWire.optional(),
+  })
+  .describe('Cursor page query.')
 
 export const subscriptionProRatingConfigWire = z
   .strictObject({
@@ -12402,6 +16778,44 @@ export const chargeRealizationPaymentWire = z
   })
   .describe('Payment state of a charge realization.')
 
+export const invoiceLineAmountDiscountWire = z
+  .strictObject({
+    id: ulidWire,
+    reason: invoiceDiscountReasonWire,
+    description: z
+      .string()
+      .optional()
+      .describe('Optional human-readable description of the discount.'),
+    external_references: invoiceLineExternalReferencesWire.optional(),
+    amount: numericWire,
+  })
+  .describe('A monetary amount discount applied to an invoice line item.')
+
+export const invoiceLineUsageDiscountWire = z
+  .strictObject({
+    id: ulidWire,
+    reason: invoiceDiscountReasonWire,
+    description: z
+      .string()
+      .optional()
+      .describe('Optional human-readable description of the discount.'),
+    external_references: invoiceLineExternalReferencesWire.optional(),
+    quantity: numericWire,
+  })
+  .describe('A usage quantity discount applied to an invoice line item.')
+
+export const invoiceLineBaseDiscountWire = z
+  .strictObject({
+    id: ulidWire,
+    reason: invoiceDiscountReasonWire,
+    description: z
+      .string()
+      .optional()
+      .describe('Optional human-readable description of the discount.'),
+    external_references: invoiceLineExternalReferencesWire.optional(),
+  })
+  .describe('Base fields shared by all invoice line item discounts.')
+
 export const subscriptionCreateTimingWire = z
   .union([subscriptionCreateTimingEnumWire, dateTimeWire])
 
@@ -12441,6 +16855,15 @@ export const appCapabilityWire = z
     description: z.string().describe('Description of the capability.'),
   })
   .describe('App capability describes a function that an App can perform.')
+
+export const appActionWire = z
+  .strictObject({
+    type: appActionTypeWire,
+    description: z
+      .string()
+      .describe('Human readable explanation of why the action is needed.'),
+  })
+  .describe('An action the operator should take on an installed app.')
 
 export const updateAppStripeRequestWire = z
   .strictObject({
@@ -12518,6 +16941,12 @@ export const updateAppExternalInvoicingRequestWire = z
   })
   .describe('AppExternalInvoicing update request.')
 
+export const appActionRequestWire = z
+  .discriminatedUnion('action_type', [
+    appReconcileWebhookEventsActionRequestWire,
+  ])
+  .describe('Request to execute an operator action on an installed app.')
+
 export const installAppRequestWire = z
   .discriminatedUnion('type', [
     installAppStripeWithApiKeyWire,
@@ -12548,46 +16977,9 @@ export const workflowInvoicingSettingsWire = z
       .describe('Should progressive billing be allowed for this workflow?'),
     subscription_end_proration_mode:
       workflowInvoicingSubscriptionEndProrationModeWire.optional(),
+    empty_invoice_mode: workflowInvoicingEmptyInvoiceModeWire.optional(),
   })
   .describe('Invoice settings for a billing workflow.')
-
-export const invoiceLineAmountDiscountWire = z
-  .strictObject({
-    id: ulidWire,
-    reason: invoiceDiscountReasonWire,
-    description: z
-      .string()
-      .optional()
-      .describe('Optional human-readable description of the discount.'),
-    external_references: invoiceLineExternalReferencesWire.optional(),
-    amount: numericWire,
-  })
-  .describe('A monetary amount discount applied to an invoice line item.')
-
-export const invoiceLineUsageDiscountWire = z
-  .strictObject({
-    id: ulidWire,
-    reason: invoiceDiscountReasonWire,
-    description: z
-      .string()
-      .optional()
-      .describe('Optional human-readable description of the discount.'),
-    external_references: invoiceLineExternalReferencesWire.optional(),
-    quantity: numericWire,
-  })
-  .describe('A usage quantity discount applied to an invoice line item.')
-
-export const invoiceLineBaseDiscountWire = z
-  .strictObject({
-    id: ulidWire,
-    reason: invoiceDiscountReasonWire,
-    description: z
-      .string()
-      .optional()
-      .describe('Optional human-readable description of the discount.'),
-    external_references: invoiceLineExternalReferencesWire.optional(),
-  })
-  .describe('Base fields shared by all invoice line item discounts.')
 
 export const updateBillingWorkflowPaymentSettingsWire = z
   .discriminatedUnion('collection_method', [
@@ -12602,6 +16994,15 @@ export const listCurrenciesParamsFilterWire = z
     code: stringFieldFilterWire.optional(),
   })
   .describe('Filter options for listing currencies.')
+
+export const entitlementAccessQueryPaginationWire = z
+  .strictObject({
+    page: entitlementAccessQueryPageWire.optional(),
+  })
+
+  .describe(
+    'Cursor pagination for the entitlement access query, with a smaller page size limit than the common one.',
+  )
 
 export const entitlementAccessQueryRequestWire = z
   .strictObject({
@@ -12728,7 +17129,7 @@ export const createNotificationChannelRequestWire = z
   })
   .describe('NotificationChannel create request.')
 
-export const updateNotificationChannelRequestWire = z
+export const updateBillingNotificationChannelRequestWire = z
   .strictObject({
     name: z
       .string()
@@ -12765,6 +17166,425 @@ export const updateNotificationChannelRequestWire = z
 
   .describe(
     "Request body for updating a notification channel. Updates replace the channel's mutable state rather than merging it: `type`, `name`, and `url` must always be provided, and omitting `disabled`, `labels`, or `custom_headers` resets them to their defaults (enabled, no labels, no custom headers). `signing_secret` is the one exception: omitting it keeps the channel's current signing secret instead of clearing the credential.",
+  )
+
+export const notificationBalanceThresholdWire = z
+  .strictObject({
+    type: notificationBalanceThresholdTypeWire,
+    value: z.number().describe('The threshold value.'),
+  })
+
+  .describe(
+    'A balance threshold of a notification rule. Crossing it generates an `entitlements.balance.threshold` event.',
+  )
+
+export const notificationRuleReferenceWire = z
+  .strictObject({
+    id: ulidWire,
+    type: notificationEventTypeWire,
+    name: z.string().describe('The user-provided name of the rule.'),
+  })
+  .describe('A reference to the notification rule that generated an event.')
+
+export const notificationEventDeliveryAttemptWire = z
+  .strictObject({
+    state: notificationEventDeliveryStateWire,
+    response: notificationEventDeliveryAttemptResponseWire,
+    timestamp: dateTimeWire,
+  })
+  .describe('A single delivery attempt to a channel.')
+
+export const notificationEventV1RecurringPeriodIntervalWire = z
+  .union([z.string(), notificationEventV1RecurringPeriodIntervalEnumWire])
+  .describe('Period duration for the recurrence')
+
+export const notificationEventV1FeatureManualUnitCostWire = z
+  .strictObject({
+    type: z.literal('manual').describe('type.'),
+    amount: notificationEventV1NumericWire,
+  })
+  .describe('A fixed per-unit cost amount.')
+
+export const notificationEventV1FeatureLlmUnitCostPricingWire = z
+  .strictObject({
+    input_per_token: notificationEventV1NumericWire,
+    output_per_token: notificationEventV1NumericWire,
+    cache_read_per_token: notificationEventV1NumericWire.optional(),
+    reasoning_per_token: notificationEventV1NumericWire.optional(),
+    cache_write_per_token: notificationEventV1NumericWire.optional(),
+  })
+  .describe('Resolved per-token pricing from the LLM cost database.')
+
+export const notificationEventV1InvoiceTotalsWire = z
+  .strictObject({
+    amount: notificationEventV1NumericWire,
+    charges_total: notificationEventV1NumericWire,
+    discounts_total: notificationEventV1NumericWire,
+    credits_total: notificationEventV1NumericWire,
+    taxes_inclusive_total: notificationEventV1NumericWire,
+    taxes_exclusive_total: notificationEventV1NumericWire,
+    taxes_total: notificationEventV1NumericWire,
+    total: notificationEventV1NumericWire,
+  })
+
+  .describe(
+    'Totals contains the summaries of all calculations for the invoice.',
+  )
+
+export const notificationEventV1DiscountReasonRatecardUsageWire = z
+  .strictObject({
+    type: z.literal('ratecard_usage').describe('type.'),
+    quantity: notificationEventV1NumericWire,
+    correlation_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('The reason for the discount is a ratecard usage.')
+
+export const notificationEventV1InvoiceLineCreditAllocationWire = z
+  .strictObject({
+    amount: notificationEventV1NumericWire,
+    description: z
+      .string()
+      .optional()
+      .describe('Text description as to why the credit was allocated.'),
+  })
+
+  .describe(
+    'InvoiceLineCreditAllocation represents a credit amount allocated to the line before taxes are applied.',
+  )
+
+export const notificationEventV1UnitPriceWithCommitmentsWire = z
+  .strictObject({
+    type: z.literal('unit').describe('The type of the price.'),
+    amount: notificationEventV1NumericWire,
+    minimum_amount: notificationEventV1NumericWire.optional(),
+    maximum_amount: notificationEventV1NumericWire.optional(),
+  })
+  .describe('Unit price with spend commitments.')
+
+export const notificationEventV1FlatPriceWire = z
+  .strictObject({
+    type: z.literal('flat').describe('The type of the price.'),
+    amount: notificationEventV1NumericWire,
+  })
+  .describe('Flat price.')
+
+export const notificationEventV1UnitPriceWire = z
+  .strictObject({
+    type: z.literal('unit').describe('The type of the price.'),
+    amount: notificationEventV1NumericWire,
+  })
+  .describe('Unit price.')
+
+export const notificationEventV1DynamicPriceWithCommitmentsWire = z
+  .strictObject({
+    type: z.literal('dynamic').describe('The type of the price.'),
+    multiplier: notificationEventV1NumericWire.optional(),
+    minimum_amount: notificationEventV1NumericWire.optional(),
+    maximum_amount: notificationEventV1NumericWire.optional(),
+  })
+  .describe('Dynamic price with spend commitments.')
+
+export const notificationEventV1PackagePriceWithCommitmentsWire = z
+  .strictObject({
+    type: z.literal('package').describe('The type of the price.'),
+    amount: notificationEventV1NumericWire,
+    quantity_per_package: notificationEventV1NumericWire,
+    minimum_amount: notificationEventV1NumericWire.optional(),
+    maximum_amount: notificationEventV1NumericWire.optional(),
+  })
+  .describe('Package price with spend commitments.')
+
+export const notificationEventV1BillingDiscountUsageWire = z
+  .strictObject({
+    quantity: notificationEventV1NumericWire,
+    correlation_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('A usage discount.')
+
+export const notificationEventV1SubscriptionCostBasisPinWire = z
+  .strictObject({
+    custom_currency_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The managed custom currency ID.'),
+    invoice_currency: notificationEventV1CurrencyCodeWire,
+    cost_basis_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The pinned cost basis resource ID.'),
+  })
+
+  .describe(
+    'A cost basis pinned to a custom-currency pair for the subscription.',
+  )
+
+export const notificationEventV1AddressWire = z
+  .strictObject({
+    country: notificationEventV1CountryCodeWire.optional(),
+    postal_code: z.string().optional().describe('Postal code.'),
+    state: z.string().optional().describe('State or province.'),
+    city: z.string().optional().describe('City.'),
+    line1: z.string().optional().describe('First line of the address.'),
+    line2: z.string().optional().describe('Second line of the address.'),
+    phone_number: z.string().optional().describe('Phone number.'),
+  })
+  .describe('Address')
+
+export const notificationEventV1ProRatingConfigWire = z
+  .strictObject({
+    enabled: z
+      .boolean()
+      .describe('Whether pro-rating is enabled for this plan.'),
+    mode: notificationEventV1ProRatingModeWire,
+  })
+  .describe('Configuration for pro-rating behavior.')
+
+export const notificationEventV1RuleBalanceThresholdValueWire = z
+  .strictObject({
+    value: z.number().describe('Value of the threshold.'),
+    type: notificationEventV1RuleBalanceThresholdValueTypeWire,
+  })
+  .describe('Threshold value with multiple supported types.')
+
+export const notificationEventV1BillingPartyTaxIdentityWire = z
+  .strictObject({
+    code: notificationEventV1BillingTaxIdentificationCodeWire.optional(),
+  })
+
+  .describe(
+    'Identity stores the details required to identify an entity for tax purposes in a specific country.',
+  )
+
+export const notificationEventV1InvoiceReferenceWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The ID of the invoice.'),
+    number: notificationEventV1InvoiceNumberWire.optional(),
+  })
+  .describe('Reference to an invoice.')
+
+export const notificationEventV1InvoiceDocumentRefWire = z
+  .strictObject({
+    type: notificationEventV1InvoiceDocumentRefTypeWire,
+    reason: z
+      .string()
+      .optional()
+
+      .describe(
+        'Human readable description on why this reference is here or needs to be used.',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe('Additional details about the document.'),
+  })
+
+  .describe(
+    'InvoiceDocumentRef is used to describe a reference to an existing document (invoice). The v1 schema describes credit note references with issued_at, number and url, but the v1 API only ever sends the generic fields below.',
+  )
+
+export const notificationEventV1InvoiceGenericDocumentRefWire = z
+  .strictObject({
+    type: notificationEventV1InvoiceDocumentRefTypeWire,
+    reason: z
+      .string()
+      .optional()
+
+      .describe(
+        'Human readable description on why this reference is here or needs to be used.',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe('Additional details about the document.'),
+  })
+
+  .describe(
+    'Omitted fields: period: Tax period in which the referred document had an effect required by some tax regimes and formats. stamps: Seals of approval from other organisations that may need to be listed. ext: Extensions for additional codes that may be required.',
+  )
+
+export const notificationEventV1InvoiceAvailableActionsWire = z
+  .strictObject({
+    advance: notificationEventV1InvoiceAvailableActionDetailsWire.optional(),
+    approve: notificationEventV1InvoiceAvailableActionDetailsWire.optional(),
+    delete: notificationEventV1InvoiceAvailableActionDetailsWire.optional(),
+    retry: notificationEventV1InvoiceAvailableActionDetailsWire.optional(),
+    snapshot_quantities:
+      notificationEventV1InvoiceAvailableActionDetailsWire.optional(),
+    void: notificationEventV1InvoiceAvailableActionDetailsWire.optional(),
+    invoice:
+      notificationEventV1InvoiceAvailableActionInvoiceDetailsWire.optional(),
+  })
+
+  .describe(
+    'InvoiceAvailableActions represents the actions that can be performed on the invoice.',
+  )
+
+export const notificationEventV1AppCapabilityWire = z
+  .strictObject({
+    type: notificationEventV1AppCapabilityTypeWire,
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .describe('Key'),
+    name: z.string().describe('The capability name.'),
+    description: z.string().describe('The capability description.'),
+  })
+
+  .describe(
+    "App capability. Capabilities only exist in config so they don't extend the Resource model.",
+  )
+
+export const notificationEventV1TaxConfigWire = z
+  .strictObject({
+    behavior: notificationEventV1TaxBehaviorWire.optional(),
+    stripe: notificationEventV1StripeTaxConfigWire.optional(),
+    custom_invoicing:
+      notificationEventV1CustomInvoicingTaxConfigWire.optional(),
+    tax_code_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Tax code reference. When both `taxCodeId` and `stripe.code` are provided, `taxCodeId` takes precedence: the referenced tax code entity is used and `stripe.code` is ignored.',
+      ),
+  })
+  .describe('Set of provider specific tax configs.')
+
+export const notificationEventV1BillingWorkflowPaymentSettingsWire = z
+  .strictObject({
+    collection_method: notificationEventV1CollectionMethodWire.optional(),
+  })
+
+  .describe(
+    'BillingWorkflowPaymentSettings represents the payment settings for a billing workflow',
+  )
+
+export const notificationEventV1DiscountReasonRatecardPercentageWire = z
+  .strictObject({
+    type: z.literal('ratecard_percentage').describe('type.'),
+    percentage: notificationEventV1PercentageWire,
+    correlation_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('The reason for the discount is a ratecard percentage.')
+
+export const notificationEventV1BillingDiscountPercentageWire = z
+  .strictObject({
+    percentage: notificationEventV1PercentageWire,
+    correlation_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+
+      .describe(
+        'Correlation ID for the discount. This is used to link discounts across different invoices (progressive billing use case). If not provided, the invoicing engine will auto-generate one. When editing an invoice line, please make sure to keep the same correlation ID of the discount or in progressive billing setups the discount amounts might be incorrect.',
+      ),
+  })
+  .describe('A percentage discount.')
+
+export const notificationEventV1PaymentDueDateWire = z
+  .strictObject({
+    due_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('When the payment is due.'),
+    notes: z
+      .string()
+      .optional()
+      .describe('Other details to take into account for the due date.'),
+    amount: notificationEventV1NumericWire,
+    percent: notificationEventV1PercentageWire.optional(),
+    currency: notificationEventV1CurrencyCodeWire.optional(),
+  })
+
+  .describe(
+    'PaymentDueDate contains an amount that should be paid by the given date.',
+  )
+
+export const notificationEventV1InvoiceLineSubscriptionReferenceWire = z
+  .strictObject({
+    subscription: notificationEventV1IdResourceWire,
+    phase: notificationEventV1IdResourceWire,
+    item: notificationEventV1IdResourceWire,
+    billing_period: notificationEventV1PeriodWire,
+  })
+
+  .describe(
+    'InvoiceLineSubscriptionReference contains the references to the subscription that this line is related to.',
+  )
+
+export const notificationEventV1FlatPriceWithPaymentTermWire = z
+  .strictObject({
+    type: z.literal('flat').describe('The type of the price.'),
+    amount: notificationEventV1NumericWire,
+    payment_term: notificationEventV1PricePaymentTermWire.optional(),
+  })
+  .describe('Flat price with payment term.')
+
+export const notificationEventV1ValidationIssueWire = z
+  .strictObject({
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the charge or discount.'),
+    severity: notificationEventV1ValidationIssueSeverityWire,
+    field: z
+      .string()
+      .optional()
+
+      .describe(
+        'The field that the issue is related to, if available in JSON path format.',
+      ),
+    code: z
+      .string()
+      .optional()
+      .describe('Machine indentifiable code for the issue, if available.'),
+    component: z.string().describe('Component reporting the issue.'),
+    message: z.string().describe('A human-readable description of the issue.'),
+    metadata: notificationEventV1MetadataWire.optional(),
+  })
+
+  .describe(
+    'ValidationIssue captures any validation issues related to the invoice. Issues with severity "critical" will prevent the invoice from being issued.',
   )
 
 export const appCustomerDataWire = z
@@ -12826,6 +17646,15 @@ export const creditAdjustmentWire = z
   .describe(
     "A credit adjustment can be used to make manual adjustments to a customer's credit balance. Supported use-cases: - Usage correction",
   )
+
+export const listCreditGrantsParamsFilterWire = z
+  .strictObject({
+    status: creditGrantStatusWire.optional(),
+    currency: billingCurrencyCodeWire.optional(),
+    key: stringFieldFilterWire.optional(),
+    feature_key: stringFieldFilterWire.optional(),
+  })
+  .describe('Filter options for listing credit grants.')
 
 export const createCreditAdjustmentRequestWire = z
   .strictObject({
@@ -13111,6 +17940,56 @@ export const listPlanAddonsParamsFilterWire = z
   })
   .describe('Filter options for listing plan add-ons.')
 
+export const upsertCustomerBillingProfileRequestWire = z
+  .strictObject({
+    billing_profile: profileReferenceWire
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
+  })
+  .describe('CustomerBillingProfile upsert request.')
+
+export const customerProfileWire = z
+  .strictObject({
+    billing_profile: profileReferenceWire
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
+    effective_billing_profile: profileReferenceWire,
+  })
+  .describe('Customer billing profile selection.')
+
+export const entitlementFeaturesRuleConfigWire = z
+  .strictObject({
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe('The feature filter shared by the entitlement Rule configurations.')
+
+export const entitlementUsagePeriodResetV1RuleConfigWire = z
+  .strictObject({
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+  .describe('Rule configuration of `v1.entitlement.usage_period.reset`.')
+
 export const createChargeCostBasisWire = z
   .discriminatedUnion('type', [
     createChargeCostBasisDynamicWire,
@@ -13130,6 +18009,56 @@ export const createTaxCodeConfigWire = z
 
   .describe(
     'Tax configuration for a billable resource. Applies a tax code and tax behavior to the resulting invoice line items. When not set, the applicable default is used: the billing profile default tax configuration, then the organization default tax code.',
+  )
+
+export const creditBalanceWire = z
+  .strictObject({
+    currency: billingCurrencyCodeWire,
+    custom_currency: currencyCustomReferenceWire.optional(),
+    live: numericWire,
+    booked: numericWire,
+    settled: numericWire,
+    spendable: numericWire,
+    pending: numericWire,
+  })
+  .describe('The credit balance by currency.')
+
+export const creditTransactionWire = z
+  .strictObject({
+    id: ulidWire,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    labels: labelsWire.optional(),
+    created_at: dateTimeWire,
+    booked_at: dateTimeWire,
+    type: creditTransactionTypeWire,
+    currency: billingCurrencyCodeWire,
+    custom_currency: currencyCustomReferenceWire.optional(),
+    amount: numericWire,
+    available_balance: z
+      .strictObject({
+        before: numericWire,
+        after: numericWire,
+      })
+
+      .describe(
+        'The booked credit balance before and after the transaction, including credit-only advance debt.',
+      ),
+  })
+
+  .describe(
+    "A credit transaction represents a single credit movement on the customer's balance. Credit transactions are immutable.",
   )
 
 export const chargeCostBasisWire = z
@@ -13181,51 +18110,6 @@ export const updateOrganizationDefaultTaxCodesRequestWire = z
     credit_grant_tax_code: taxCodeReferenceWire.optional(),
   })
   .describe('OrganizationDefaultTaxCodes update request.')
-
-export const creditBalanceWire = z
-  .strictObject({
-    currency: billingCurrencyCodeWire,
-    custom_currency: currencyCustomReferenceWire.optional(),
-    live: numericWire,
-    settled: numericWire,
-    pending: numericWire,
-  })
-  .describe('The credit balance by currency.')
-
-export const creditTransactionWire = z
-  .strictObject({
-    id: ulidWire,
-    name: z
-      .string()
-      .min(1)
-      .max(256)
-      .describe('Display name of the resource. Between 1 and 256 characters.'),
-    description: z
-      .string()
-      .max(1024)
-      .optional()
-
-      .describe(
-        'Optional description of the resource. Maximum 1024 characters.',
-      ),
-    labels: labelsWire.optional(),
-    created_at: dateTimeWire,
-    booked_at: dateTimeWire,
-    type: creditTransactionTypeWire,
-    currency: billingCurrencyCodeWire,
-    custom_currency: currencyCustomReferenceWire.optional(),
-    amount: numericWire,
-    available_balance: z
-      .strictObject({
-        before: numericWire,
-        after: numericWire,
-      })
-      .describe('The available balance before and after the transaction.'),
-  })
-
-  .describe(
-    "A credit transaction represents a single credit movement on the customer's balance. Credit transactions are immutable.",
-  )
 
 export const invoiceWorkflowAppsReferencesWire = z
   .strictObject({
@@ -13327,6 +18211,233 @@ export const updateTaxCodeConfigWire = z
     'Tax configuration for a billable resource. Applies a tax code and tax behavior to the resulting invoice line items. When not set, the applicable default is used: the billing profile default tax configuration, then the organization default tax code.',
   )
 
+export const notificationRuleEntitlementResetWire = z
+  .strictObject({
+    id: ulidWire,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    created_at: dateTimeWire,
+    updated_at: dateTimeWire,
+    deleted_at: dateTimeWire.optional(),
+    type: z
+      .literal('entitlements.reset')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe(
+    'A rule that generates an event when an entitlement usage period is reset.',
+  )
+
+export const notificationRuleInvoiceCreatedWire = z
+  .strictObject({
+    id: ulidWire,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    created_at: dateTimeWire,
+    updated_at: dateTimeWire,
+    deleted_at: dateTimeWire.optional(),
+    type: z
+      .literal('invoice.created')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('A rule that generates an event when an invoice is created.')
+
+export const notificationRuleInvoiceUpdatedWire = z
+  .strictObject({
+    id: ulidWire,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    created_at: dateTimeWire,
+    updated_at: dateTimeWire,
+    deleted_at: dateTimeWire.optional(),
+    type: z
+      .literal('invoice.updated')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('A rule that generates an event when an invoice is updated.')
+
+export const notificationRuleEntitlementResetRequestWire = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    type: z
+      .literal('entitlements.reset')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+  .describe('Request body for an entitlement reset rule.')
+
+export const notificationRuleInvoiceCreatedRequestWire = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    type: z
+      .literal('invoice.created')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('Request body for an invoice created rule.')
+
+export const notificationRuleInvoiceUpdatedRequestWire = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    type: z
+      .literal('invoice.updated')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+  })
+  .describe('Request body for an invoice updated rule.')
+
+export const resendBillingNotificationEventRequestWire = z
+  .strictObject({
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .optional()
+
+      .describe(
+        'The channels to resend the event to. When omitted or empty, the event is resent to every enabled channel of the rule. Channels not targeted by the rule or disabled are rejected.',
+      ),
+  })
+  .describe('Request body for resending a notification event.')
+
 export const listEventsParamsFilterWire = z
   .strictObject({
     id: stringFieldFilterWire.optional(),
@@ -13368,6 +18479,7 @@ export const listChargesParamsFilterWire = z
     service_period_from: dateTimeFieldFilterWire.optional(),
     service_period_to: dateTimeFieldFilterWire.optional(),
     customer_id: ulidFieldFilterWire.optional(),
+    subscription_id: ulidFieldFilterWire.optional(),
   })
   .describe('Filter options for listing charges across customers.')
 
@@ -13381,6 +18493,33 @@ export const listNotificationChannelsParamsFilterWire = z
     updated_at: dateTimeFieldFilterWire.optional(),
   })
   .describe('Filter options for listing notification channels.')
+
+export const listNotificationRulesParamsFilterWire = z
+  .strictObject({
+    id: ulidFieldFilterWire.optional(),
+    name: stringFieldFilterWire.optional(),
+    type: stringFieldFilterExactWire.optional(),
+    disabled: booleanFieldFilterWire.optional(),
+    created_at: dateTimeFieldFilterWire.optional(),
+    updated_at: dateTimeFieldFilterWire.optional(),
+    channel_id: ulidFieldFilterWire.optional(),
+  })
+  .describe('Filter options for listing notification rules.')
+
+export const listNotificationEventsParamsFilterWire = z
+  .strictObject({
+    id: ulidFieldFilterWire.optional(),
+    type: stringFieldFilterExactWire.optional(),
+    created_at: dateTimeFieldFilterWire.optional(),
+    rule_id: ulidFieldFilterWire.optional(),
+    channel_id: ulidFieldFilterWire.optional(),
+    delivery_status: stringFieldFilterExactWire.optional(),
+    subject_key: stringFieldFilterExactWire.optional(),
+    subject_id: ulidFieldFilterWire.optional(),
+    feature_key: stringFieldFilterExactWire.optional(),
+    feature_id: ulidFieldFilterWire.optional(),
+  })
+  .describe('Filter options for listing notification events.')
 
 export const resourceFiltersWire = z
   .strictObject({
@@ -13905,6 +19044,7 @@ export const entitlementGrantWire = z
   .strictObject({
     id: ulidWire,
     entitlement_id: ulidWire,
+    customer_id: ulidWire.optional(),
     amount: numericWire,
     priority: z
       .number()
@@ -14040,6 +19180,7 @@ export const subscriptionBaseWire = z
     billing_cadence: iso8601DurationWire,
     pro_rating_config: subscriptionProRatingConfigWire.optional(),
     billing_anchor: dateTimeWire,
+    billing_starts_at: dateTimeWire.optional(),
     status: subscriptionStatusWire,
     settlement_mode: settlementModeWire.optional(),
   })
@@ -14074,6 +19215,22 @@ export const invoiceWorkflowWire = z
   .describe(
     'Invoice-level snapshot of the workflow configuration. Contains only the settings that are meaningful for an already-created invoice: invoicing behaviour and payment settings. Collection alignment and tax policy are gather-time / profile-wide concerns and are not included.',
   )
+
+export const invoiceLineDiscountsWire = z
+  .strictObject({
+    amount: z
+      .array(invoiceLineAmountDiscountWire)
+      .optional()
+
+      .describe(
+        'Monetary amount discounts (e.g. from maximum spend commitments).',
+      ),
+    usage: z
+      .array(invoiceLineUsageDiscountWire)
+      .optional()
+      .describe('Usage quantity discounts (e.g. free tier usage allowances).'),
+  })
+  .describe('Discounts applied to an invoice line item.')
 
 export const subscriptionCancelWire = z
   .strictObject({
@@ -14238,22 +19395,6 @@ export const updateAppRequestWire = z
   ])
   .describe('Request to update an installed app.')
 
-export const invoiceLineDiscountsWire = z
-  .strictObject({
-    amount: z
-      .array(invoiceLineAmountDiscountWire)
-      .optional()
-
-      .describe(
-        'Monetary amount discounts (e.g. from maximum spend commitments).',
-      ),
-    usage: z
-      .array(invoiceLineUsageDiscountWire)
-      .optional()
-      .describe('Usage quantity discounts (e.g. free tier usage allowances).'),
-  })
-  .describe('Discounts applied to an invoice line item.')
-
 export const updateBillingInvoiceWorkflowWire = z
   .strictObject({
     invoicing: updateBillingInvoiceWorkflowInvoicingSettingsWire.optional(),
@@ -14283,16 +19424,509 @@ export const notificationChannelPagePaginatedResponseWire = z
   })
   .describe('Page paginated response.')
 
+export const notificationRuleBalanceThresholdWire = z
+  .strictObject({
+    id: ulidWire,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    created_at: dateTimeWire,
+    updated_at: dateTimeWire,
+    deleted_at: dateTimeWire.optional(),
+    type: z
+      .literal('entitlements.balance.threshold')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    thresholds: z
+      .array(notificationBalanceThresholdWire)
+      .min(1)
+      .max(10)
+      .describe('The thresholds that generate an event when crossed.'),
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe(
+    'A rule that generates an event when an entitlement balance crosses one of its thresholds.',
+  )
+
+export const notificationRuleBalanceThresholdRequestWire = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    labels: labelsWire.optional(),
+    type: z
+      .literal('entitlements.balance.threshold')
+
+      .describe(
+        'The type of event the rule generates. Immutable after creation.',
+      ),
+    disabled: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether the rule is disabled. Disabled rules do not generate events.',
+      ),
+    channels: z
+      .array(notificationChannelReferenceWire)
+      .max(5)
+
+      .describe(
+        'The channels the rule delivers its events to. At least one and at most five channels are required. Responses omit channels that have since been disabled or deleted.',
+      ),
+    thresholds: z
+      .array(notificationBalanceThresholdWire)
+      .min(1)
+      .max(10)
+      .describe('The thresholds that generate an event when crossed.'),
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+  .describe('Request body for a balance threshold rule.')
+
+export const entitlementBalanceThresholdTriggeredV1RuleConfigWire = z
+  .strictObject({
+    thresholds: z
+      .array(notificationBalanceThresholdWire)
+      .min(1)
+      .max(10)
+      .describe('The thresholds that generate an event when crossed.'),
+    features: z
+      .array(featureReferenceWire)
+      .optional()
+
+      .describe(
+        'The features the rule applies to. When omitted, the rule applies to every feature.',
+      ),
+  })
+
+  .describe(
+    'Rule configuration of `v1.entitlement.balance_threshold.triggered`.',
+  )
+
+export const notificationEventDeliveryStatusWire = z
+  .strictObject({
+    channel_id: ulidWire,
+    state: notificationEventDeliveryStateWire,
+    reason: z
+      .string()
+
+      .describe(
+        'The reason for the last state change. Empty for successful deliveries.',
+      ),
+    updated_at: dateTimeWire,
+    next_attempt: dateTimeWire.optional(),
+    attempts: z
+      .array(notificationEventDeliveryAttemptWire)
+      .describe('The delivery attempts made so far, most recent first.'),
+  })
+
+  .describe(
+    'The delivery status of a notification event for one channel of the generating rule.',
+  )
+
+export const notificationEventV1RecurringPeriodWire = z
+  .strictObject({
+    interval: notificationEventV1RecurringPeriodIntervalWire,
+    anchor: z
+      .string()
+      .datetime({ offset: true })
+      .describe('A date-time anchor to base the recurring period on.'),
+    interval_iso: z
+      .string()
+      .duration()
+      .describe('The unit of time for the interval in ISO8601 format.'),
+  })
+  .describe('Recurring period with an interval and an anchor.')
+
+export const notificationEventV1RecurringPeriodV2Wire = z
+  .strictObject({
+    interval: notificationEventV1RecurringPeriodIntervalWire,
+    anchor: z
+      .string()
+      .datetime({ offset: true })
+      .describe('A date-time anchor to base the recurring period on.'),
+  })
+  .describe('Recurring period with an interval and an anchor.')
+
+export const notificationEventV1FeatureLlmUnitCostWire = z
+  .strictObject({
+    type: z.literal('llm').describe('type.'),
+    provider_property: z
+      .string()
+      .optional()
+
+      .describe(
+        'Meter group-by property that holds the LLM provider. Use this when the meter has a group-by dimension for provider. Mutually exclusive with `provider`.',
+      ),
+    provider: z
+      .string()
+      .optional()
+
+      .describe(
+        'Static LLM provider value (e.g., "openai", "anthropic"). Use this when the feature tracks a single provider. Mutually exclusive with `providerProperty`.',
+      ),
+    model_property: z
+      .string()
+      .optional()
+
+      .describe(
+        'Meter group-by property that holds the model ID. Use this when the meter has a group-by dimension for model. Mutually exclusive with `model`.',
+      ),
+    model: z
+      .string()
+      .optional()
+
+      .describe(
+        'Static model ID value (e.g., "gpt-4", "claude-3-5-sonnet"). Use this when the feature tracks a single model. Mutually exclusive with `modelProperty`.',
+      ),
+    token_type_property: z
+      .string()
+      .optional()
+
+      .describe(
+        'Meter group-by property that holds the token type. Use this when the meter has a group-by dimension for token type. Mutually exclusive with `tokenType`.',
+      ),
+    token_type: z
+      .string()
+      .optional()
+
+      .describe(
+        'Static token type value. Use this when the feature tracks a single token type (e.g., only input tokens). Expected values: input, output, cache_read, reasoning, cache_write, request, response. `request` is an alias for `input`, `response` is an alias for `output`. Mutually exclusive with `tokenTypeProperty`.',
+      ),
+    pricing: notificationEventV1FeatureLlmUnitCostPricingWire.optional(),
+  })
+
+  .describe(
+    'LLM cost lookup configuration. Maps meter group-by dimensions to LLM cost database fields.',
+  )
+
+export const notificationEventV1PriceTierWire = z
+  .strictObject({
+    up_to_amount: notificationEventV1NumericWire.optional(),
+    flat_price: notificationEventV1FlatPriceWire
+      .nullable()
+      .describe('The flat price component of the tier.'),
+    unit_price: notificationEventV1UnitPriceWire
+      .nullable()
+      .describe('The unit price component of the tier.'),
+  })
+
+  .describe(
+    'A price tier. At least one price component is required in each tier.',
+  )
+
+export const notificationEventV1SubscriptionWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    active_from: z
+      .string()
+      .datetime({ offset: true })
+      .describe('The cadence start of the resource.'),
+    active_to: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The cadence end of the resource.'),
+    annotations: notificationEventV1AnnotationsWire.optional(),
+    alignment: notificationEventV1AlignmentWire.optional(),
+    status: notificationEventV1SubscriptionStatusWire,
+    customer_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The customer ID of the subscription.'),
+    plan: notificationEventV1PlanReferenceWire.optional(),
+    currency: notificationEventV1CurrencyCodeWire,
+    cost_basis_mode: notificationEventV1SubscriptionCostBasisModeWire,
+    cost_basis_pins: z
+      .array(notificationEventV1SubscriptionCostBasisPinWire)
+
+      .describe(
+        'Cost bases pinned to custom-currency pairs for this subscription.',
+      ),
+    billing_cadence: z
+      .string()
+      .duration()
+
+      .describe(
+        'The billing cadence for the subscriptions. Defines how often customers are billed using ISO8601 duration format. Examples: "P1M" (monthly), "P3M" (quarterly), "P1Y" (annually).',
+      ),
+    pro_rating_config: notificationEventV1ProRatingConfigWire.optional(),
+    billing_anchor: z
+      .string()
+      .datetime({ offset: true })
+      .describe('The normalizedbilling anchor of the subscription.'),
+    settlement_mode: notificationEventV1BillingSettlementModeWire,
+  })
+  .describe('Subscription is an exact subscription instance.')
+
+export const notificationEventV1BillingPartyWire = z
+  .strictObject({
+    id: z
+      .string()
+      .optional()
+      .describe('Unique identifier for the party (if available)'),
+    key: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+      .describe('An optional unique key of the party (if available)'),
+    name: z
+      .string()
+      .optional()
+      .describe('Legal name or representation of the organization.'),
+    tax_id: notificationEventV1BillingPartyTaxIdentityWire.optional(),
+    addresses: z
+      .array(notificationEventV1AddressWire)
+      .max(1)
+      .optional()
+
+      .describe(
+        'Regular post addresses for where information should be sent if needed.',
+      ),
+  })
+  .describe('Party represents a person or business entity.')
+
+export const notificationEventV1BillingInvoiceCustomerExtendedDetailsWire = z
+  .strictObject({
+    id: z
+      .string()
+      .optional()
+      .describe('Unique identifier for the party (if available)'),
+    key: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+      .describe('An optional unique key of the party (if available)'),
+    name: z
+      .string()
+      .optional()
+      .describe('Legal name or representation of the organization.'),
+    tax_id: notificationEventV1BillingPartyTaxIdentityWire.optional(),
+    addresses: z
+      .array(notificationEventV1AddressWire)
+      .max(1)
+      .optional()
+
+      .describe(
+        'Regular post addresses for where information should be sent if needed.',
+      ),
+    usage_attribution: notificationEventV1CustomerUsageAttributionWire,
+  })
+
+  .describe(
+    'BillingInvoiceCustomerExtendedDetails is a collection of fields that are used to extend the billing party details for invoices. These fields contain the OpenMeter specific details for the customer, that are not strictly required for the invoice itself.',
+  )
+
+export const notificationEventV1InvoiceStatusDetailsWire = z
+  .strictObject({
+    immutable: z.boolean().describe('Is the invoice editable?'),
+    failed: z.boolean().describe('Is the invoice in a failed state?'),
+    extended_status: z
+      .string()
+      .describe('Extended status information for the invoice.'),
+    available_actions: notificationEventV1InvoiceAvailableActionsWire,
+  })
+
+  .describe(
+    'InvoiceStatusDetails represents the details of the invoice status. API users are encouraged to rely on the immutable/failed/avaliableActions fields to determine the next steps of the invoice instead of the extendedStatus field.',
+  )
+
+export const notificationEventV1MarketplaceListingWire = z
+  .strictObject({
+    type: notificationEventV1AppTypeWire,
+    name: z.string().describe("The app's name."),
+    description: z.string().describe("The app's description."),
+    capabilities: z
+      .array(notificationEventV1AppCapabilityWire)
+      .describe("The app's capabilities."),
+    install_methods: z
+      .array(notificationEventV1InstallMethodWire)
+      .describe('Install methods. List of methods to install the app.'),
+  })
+
+  .describe(
+    "A marketplace listing. Represent an available app in the app marketplace that can be installed to the organization. Marketplace apps only exist in config so they don't extend the Resource model.",
+  )
+
+export const notificationEventV1BillingWorkflowInvoicingSettingsWire = z
+  .strictObject({
+    auto_advance: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Whether to automatically issue the invoice after the draftPeriod has passed.',
+      ),
+    draft_period: z
+      .string()
+      .optional()
+
+      .describe(
+        'The period for the invoice to be kept in draft status for manual reviews.',
+      ),
+    due_after: z
+      .string()
+      .optional()
+
+      .describe(
+        "The period after which the invoice is due. With some payment solutions it's only applicable for manual collection method.",
+      ),
+    progressive_billing: z
+      .boolean()
+      .optional()
+      .describe('Should progressive billing be allowed for this workflow?'),
+    subscription_end_proration_mode:
+      notificationEventV1BillingWorkflowInvoicingSubscriptionEndProrationModeWire.optional(),
+    default_tax_config: notificationEventV1TaxConfigWire.optional(),
+  })
+
+  .describe(
+    'BillingWorkflowInvoicingSettings represents the invoice settings for a billing workflow',
+  )
+
+export const notificationEventV1InvoiceLineTaxItemWire = z
+  .strictObject({
+    config: notificationEventV1TaxConfigWire.optional(),
+    percent: notificationEventV1PercentageWire.optional(),
+    surcharge: notificationEventV1NumericWire.optional(),
+    behavior: notificationEventV1InvoiceLineTaxBehaviorWire.optional(),
+  })
+
+  .describe(
+    'TaxConfig stores the configuration for a tax line relative to an invoice line.',
+  )
+
+export const notificationEventV1BillingDiscountReasonWire = z
+  .discriminatedUnion('type', [
+    notificationEventV1DiscountReasonMaximumSpendWire,
+    notificationEventV1DiscountReasonRatecardPercentageWire,
+    notificationEventV1DiscountReasonRatecardUsageWire,
+  ])
+  .describe('The reason for the discount.')
+
+export const notificationEventV1BillingDiscountsWire = z
+  .strictObject({
+    percentage: notificationEventV1BillingDiscountPercentageWire.optional(),
+    usage: notificationEventV1BillingDiscountUsageWire.optional(),
+  })
+  .describe('A discount by type.')
+
+export const notificationEventV1PaymentTermDueDateWire = z
+  .strictObject({
+    type: z.literal('due_date').describe('Type of terms to be applied.'),
+    detail: z
+      .string()
+      .optional()
+      .describe('Text detail of the chosen payment terms.'),
+    notes: z
+      .string()
+      .optional()
+      .describe('Description of the conditions for payment.'),
+    due_at: z
+      .array(notificationEventV1PaymentDueDateWire)
+      .min(1)
+      .describe('When the payment is due.'),
+  })
+
+  .describe(
+    'PaymentTermDueDate defines the terms for payment on a specific date.',
+  )
+
 export const customerDataWire = z
   .strictObject({
-    billing_profile: profileReferenceWire.optional(),
+    billing_profile: profileReferenceWire
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
+    effective_billing_profile: profileReferenceWire,
     app_data: appCustomerDataWire.optional(),
   })
   .describe('Billing customer data.')
 
 export const upsertCustomerBillingDataRequestWire = z
   .strictObject({
-    billing_profile: profileReferenceWire.optional(),
+    billing_profile: profileReferenceWire
+      .nullable()
+      .optional()
+
+      .describe(
+        'The billing profile explicitly selected for the customer. Unpinned customers use the current namespace default. Selecting the current default explicitly pins the customer to that profile.',
+      ),
     app_data: appCustomerDataWire.optional(),
   })
   .describe('CustomerBillingData upsert request.')
@@ -14426,6 +20060,22 @@ export const createCreditGrantPurchaseWire = z
   })
   .describe('Purchase and payment terms of the grant.')
 
+export const creditBalancesWire = z
+  .strictObject({
+    retrieved_at: dateTimeWire,
+    balances: z
+      .array(creditBalanceWire)
+      .describe('The balances by currencies.'),
+  })
+  .describe('The balances of the credits of a customer.')
+
+export const creditTransactionPaginatedResponseWire = z
+  .strictObject({
+    data: z.array(creditTransactionWire),
+    meta: cursorMetaWire,
+  })
+  .describe('Cursor paginated response.')
+
 export const creditGrantPurchaseWire = z
   .strictObject({
     currency: currencyCodeWire,
@@ -14493,22 +20143,6 @@ export const workflowTaxSettingsWire = z
     default_tax_config: taxConfigWire.optional(),
   })
   .describe('Tax settings for a billing workflow.')
-
-export const creditBalancesWire = z
-  .strictObject({
-    retrieved_at: dateTimeWire,
-    balances: z
-      .array(creditBalanceWire)
-      .describe('The balances by currencies.'),
-  })
-  .describe('The balances of the credits of a customer.')
-
-export const creditTransactionPaginatedResponseWire = z
-  .strictObject({
-    data: z.array(creditTransactionWire),
-    meta: cursorMetaWire,
-  })
-  .describe('Cursor paginated response.')
 
 export const planAddonPagePaginatedResponseWire = z
   .strictObject({
@@ -14790,6 +20424,43 @@ export const invoiceWorkflowSettingsWire = z
     'Snapshot of the billing workflow configuration captured at invoice creation.',
   )
 
+export const invoiceDetailedLineWire = z
+  .strictObject({
+    id: ulidWire,
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+      .describe('Display name of the resource. Between 1 and 256 characters.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    labels: labelsWire.optional(),
+    created_at: dateTimeWire,
+    updated_at: dateTimeWire,
+    deleted_at: dateTimeWire.optional(),
+    service_period: closedPeriodWire,
+    totals: totalsWire,
+    category: invoiceDetailedLineCostCategoryWire,
+    discounts: invoiceLineDiscountsWire.optional(),
+    credits_applied: z
+      .array(invoiceLineCreditsAppliedWire)
+      .optional()
+      .describe('Credit applied to this detailed line.'),
+    external_references: invoiceLineExternalReferencesWire.optional(),
+    quantity: numericWire,
+    unit_price: numericWire,
+  })
+
+  .describe(
+    'A detailed (child) sub-line belonging to a parent invoice line. Detailed lines represent the individual flat-fee components that make up a usage-based parent line after quantity snapshotting.',
+  )
+
 export const taxCodePagePaginatedResponseWire = z
   .strictObject({
     data: z.array(taxCodeWire),
@@ -14820,6 +20491,13 @@ export const appStripeWire = z
     type: z.literal('stripe').describe('The app type.'),
     definition: appCatalogItemWire,
     status: appStatusWire,
+    actions: z
+      .array(appActionWire)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     account_id: z
       .string()
 
@@ -14864,6 +20542,13 @@ export const appSandboxWire = z
     type: z.literal('sandbox').describe('The app type.'),
     definition: appCatalogItemWire,
     status: appStatusWire,
+    actions: z
+      .array(appActionWire)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
   })
   .describe('Sandbox app can be used for testing billing features.')
 
@@ -14890,6 +20575,13 @@ export const appExternalInvoicingWire = z
     type: z.literal('external_invoicing').describe('The app type.'),
     definition: appCatalogItemWire,
     status: appStatusWire,
+    actions: z
+      .array(appActionWire)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     enable_draft_sync_hook: z
       .boolean()
 
@@ -14938,6 +20630,13 @@ export const installedAppStripeWire = z
     type: z.literal('stripe').describe('The app type.'),
     definition: appCatalogItemWire,
     status: appStatusWire,
+    actions: z
+      .array(appActionWire)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     account_id: z
       .string()
 
@@ -14985,6 +20684,13 @@ export const installedAppSandboxWire = z
     type: z.literal('sandbox').describe('The app type.'),
     definition: appCatalogItemWire,
     status: appStatusWire,
+    actions: z
+      .array(appActionWire)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     default_for_capability_types: z
       .array(appCapabilityTypeWire)
       .describe('Default capabilities of the installed app.'),
@@ -15014,6 +20720,13 @@ export const installedAppExternalInvoicingWire = z
     type: z.literal('external_invoicing').describe('The app type.'),
     definition: appCatalogItemWire,
     status: appStatusWire,
+    actions: z
+      .array(appActionWire)
+      .optional()
+
+      .describe(
+        'Actions the operator should take to bring the app up to date. Omitted when no action is required.',
+      ),
     enable_draft_sync_hook: z
       .boolean()
 
@@ -15031,43 +20744,6 @@ export const installedAppExternalInvoicingWire = z
       .describe('Default capabilities of the installed app.'),
   })
   .describe('Response of an installed app.')
-
-export const invoiceDetailedLineWire = z
-  .strictObject({
-    id: ulidWire,
-    name: z
-      .string()
-      .min(1)
-      .max(256)
-      .describe('Display name of the resource. Between 1 and 256 characters.'),
-    description: z
-      .string()
-      .max(1024)
-      .optional()
-
-      .describe(
-        'Optional description of the resource. Maximum 1024 characters.',
-      ),
-    labels: labelsWire.optional(),
-    created_at: dateTimeWire,
-    updated_at: dateTimeWire,
-    deleted_at: dateTimeWire.optional(),
-    service_period: closedPeriodWire,
-    totals: totalsWire,
-    category: invoiceDetailedLineCostCategoryWire,
-    discounts: invoiceLineDiscountsWire.optional(),
-    credits_applied: z
-      .array(invoiceLineCreditsAppliedWire)
-      .optional()
-      .describe('Credit applied to this detailed line.'),
-    external_references: invoiceLineExternalReferencesWire.optional(),
-    quantity: numericWire,
-    unit_price: numericWire,
-  })
-
-  .describe(
-    'A detailed (child) sub-line belonging to a parent invoice line. Detailed lines represent the individual flat-fee components that make up a usage-based parent line after quantity snapshotting.',
-  )
 
 export const updateInvoiceWorkflowSettingsWire = z
   .strictObject({
@@ -15096,6 +20772,493 @@ export const entitlementAccessQueryResultWire = z
     updated_at: dateTimeWire,
   })
   .describe('Access evaluation result for a single resolved customer.')
+
+export const notificationRuleWire = z
+  .discriminatedUnion('type', [
+    notificationRuleBalanceThresholdWire,
+    notificationRuleEntitlementResetWire,
+    notificationRuleInvoiceCreatedWire,
+    notificationRuleInvoiceUpdatedWire,
+  ])
+
+  .describe(
+    'A notification rule selects the type of event to generate, the conditions specific to that type, and the channels to deliver the events to.',
+  )
+
+export const notificationRuleRequestWire = z
+  .discriminatedUnion('type', [
+    notificationRuleBalanceThresholdRequestWire,
+    notificationRuleEntitlementResetRequestWire,
+    notificationRuleInvoiceCreatedRequestWire,
+    notificationRuleInvoiceUpdatedRequestWire,
+  ])
+
+  .describe(
+    "Request body for creating or updating a notification rule. Updates replace the rule's mutable state: omitting `disabled`, `labels`, or `features` resets them to their defaults. The `type` must match the existing rule on update.",
+  )
+
+export const notificationEventV1EntitlementMeteredWire = z
+  .strictObject({
+    type: z.literal('metered').describe('type.'),
+    is_soft_limit: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'If softLimit=true the subject can use the feature even if the entitlement is exhausted, hasAccess will always be true.',
+      ),
+    is_unlimited: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'Deprecated, ignored by the backend. Please use isSoftLimit instead; this field will be removed in the future.',
+      ),
+    issue_after_reset: z
+      .number()
+      .nonnegative()
+      .optional()
+
+      .describe(
+        'You can grant usage automatically alongside the entitlement, the example scenario would be creating a starting balance. If an amount is specified here, a grant will be created alongside the entitlement with the specified amount. That grant will have it\'s rollover settings configured in a way that after each reset operation, the balance will return the original amount specified here. Manually creating such a grant would mean having the "amount", "minRolloverAmount", and "maxRolloverAmount" fields all be the same.',
+      ),
+    issue_after_reset_priority: z
+      .number()
+      .int()
+      .gte(1)
+      .lte(255)
+      .optional()
+      .describe('Defines the grant priority for the default grant.'),
+    preserve_overage_at_reset: z
+      .boolean()
+      .optional()
+
+      .describe(
+        'If true, the overage is preserved at reset. If false, the usage is reset to 0.',
+      ),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    metadata: notificationEventV1MetadataWire.optional(),
+    active_from: z
+      .string()
+      .datetime({ offset: true })
+      .describe('The cadence start of the resource.'),
+    active_to: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The cadence end of the resource.'),
+    annotations: notificationEventV1AnnotationsWire.optional(),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('Readonly unique ULID identifier.'),
+    subject_key: z
+      .string()
+
+      .describe(
+        'The identifier key unique to the subject. NOTE: Subjects are being deprecated, please use the new customer APIs.',
+      ),
+    feature_key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .describe('The feature the subject is entitled to use.'),
+    feature_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('The feature the subject is entitled to use.'),
+    last_reset: z
+      .string()
+      .datetime({ offset: true })
+      .describe('The time the last reset happened.'),
+    current_usage_period: notificationEventV1PeriodWire,
+    measure_usage_from: z
+      .string()
+      .datetime({ offset: true })
+
+      .describe(
+        'The time from which usage is measured. If not specified on creation, defaults to entitlement creation time.',
+      ),
+    usage_period: notificationEventV1RecurringPeriodWire,
+  })
+
+  .describe(
+    'Metered entitlements are useful for many different use cases, from setting up usage based access to implementing complex credit systems. Access is determined based on feature usage using a balance calculation (the "usage allowance" provided by the issued grants is "burnt down" by the usage).',
+  )
+
+export const notificationEventV1BillingWorkflowCollectionAlignmentAnchoredWire =
+  z
+    .strictObject({
+      type: z.literal('anchored').describe('The type of alignment.'),
+      recurring_period: notificationEventV1RecurringPeriodV2Wire,
+    })
+
+    .describe(
+      'BillingWorkflowCollectionAlignmentAnchored specifies the alignment for collecting the pending line items into an invoice.',
+    )
+
+export const notificationEventV1FeatureUnitCostWire = z
+  .discriminatedUnion('type', [
+    notificationEventV1FeatureManualUnitCostWire,
+    notificationEventV1FeatureLlmUnitCostWire,
+  ])
+
+  .describe(
+    'Per-unit cost configuration for a feature. Either a fixed manual amount or a dynamic LLM cost lookup.',
+  )
+
+export const notificationEventV1TieredPriceWithCommitmentsWire = z
+  .strictObject({
+    type: z
+      .literal('tiered')
+      .describe('The type of the price. One of: flat, unit, or tiered.'),
+    mode: notificationEventV1TieredPriceModeWire,
+    tiers: z
+      .array(notificationEventV1PriceTierWire)
+      .min(1)
+
+      .describe(
+        'The tiers of the tiered price. At least one price component is required in each tier.',
+      ),
+    minimum_amount: notificationEventV1NumericWire.optional(),
+    maximum_amount: notificationEventV1NumericWire.optional(),
+  })
+  .describe('Tiered price with spend commitments.')
+
+export const notificationEventV1CustomerWire = z
+  .strictObject({
+    id: z.string().describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    key: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+
+      .describe(
+        'An optional unique key of the customer. Either key or usageAttribution.subjectKeys must be provided. Useful to reference the customer in external systems. For example, your database ID.',
+      ),
+    usage_attribution:
+      notificationEventV1CustomerUsageAttributionWire.optional(),
+    primary_email: z
+      .string()
+      .optional()
+      .describe('The primary email address of the customer.'),
+    currency: notificationEventV1CurrencyCodeWire.optional(),
+    billing_address: notificationEventV1AddressWire.optional(),
+    current_subscription_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .optional()
+      .describe('The ID of the Subscription if the customer has one.'),
+    subscriptions: z
+      .array(notificationEventV1SubscriptionWire)
+      .optional()
+
+      .describe(
+        'The subscriptions of the customer. Only with the `subscriptions` expand option.',
+      ),
+    annotations: notificationEventV1AnnotationsWire.optional(),
+  })
+  .describe('A customer object.')
+
+export const notificationEventV1StripeAppWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    listing: notificationEventV1MarketplaceListingWire,
+    status: notificationEventV1AppStatusWire,
+    type: z.literal('stripe').describe("The app's type is Stripe."),
+    stripe_account_id: z.string().describe('The Stripe account ID.'),
+    livemode: z
+      .boolean()
+      .describe('Livemode, true if the app is in production mode.'),
+    masked_api_key: z
+      .string()
+
+      .describe(
+        'The masked API key. Only shows the first 8 and last 3 characters.',
+      ),
+  })
+  .describe('A installed Stripe app object.')
+
+export const notificationEventV1SandboxAppWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    listing: notificationEventV1MarketplaceListingWire,
+    status: notificationEventV1AppStatusWire,
+    type: z.literal('sandbox').describe("The app's type is Sandbox."),
+  })
+
+  .describe(
+    'Sandbox app can be used for testing OpenMeter features. The app is not creating anything in external systems, thus it is safe to use for verifying OpenMeter features.',
+  )
+
+export const notificationEventV1CustomInvoicingAppWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    listing: notificationEventV1MarketplaceListingWire,
+    status: notificationEventV1AppStatusWire,
+    type: z
+      .literal('custom_invoicing')
+      .describe("The app's type is CustomInvoicing."),
+    enable_draft_sync_hook: z
+      .boolean()
+
+      .describe(
+        'Enable draft.sync hook. If the hook is not enabled, the invoice will be progressed to the next state automatically.',
+      ),
+    enable_issuing_sync_hook: z
+      .boolean()
+
+      .describe(
+        'Enable issuing.sync hook. If the hook is not enabled, the invoice will be progressed to the next state automatically.',
+      ),
+  })
+
+  .describe(
+    'Custom Invoicing app can be used for interface with any invoicing or payment system. This app provides ways to manipulate invoices and payments, however the integration must rely on Notifications API to get notified about invoice changes.',
+  )
+
+export const notificationEventV1InvoiceLineAmountDiscountWire = z
+  .strictObject({
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the charge or discount.'),
+    reason: notificationEventV1BillingDiscountReasonWire,
+    description: z
+      .string()
+      .optional()
+      .describe('Text description as to why the discount was applied.'),
+    external_ids: notificationEventV1InvoiceLineAppExternalIdsWire.optional(),
+    amount: notificationEventV1NumericWire,
+  })
+
+  .describe(
+    'InvoiceLineAmountDiscount represents an amount deducted from the line, and will be applied before taxes.',
+  )
+
+export const notificationEventV1InvoiceLineUsageDiscountWire = z
+  .strictObject({
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the charge or discount.'),
+    reason: notificationEventV1BillingDiscountReasonWire,
+    description: z
+      .string()
+      .optional()
+      .describe('Text description as to why the discount was applied.'),
+    external_ids: notificationEventV1InvoiceLineAppExternalIdsWire.optional(),
+    quantity: notificationEventV1NumericWire,
+    pre_line_period_quantity: notificationEventV1NumericWire.optional(),
+  })
+
+  .describe(
+    'InvoiceLineUsageDiscount represents an usage-based discount applied to the line. The deduction is done before the pricing algorithm is applied.',
+  )
+
+export const notificationEventV1InvoiceDetailedLineRateCardWire = z
+  .strictObject({
+    tax_config: notificationEventV1TaxConfigWire.optional(),
+    price: notificationEventV1FlatPriceWithPaymentTermWire
+      .nullable()
+
+      .describe(
+        'The price of the rate card. When null, the feature or service is free.',
+      ),
+    quantity: notificationEventV1NumericWire.optional(),
+    discounts: notificationEventV1BillingDiscountsWire.optional(),
+  })
+
+  .describe(
+    'InvoiceDetailedLineRateCard represents the rate card (intent) for a flat fee line.',
+  )
+
+export const notificationEventV1PaymentTermsWire = z
+  .discriminatedUnion('type', [
+    notificationEventV1PaymentTermInstantWire,
+    notificationEventV1PaymentTermDueDateWire,
+  ])
+  .describe('PaymentTerms defines the terms for payment.')
 
 export const priceWire = z
   .discriminatedUnion('type', [
@@ -15251,6 +21414,7 @@ export const creditGrantWire = z
     deleted_at: dateTimeWire.optional(),
     funding_method: creditFundingMethodWire,
     currency: billingCurrencyCodeWire,
+    custom_currency: currencyCustomReferenceWire.optional(),
     amount: numericWire,
     purchase: creditGrantPurchaseWire.optional(),
     tax_config: taxCodeConfigWire.optional(),
@@ -15449,6 +21613,133 @@ export const entitlementAccessQueryResponseWire = z
   })
   .describe('Response of the entitlement access query.')
 
+export const notificationRulePagePaginatedResponseWire = z
+  .strictObject({
+    data: z.array(notificationRuleWire),
+    meta: paginatedMetaWire,
+  })
+  .describe('Page paginated response.')
+
+export const notificationEventV1BillingWorkflowCollectionAlignmentWire = z
+  .discriminatedUnion('type', [
+    notificationEventV1BillingWorkflowCollectionAlignmentSubscriptionWire,
+    notificationEventV1BillingWorkflowCollectionAlignmentAnchoredWire,
+  ])
+
+  .describe(
+    'The alignment for collecting the pending line items into an invoice. Defaults to subscription, which means that we are to create a new invoice every time the a subscription period starts (for in advance items) or ends (for in arrears items).',
+  )
+
+export const notificationEventV1FeatureWire = z
+  .strictObject({
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    archived_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was archived.'),
+    key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+
+      .describe(
+        'A key is a unique string that is used to identify a resource.',
+      ),
+    name: z.string().describe('The human-readable name of the feature.'),
+    metadata: notificationEventV1MetadataWire.optional(),
+    meter_slug: z
+      .string()
+      .min(1)
+      .optional()
+
+      .describe(
+        'A key is a unique string that is used to identify a resource.',
+      ),
+    meter_group_by_filters: z
+      .record(z.string(), z.string())
+      .optional()
+
+      .describe(
+        'Optional meter group by filters. Useful if the meter scope is broader than what feature tracks. Example scenario would be a meter tracking all token use with groupBy fields for the model, then the feature could filter for model=gpt-4. ⚠️ **Deprecated**: Use advancedMeterGroupByFilters instead',
+      ),
+    advanced_meter_group_by_filters: z
+      .record(z.string(), notificationEventV1FilterStringWire)
+      .optional()
+
+      .describe(
+        'Optional advanced meter group by filters. You can use this to filter for values of the meter groupBy fields.',
+      ),
+    unit_cost: notificationEventV1FeatureUnitCostWire.optional(),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('Readonly unique ULID identifier.'),
+  })
+
+  .describe(
+    'Represents a feature that can be enabled or disabled for a plan. Used both for product catalog and entitlements.',
+  )
+
+export const notificationEventV1RateCardUsageBasedPriceWire = z
+  .discriminatedUnion('type', [
+    notificationEventV1FlatPriceWithPaymentTermWire,
+    notificationEventV1UnitPriceWithCommitmentsWire,
+    notificationEventV1TieredPriceWithCommitmentsWire,
+    notificationEventV1DynamicPriceWithCommitmentsWire,
+    notificationEventV1PackagePriceWithCommitmentsWire,
+  ])
+  .describe('The price of the usage based rate card.')
+
+export const notificationEventV1AppWire = z
+  .discriminatedUnion('type', [
+    notificationEventV1StripeAppWire,
+    notificationEventV1SandboxAppWire,
+    notificationEventV1CustomInvoicingAppWire,
+  ])
+  .describe('App. One of: stripe')
+
+export const notificationEventV1InvoiceLineDiscountsWire = z
+  .strictObject({
+    amount: z
+      .array(notificationEventV1InvoiceLineAmountDiscountWire)
+      .optional()
+
+      .describe(
+        'Amount based discounts applied to the line. Amount based discounts are deduced from the total price of the line.',
+      ),
+    usage: z
+      .array(notificationEventV1InvoiceLineUsageDiscountWire)
+      .optional()
+
+      .describe(
+        'Usage based discounts applied to the line. Usage based discounts are deduced from the usage of the line before price calculations are applied.',
+      ),
+  })
+
+  .describe(
+    'InvoiceLineDiscounts represents the discounts applied to the invoice line by type.',
+  )
+
+export const notificationEventV1InvoicePaymentTermsWire = z
+  .strictObject({
+    terms: notificationEventV1PaymentTermsWire.optional(),
+  })
+  .describe('Payment contains details as to how the invoice should be paid.')
+
 export const rateCardWire = z
   .strictObject({
     name: z
@@ -15614,6 +21905,191 @@ export const profileAppsWire = z
     payment: appWire,
   })
   .describe('Applications used by a billing profile.')
+
+export const notificationEventV1BillingWorkflowCollectionSettingsWire = z
+  .strictObject({
+    alignment:
+      notificationEventV1BillingWorkflowCollectionAlignmentWire.optional(),
+    interval: z
+      .string()
+      .optional()
+
+      .describe(
+        'This grace period can be used to delay the collection of the pending line items specified in alignment. This is useful, in case of multiple subscriptions having slightly different billing periods.',
+      ),
+  })
+
+  .describe(
+    'Workflow collection specifies how to collect the pending line items for an invoice',
+  )
+
+export const entitlementBalanceThresholdTriggeredV1PayloadWire = z
+  .strictObject({
+    entitlement: notificationEventV1EntitlementMeteredWire,
+    feature: notificationEventV1FeatureWire,
+    subject: notificationEventV1SubjectWire,
+    value: notificationEventV1EntitlementValueWire,
+    customer: notificationEventV1CustomerWire.optional(),
+    threshold: notificationEventV1RuleBalanceThresholdValueWire,
+  })
+
+  .describe(
+    'Payload of `v1.entitlement.balance_threshold.triggered`, the legacy `entitlements.balance.threshold` Event type.',
+  )
+
+export const entitlementUsagePeriodResetV1PayloadWire = z
+  .strictObject({
+    entitlement: notificationEventV1EntitlementMeteredWire,
+    feature: notificationEventV1FeatureWire,
+    subject: notificationEventV1SubjectWire,
+    value: notificationEventV1EntitlementValueWire,
+    customer: notificationEventV1CustomerWire.optional(),
+  })
+
+  .describe(
+    'Payload of `v1.entitlement.usage_period.reset`, the legacy `entitlements.reset` Event type.',
+  )
+
+export const notificationEventV1BalanceThresholdPayloadDataWire = z
+  .strictObject({
+    entitlement: notificationEventV1EntitlementMeteredWire,
+    feature: notificationEventV1FeatureWire,
+    subject: notificationEventV1SubjectWire,
+    value: notificationEventV1EntitlementValueWire,
+    customer: notificationEventV1CustomerWire.optional(),
+    threshold: notificationEventV1RuleBalanceThresholdValueWire,
+  })
+
+  .describe(
+    'Data of the payload for notification event with `entitlements.balance.threshold` type.',
+  )
+
+export const notificationEventV1EntitlementValuePayloadBaseWire = z
+  .strictObject({
+    entitlement: notificationEventV1EntitlementMeteredWire,
+    feature: notificationEventV1FeatureWire,
+    subject: notificationEventV1SubjectWire,
+    value: notificationEventV1EntitlementValueWire,
+    customer: notificationEventV1CustomerWire.optional(),
+  })
+  .describe('Base data for any payload with entitlement entitlement value.')
+
+export const notificationEventV1InvoiceUsageBasedRateCardWire = z
+  .strictObject({
+    feature_key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .optional()
+      .describe('The feature the customer is entitled to use.'),
+    tax_config: notificationEventV1TaxConfigWire.optional(),
+    price: notificationEventV1RateCardUsageBasedPriceWire
+      .nullable()
+
+      .describe(
+        'The price of the rate card. When null, the feature or service is free.',
+      ),
+    discounts: notificationEventV1BillingDiscountsWire.optional(),
+  })
+
+  .describe(
+    'InvoiceUsageBasedRateCard represents the rate card (intent) for an usage-based line.',
+  )
+
+export const notificationEventV1BillingProfileAppsWire = z
+  .strictObject({
+    tax: notificationEventV1AppWire
+      .nullable()
+      .describe('The tax app used for this workflow'),
+    invoicing: notificationEventV1AppWire
+      .nullable()
+      .describe('The invoicing app used for this workflow'),
+    payment: notificationEventV1AppWire
+      .nullable()
+      .describe('The payment app used for this workflow'),
+  })
+
+  .describe(
+    'BillingProfileApps represents the applications used by a billing profile',
+  )
+
+export const notificationEventV1InvoiceDetailedLineWire = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the line.'),
+    managed_by: notificationEventV1InvoiceLineManagedByWire,
+    status: notificationEventV1InvoiceLineStatusWire,
+    discounts: notificationEventV1InvoiceLineDiscountsWire.optional(),
+    credit_allocations: z
+      .array(notificationEventV1InvoiceLineCreditAllocationWire)
+      .optional()
+
+      .describe(
+        'Credit allocations applied to this line. Credits are deducted from the line total before taxes are applied.',
+      ),
+    invoice: notificationEventV1InvoiceReferenceWire.optional(),
+    currency: notificationEventV1CurrencyCodeWire,
+    taxes: z
+      .array(notificationEventV1InvoiceLineTaxItemWire)
+      .optional()
+      .describe('Taxes applied to the invoice totals.'),
+    tax_config: notificationEventV1TaxConfigWire.optional(),
+    totals: notificationEventV1InvoiceTotalsWire,
+    period: notificationEventV1PeriodWire,
+    external_ids: notificationEventV1InvoiceLineAppExternalIdsWire.optional(),
+    subscription:
+      notificationEventV1InvoiceLineSubscriptionReferenceWire.optional(),
+    invoice_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('The time this line item should be invoiced.'),
+    type: z.literal('flat_fee').describe('Type of the line.'),
+    per_unit_amount: notificationEventV1NumericWire.optional(),
+    payment_term: notificationEventV1PricePaymentTermWire.optional(),
+    quantity: notificationEventV1NumericWire.optional(),
+    rate_card: notificationEventV1InvoiceDetailedLineRateCardWire.optional(),
+    category: notificationEventV1InvoiceDetailedLineCostCategoryWire.optional(),
+  })
+
+  .describe(
+    'InvoiceDetailedLine represents a line item that is sold to the customer as a manually added fee.',
+  )
 
 export const subscriptionItemWire = z
   .strictObject({
@@ -15959,6 +22435,126 @@ export const chargeRealizationWire = z
     "A realization run of a charge. `totals` and `detailed_lines` are only populated with the `realization.totals` and `realization.detailed_lines` expands, respectively, since computing them requires re-deriving the run's rated breakdown. `invoice` is an ID reference unless the `realization.invoice` expand is used, which resolves it to the invoice header of the run's booked line: the invoice entity without its `lines` and without the `customer` snapshot (the charge itself already identifies the customer).",
   )
 
+export const notificationEventV1BillingWorkflowWire = z
+  .strictObject({
+    collection:
+      notificationEventV1BillingWorkflowCollectionSettingsWire.optional(),
+    invoicing:
+      notificationEventV1BillingWorkflowInvoicingSettingsWire.optional(),
+    payment: notificationEventV1BillingWorkflowPaymentSettingsWire.optional(),
+    tax: notificationEventV1BillingWorkflowTaxSettingsWire.optional(),
+  })
+  .describe('BillingWorkflow represents the settings for a billing workflow.')
+
+export const notificationEventBalanceThresholdPayloadWire = z
+  .strictObject({
+    id: ulidWire,
+    type: z
+      .literal('entitlements.balance.threshold')
+      .describe('The type of the event.'),
+    timestamp: dateTimeWire,
+    data: entitlementBalanceThresholdTriggeredV1PayloadWire,
+  })
+  .describe('A balance threshold notification event payload.')
+
+export const notificationEventResetPayloadWire = z
+  .strictObject({
+    id: ulidWire,
+    type: z.literal('entitlements.reset').describe('The type of the event.'),
+    timestamp: dateTimeWire,
+    data: entitlementUsagePeriodResetV1PayloadWire,
+  })
+  .describe('An entitlement reset notification event payload.')
+
+export const notificationEventV1InvoiceLineWire = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(256)
+
+      .describe(
+        'Human-readable name for the resource. Between 1 and 256 characters.',
+      ),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('ID of the line.'),
+    managed_by: notificationEventV1InvoiceLineManagedByWire,
+    status: notificationEventV1InvoiceLineStatusWire,
+    discounts: notificationEventV1InvoiceLineDiscountsWire.optional(),
+    credit_allocations: z
+      .array(notificationEventV1InvoiceLineCreditAllocationWire)
+      .optional()
+
+      .describe(
+        'Credit allocations applied to this line. Credits are deducted from the line total before taxes are applied.',
+      ),
+    invoice: notificationEventV1InvoiceReferenceWire.optional(),
+    currency: notificationEventV1CurrencyCodeWire,
+    taxes: z
+      .array(notificationEventV1InvoiceLineTaxItemWire)
+      .optional()
+      .describe('Taxes applied to the invoice totals.'),
+    tax_config: notificationEventV1TaxConfigWire.optional(),
+    totals: notificationEventV1InvoiceTotalsWire,
+    period: notificationEventV1PeriodWire,
+    invoice_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('The time this line item should be invoiced.'),
+    external_ids: notificationEventV1InvoiceLineAppExternalIdsWire.optional(),
+    subscription:
+      notificationEventV1InvoiceLineSubscriptionReferenceWire.optional(),
+    type: z.literal('usage_based').describe('Type of the line.'),
+    price: notificationEventV1RateCardUsageBasedPriceWire.optional(),
+    feature_key: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(new RegExp('^[a-z0-9]+(?:_[a-z0-9]+)*$'))
+      .optional()
+      .describe('The feature that the usage is based on.'),
+    children: z
+      .array(notificationEventV1InvoiceDetailedLineWire)
+      .optional()
+      .describe('The lines detailing the item or service sold.'),
+    rate_card: notificationEventV1InvoiceUsageBasedRateCardWire.optional(),
+    quantity: notificationEventV1NumericWire.optional(),
+    metered_quantity: notificationEventV1NumericWire.optional(),
+    pre_line_period_quantity: notificationEventV1NumericWire.optional(),
+    metered_pre_line_period_quantity: notificationEventV1NumericWire.optional(),
+  })
+
+  .describe(
+    'InvoiceUsageBasedLine represents a line item that is sold to the customer based on usage.',
+  )
+
 export const subscriptionPhaseWire = z
   .strictObject({
     id: ulidWire,
@@ -16242,6 +22838,23 @@ export const profilePagePaginatedResponseWire = z
   })
   .describe('Page paginated response.')
 
+export const notificationEventV1InvoiceWorkflowSettingsWire = z
+  .strictObject({
+    apps: notificationEventV1BillingProfileAppsWire.optional(),
+    source_billing_profile_id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+
+      .describe(
+        'sourceBillingProfileID is the billing profile on which the workflow was based on. The profile is snapshotted on invoice creation, after which it can be altered independently of the profile itself.',
+      ),
+    workflow: notificationEventV1BillingWorkflowWire,
+  })
+
+  .describe(
+    "InvoiceWorkflowSettings represents the workflow settings used by the invoice. This is a clone of the billing profile's workflow settings at the time of invoice creation with customer overrides considered.",
+  )
+
 export const subscriptionWire = z
   .strictObject({
     id: ulidWire,
@@ -16278,6 +22891,7 @@ export const subscriptionWire = z
     billing_cadence: iso8601DurationWire,
     pro_rating_config: subscriptionProRatingConfigWire.optional(),
     billing_anchor: dateTimeWire,
+    billing_starts_at: dateTimeWire.optional(),
     status: subscriptionStatusWire,
     settlement_mode: settlementModeWire.optional(),
     current_period: closedPeriodWire.optional(),
@@ -16292,6 +22906,7 @@ export const subscriptionWire = z
 
 export const subscriptionCreateWire = z.strictObject({
   labels: labelsWire.optional(),
+  billing_starts_at: dateTimeWire.optional(),
   settlement_mode: settlementModeWire.optional(),
   customer: z
     .strictObject({
@@ -16482,6 +23097,345 @@ export const updateInvoiceStandardRequestWire = z
   })
   .describe('InvoiceStandard update request.')
 
+export const invoiceCreatedV1PayloadWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    type: notificationEventV1InvoiceTypeWire,
+    supplier: notificationEventV1BillingPartyWire,
+    customer: notificationEventV1BillingInvoiceCustomerExtendedDetailsWire,
+    number: notificationEventV1InvoiceNumberWire,
+    currency: notificationEventV1CurrencyCodeWire,
+    preceding: z
+      .array(notificationEventV1InvoiceDocumentRefWire)
+      .optional()
+
+      .describe(
+        'Key information regarding previous invoices and potentially details as to why they were corrected.',
+      ),
+    totals: notificationEventV1InvoiceTotalsWire,
+    status: notificationEventV1InvoiceStatusWire,
+    status_details: notificationEventV1InvoiceStatusDetailsWire,
+    issued_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time the invoice was issued. Depending on the status of the invoice this can mean multiple things: - draft, gathering: The time the invoice will be issued based on the workflow settings. - issued: The time the invoice was issued.',
+      ),
+    draft_until: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time until the invoice is in draft status. On draft invoice creation it is calculated from the workflow settings. If manual approval is required, the draftUntil time is set.',
+      ),
+    quantity_snapshoted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time when the quantity snapshots on the invoice lines were taken.',
+      ),
+    collection_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The time when the invoice will be/has been collected.'),
+    due_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Due time of the fulfillment of the invoice (if available).'),
+    period: notificationEventV1PeriodWire.optional(),
+    voided_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time the invoice was voided. If the invoice was voided, this field will be set to the time the invoice was voided.',
+      ),
+    sent_to_customer_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The time the invoice was sent to customer.'),
+    workflow: notificationEventV1InvoiceWorkflowSettingsWire,
+    lines: z
+      .array(notificationEventV1InvoiceLineWire)
+      .optional()
+
+      .describe(
+        'List of invoice lines representing each of the items sold to the customer.',
+      ),
+    payment: notificationEventV1InvoicePaymentTermsWire.optional(),
+    validation_issues: z
+      .array(notificationEventV1ValidationIssueWire)
+      .optional()
+      .describe('Validation issues reported by the invoice workflow.'),
+    external_ids: notificationEventV1InvoiceAppExternalIdsWire.optional(),
+  })
+
+  .describe(
+    'Payload of `v1.billing.invoice.created`, the legacy `invoice.created` Event type: the invoice as it was created.',
+  )
+
+export const invoiceUpdatedV1PayloadWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    type: notificationEventV1InvoiceTypeWire,
+    supplier: notificationEventV1BillingPartyWire,
+    customer: notificationEventV1BillingInvoiceCustomerExtendedDetailsWire,
+    number: notificationEventV1InvoiceNumberWire,
+    currency: notificationEventV1CurrencyCodeWire,
+    preceding: z
+      .array(notificationEventV1InvoiceDocumentRefWire)
+      .optional()
+
+      .describe(
+        'Key information regarding previous invoices and potentially details as to why they were corrected.',
+      ),
+    totals: notificationEventV1InvoiceTotalsWire,
+    status: notificationEventV1InvoiceStatusWire,
+    status_details: notificationEventV1InvoiceStatusDetailsWire,
+    issued_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time the invoice was issued. Depending on the status of the invoice this can mean multiple things: - draft, gathering: The time the invoice will be issued based on the workflow settings. - issued: The time the invoice was issued.',
+      ),
+    draft_until: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time until the invoice is in draft status. On draft invoice creation it is calculated from the workflow settings. If manual approval is required, the draftUntil time is set.',
+      ),
+    quantity_snapshoted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time when the quantity snapshots on the invoice lines were taken.',
+      ),
+    collection_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The time when the invoice will be/has been collected.'),
+    due_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Due time of the fulfillment of the invoice (if available).'),
+    period: notificationEventV1PeriodWire.optional(),
+    voided_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time the invoice was voided. If the invoice was voided, this field will be set to the time the invoice was voided.',
+      ),
+    sent_to_customer_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The time the invoice was sent to customer.'),
+    workflow: notificationEventV1InvoiceWorkflowSettingsWire,
+    lines: z
+      .array(notificationEventV1InvoiceLineWire)
+      .optional()
+
+      .describe(
+        'List of invoice lines representing each of the items sold to the customer.',
+      ),
+    payment: notificationEventV1InvoicePaymentTermsWire.optional(),
+    validation_issues: z
+      .array(notificationEventV1ValidationIssueWire)
+      .optional()
+      .describe('Validation issues reported by the invoice workflow.'),
+    external_ids: notificationEventV1InvoiceAppExternalIdsWire.optional(),
+  })
+
+  .describe(
+    'Payload of `v1.billing.invoice.updated`, the legacy `invoice.updated` Event type: the invoice after the update.',
+  )
+
+export const notificationEventV1InvoiceWire = z
+  .strictObject({
+    id: z
+      .string()
+      .regex(new RegExp('^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$'))
+      .describe('A unique identifier for the resource.'),
+    description: z
+      .string()
+      .max(1024)
+      .optional()
+
+      .describe(
+        'Optional description of the resource. Maximum 1024 characters.',
+      ),
+    metadata: notificationEventV1MetadataWire
+      .nullable()
+      .optional()
+      .describe('Additional metadata for the resource.'),
+    created_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was created.'),
+    updated_at: z
+      .string()
+      .datetime({ offset: true })
+      .describe('Timestamp of when the resource was last updated.'),
+    deleted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Timestamp of when the resource was permanently deleted.'),
+    type: notificationEventV1InvoiceTypeWire,
+    supplier: notificationEventV1BillingPartyWire,
+    customer: notificationEventV1BillingInvoiceCustomerExtendedDetailsWire,
+    number: notificationEventV1InvoiceNumberWire,
+    currency: notificationEventV1CurrencyCodeWire,
+    preceding: z
+      .array(notificationEventV1InvoiceDocumentRefWire)
+      .optional()
+
+      .describe(
+        'Key information regarding previous invoices and potentially details as to why they were corrected.',
+      ),
+    totals: notificationEventV1InvoiceTotalsWire,
+    status: notificationEventV1InvoiceStatusWire,
+    status_details: notificationEventV1InvoiceStatusDetailsWire,
+    issued_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time the invoice was issued. Depending on the status of the invoice this can mean multiple things: - draft, gathering: The time the invoice will be issued based on the workflow settings. - issued: The time the invoice was issued.',
+      ),
+    draft_until: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time until the invoice is in draft status. On draft invoice creation it is calculated from the workflow settings. If manual approval is required, the draftUntil time is set.',
+      ),
+    quantity_snapshoted_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time when the quantity snapshots on the invoice lines were taken.',
+      ),
+    collection_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The time when the invoice will be/has been collected.'),
+    due_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('Due time of the fulfillment of the invoice (if available).'),
+    period: notificationEventV1PeriodWire.optional(),
+    voided_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+
+      .describe(
+        'The time the invoice was voided. If the invoice was voided, this field will be set to the time the invoice was voided.',
+      ),
+    sent_to_customer_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe('The time the invoice was sent to customer.'),
+    workflow: notificationEventV1InvoiceWorkflowSettingsWire,
+    lines: z
+      .array(notificationEventV1InvoiceLineWire)
+      .optional()
+
+      .describe(
+        'List of invoice lines representing each of the items sold to the customer.',
+      ),
+    payment: notificationEventV1InvoicePaymentTermsWire.optional(),
+    validation_issues: z
+      .array(notificationEventV1ValidationIssueWire)
+      .optional()
+      .describe('Validation issues reported by the invoice workflow.'),
+    external_ids: notificationEventV1InvoiceAppExternalIdsWire.optional(),
+  })
+  .describe('Invoice represents an invoice in the system.')
+
 export const subscriptionOrReferenceWire = z
   .union([subscriptionWire, subscriptionReferenceWire])
   .describe('Subscription or reference.')
@@ -16517,6 +23471,24 @@ export const invoiceWire = z
 export const updateInvoiceRequestWire = z
   .discriminatedUnion('type', [updateInvoiceStandardRequestWire])
   .describe('UpdateInvoiceRequest update request.')
+
+export const notificationEventInvoiceCreatedPayloadWire = z
+  .strictObject({
+    id: ulidWire,
+    type: z.literal('invoice.created').describe('The type of the event.'),
+    timestamp: dateTimeWire,
+    data: invoiceCreatedV1PayloadWire,
+  })
+  .describe('An invoice created notification event payload.')
+
+export const notificationEventInvoiceUpdatedPayloadWire = z
+  .strictObject({
+    id: ulidWire,
+    type: z.literal('invoice.updated').describe('The type of the event.'),
+    timestamp: dateTimeWire,
+    data: invoiceUpdatedV1PayloadWire,
+  })
+  .describe('An invoice updated notification event payload.')
 
 export const chargeFlatFeeWire = z
   .strictObject({
@@ -16635,6 +23607,17 @@ export const chargeUsageBasedWire = z
   })
   .describe('A usage-based charge for a customer.')
 
+export const invoiceCustomerChargesResultWire = z
+  .strictObject({
+    invoices: z
+      .array(invoiceWire)
+      .describe('Created standard invoices, one per collected currency.'),
+  })
+
+  .describe(
+    "Result of manually collecting a customer's pending lines into invoices.",
+  )
+
 export const invoicePagePaginatedResponseWire = z
   .strictObject({
     data: z.array(invoiceWire),
@@ -16642,9 +23625,40 @@ export const invoicePagePaginatedResponseWire = z
   })
   .describe('Page paginated response.')
 
+export const notificationEventPayloadWire = z
+  .discriminatedUnion('type', [
+    notificationEventBalanceThresholdPayloadWire,
+    notificationEventResetPayloadWire,
+    notificationEventInvoiceCreatedPayloadWire,
+    notificationEventInvoiceUpdatedPayloadWire,
+  ])
+
+  .describe(
+    'The payload delivered to the channels, discriminated by the event type.',
+  )
+
 export const chargeWire = z
   .discriminatedUnion('type', [chargeFlatFeeWire, chargeUsageBasedWire])
   .describe('Customer charge.')
+
+export const notificationEventWire = z
+  .strictObject({
+    id: ulidWire,
+    type: notificationEventTypeWire,
+    created_at: dateTimeWire,
+    rule: notificationRuleReferenceWire,
+    delivery_status: z
+      .array(notificationEventDeliveryStatusWire)
+
+      .describe(
+        'The delivery status of the event, one entry per channel of the rule.',
+      ),
+    payload: notificationEventPayloadWire,
+  })
+
+  .describe(
+    'A notification event records that a notification rule fired and tracks the delivery of its payload to each channel of the rule. Events are created by the system and cannot be modified.',
+  )
 
 export const chargePagePaginatedResponseWire = z
   .strictObject({
@@ -16653,8 +23667,15 @@ export const chargePagePaginatedResponseWire = z
   })
   .describe('Page paginated response.')
 
+export const notificationEventPagePaginatedResponseWire = z
+  .strictObject({
+    data: z.array(notificationEventWire),
+    meta: paginatedMetaWire,
+  })
+  .describe('Page paginated response.')
+
 export const listMeteringEventsQueryParamsWire = z.object({
-  page: cursorPaginationQueryPageWire.optional(),
+  page: listEventsPageWire.optional(),
   filter: listEventsParamsFilterWire.optional(),
   sort: z
     .string()
@@ -16691,9 +23712,16 @@ export const listMetersQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -16756,9 +23784,16 @@ export const listCustomersQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -16803,6 +23838,15 @@ export const updateCustomerBillingBodyWire =
   upsertCustomerBillingDataRequestWire
 
 export const updateCustomerBillingResponseWire = customerDataWire
+
+export const updateCustomerBillingProfilePathParamsWire = z.object({
+  customerId: ulidWire,
+})
+
+export const updateCustomerBillingProfileBodyWire =
+  upsertCustomerBillingProfileRequestWire
+
+export const updateCustomerBillingProfileResponseWire = customerProfileWire
 
 export const updateCustomerBillingAppDataPathParamsWire = z.object({
   customerId: ulidWire,
@@ -16918,9 +23962,16 @@ export const listCustomerEntitlementsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -16958,9 +24009,16 @@ export const listEntitlementsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17006,9 +24064,16 @@ export const listCustomerEntitlementGrantsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17055,9 +24120,16 @@ export const listGrantsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17113,12 +24185,26 @@ export const listCreditGrantsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
+  sort: z
+    .string()
+    .optional()
+
+    .describe(
+      'Sort credit grants by `created_at`, `updated_at`, `name`, or `id`. Defaults to `created_at desc`. The `asc` suffix is optional when a sort attribute is supplied. Supports one attribute; ties are broken by `id` in the same direction.',
+    ),
   filter: listCreditGrantsParamsFilterWire.optional(),
 })
 
@@ -17189,9 +24275,16 @@ export const listCustomerChargesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17208,7 +24301,7 @@ export const listCustomerChargesQueryParamsWire = z.object({
     .optional()
 
     .describe(
-      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage` and the `totals.realtime` fields. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
+      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based charges and created usage-based charges whose effective service period contains the current time (inclusive start, exclusive end). Deleted charges are skipped. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
     ),
 })
 
@@ -17225,6 +24318,15 @@ export const createCustomerChargesBodyWire = createChargeRequestWire
 
 export const createCustomerChargesResponseWire = chargeWire
 
+export const invoiceCustomerChargesPathParamsWire = z.object({
+  customerId: ulidWire,
+})
+
+export const invoiceCustomerChargesBodyWire = invoiceCustomerChargesInputWire
+
+export const invoiceCustomerChargesResponseWire =
+  invoiceCustomerChargesResultWire
+
 export const createSubscriptionBodyWire = subscriptionCreateWire
 
 export const createSubscriptionResponseWire = subscriptionWire
@@ -17235,9 +24337,16 @@ export const listSubscriptionsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17329,9 +24438,16 @@ export const listSubscriptionAddonsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17371,9 +24487,16 @@ export const listAppsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17410,15 +24533,30 @@ export const updateAppBodyWire = updateAppRequestWire
 
 export const updateAppResponseWire = appWire
 
+export const executeAppActionPathParamsWire = z.object({
+  appId: ulidWire,
+})
+
+export const executeAppActionBodyWire = appActionRequestWire
+
+export const executeAppActionResponseWire = appWire
+
 export const listAppCatalogQueryParamsWire = z.object({
   page: z
     .strictObject({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17445,9 +24583,16 @@ export const listBillingProfilesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17494,9 +24639,16 @@ export const listInvoicesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17557,15 +24709,38 @@ export const snapshotQuantitiesInvoicePathParamsWire = z.object({
 
 export const snapshotQuantitiesInvoiceResponseWire = invoiceWire
 
+export const getChargePathParamsWire = z.object({
+  chargeId: ulidWire,
+})
+
+export const getChargeQueryParamsWire = z.object({
+  expand: z
+    .array(chargesExpandWire)
+    .optional()
+
+    .describe(
+      'Expand related entities, realization details, or real-time usage.',
+    ),
+})
+
+export const getChargeResponseWire = chargeWire
+
 export const listChargesQueryParamsWire = z.object({
   page: z
     .strictObject({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17582,7 +24757,7 @@ export const listChargesQueryParamsWire = z.object({
     .optional()
 
     .describe(
-      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage` and the `totals.realtime` fields. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
+      "Expand full objects for referenced entities. Supported values are: - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based charges and created usage-based charges whose effective service period contains the current time (inclusive start, exclusive end). Deleted charges are skipped. - `customer`: Expand the charge's customer to the complete entity. - `feature`: Expand the charge's feature to the complete entity. - `subscription`: Expand the charge's subscription to the complete entity. - `realization.invoice`: Expand each realization's invoice to the complete entity. - `realization.totals`: Expand each realization run's `totals`. - `realization.detailed_lines`: Expand each realization run's `detailed_lines`.",
     ),
 })
 
@@ -17607,9 +24782,16 @@ export const listTaxCodesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17642,9 +24824,16 @@ export const listCurrenciesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17691,9 +24880,16 @@ export const listCostBasesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17718,9 +24914,16 @@ export const listFeaturesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17783,9 +24986,16 @@ export const listLlmCostPricesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17809,9 +25019,16 @@ export const listLlmCostOverridesQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17836,9 +25053,16 @@ export const listPlansQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17897,9 +25121,16 @@ export const listAddonsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -17962,9 +25193,16 @@ export const listPlanAddonsQueryParamsWire = z.object({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -18022,7 +25260,7 @@ export const updateOrganizationDefaultTaxCodesResponseWire =
   organizationDefaultTaxCodesWire
 
 export const queryEntitlementAccessQueryParamsWire = z.object({
-  page: cursorPaginationQueryPageWire.optional(),
+  page: entitlementAccessQueryPageWire.optional(),
 })
 
 export const queryEntitlementAccessBodyWire = entitlementAccessQueryRequestWire
@@ -18030,15 +25268,22 @@ export const queryEntitlementAccessBodyWire = entitlementAccessQueryRequestWire
 export const queryEntitlementAccessResponseWire =
   entitlementAccessQueryResponseWire
 
-export const listNotificationChannelsQueryParamsWire = z.object({
+export const listBillingNotificationChannelsQueryParamsWire = z.object({
   page: z
     .strictObject({
       size: z.coerce
         .number()
         .int()
+        .gte(1)
+        .lte(1000)
         .optional()
         .describe('The number of items to include per page.'),
-      number: z.coerce.number().int().optional().describe('The page number.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
     })
     .optional()
     .describe('Determines which page of the collection to retrieve.'),
@@ -18052,31 +25297,142 @@ export const listNotificationChannelsQueryParamsWire = z.object({
   filter: listNotificationChannelsParamsFilterWire.optional(),
 })
 
-export const listNotificationChannelsResponseWire = z.strictObject({
+export const listBillingNotificationChannelsResponseWire = z.strictObject({
   data: z.array(notificationChannelWire),
   meta: paginatedMetaWire,
 })
 
-export const createNotificationChannelBodyWire =
+export const createBillingNotificationChannelBodyWire =
   createNotificationChannelRequestWire
 
-export const createNotificationChannelResponseWire = notificationChannelWire
+export const createBillingNotificationChannelResponseWire =
+  notificationChannelWire
 
-export const getNotificationChannelPathParamsWire = z.object({
+export const getBillingNotificationChannelPathParamsWire = z.object({
   notificationChannelId: ulidWire,
 })
 
-export const getNotificationChannelResponseWire = notificationChannelWire
+export const getBillingNotificationChannelResponseWire = notificationChannelWire
 
-export const updateNotificationChannelPathParamsWire = z.object({
+export const updateBillingNotificationChannelPathParamsWire = z.object({
   notificationChannelId: ulidWire,
 })
 
-export const updateNotificationChannelBodyWire =
-  updateNotificationChannelRequestWire
+export const updateBillingNotificationChannelBodyWire =
+  updateBillingNotificationChannelRequestWire
 
-export const updateNotificationChannelResponseWire = notificationChannelWire
+export const updateBillingNotificationChannelResponseWire =
+  notificationChannelWire
 
-export const deleteNotificationChannelPathParamsWire = z.object({
+export const deleteBillingNotificationChannelPathParamsWire = z.object({
   notificationChannelId: ulidWire,
 })
+
+export const listBillingNotificationRulesQueryParamsWire = z.object({
+  page: z
+    .strictObject({
+      size: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .lte(1000)
+        .optional()
+        .describe('The number of items to include per page.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
+    })
+    .optional()
+    .describe('Determines which page of the collection to retrieve.'),
+  sort: z
+    .string()
+    .optional()
+
+    .describe(
+      'Sort notification rules returned in the response. Supported sort attributes are: - `id` (default) - `type` - `created_at` - `updated_at` The `asc` suffix is optional as the default sort order is ascending. The `desc` suffix is used to specify a descending order.',
+    ),
+  filter: listNotificationRulesParamsFilterWire.optional(),
+})
+
+export const listBillingNotificationRulesResponseWire = z.strictObject({
+  data: z.array(notificationRuleWire),
+  meta: paginatedMetaWire,
+})
+
+export const createBillingNotificationRuleBodyWire = notificationRuleRequestWire
+
+export const createBillingNotificationRuleResponseWire = notificationRuleWire
+
+export const getBillingNotificationRulePathParamsWire = z.object({
+  notificationRuleId: ulidWire,
+})
+
+export const getBillingNotificationRuleResponseWire = notificationRuleWire
+
+export const updateBillingNotificationRulePathParamsWire = z.object({
+  notificationRuleId: ulidWire,
+})
+
+export const updateBillingNotificationRuleBodyWire = notificationRuleRequestWire
+
+export const updateBillingNotificationRuleResponseWire = notificationRuleWire
+
+export const deleteBillingNotificationRulePathParamsWire = z.object({
+  notificationRuleId: ulidWire,
+})
+
+export const testBillingNotificationRulePathParamsWire = z.object({
+  notificationRuleId: ulidWire,
+})
+
+export const testBillingNotificationRuleResponseWire = notificationEventWire
+
+export const listBillingNotificationEventsQueryParamsWire = z.object({
+  page: z
+    .strictObject({
+      size: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .lte(1000)
+        .optional()
+        .describe('The number of items to include per page.'),
+      number: z.coerce
+        .number()
+        .int()
+        .gte(1)
+        .optional()
+        .describe('The page number.'),
+    })
+    .optional()
+    .describe('Determines which page of the collection to retrieve.'),
+  sort: z
+    .string()
+    .optional()
+
+    .describe(
+      'Sort notification events returned in the response. Supported sort attributes are: - `created_at` (default) - `id` - `type` The `asc` suffix is optional as the default sort order is ascending. The `desc` suffix is used to specify a descending order. Without a `sort` parameter, events are returned newest first.',
+    ),
+  filter: listNotificationEventsParamsFilterWire.optional(),
+})
+
+export const listBillingNotificationEventsResponseWire = z.strictObject({
+  data: z.array(notificationEventWire),
+  meta: paginatedMetaWire,
+})
+
+export const getBillingNotificationEventPathParamsWire = z.object({
+  notificationEventId: ulidWire,
+})
+
+export const getBillingNotificationEventResponseWire = notificationEventWire
+
+export const resendBillingNotificationEventPathParamsWire = z.object({
+  notificationEventId: ulidWire,
+})
+
+export const resendBillingNotificationEventBodyWire =
+  resendBillingNotificationEventRequestWire

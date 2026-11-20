@@ -118,8 +118,7 @@ func TestAddonService(t *testing.T) {
 				features = append(features, feat)
 			}
 
-			taxcode, err := env.TaxCode.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-				Namespace:   namespace,
+			taxcode := env.TaxCodeEnv.CreateTaxCode(t, namespace, taxcode.CreateTaxCodeInput{
 				Key:         "txcd_10000000",
 				Name:        "Test Tax Code",
 				Description: lo.ToPtr("Test Tax Code"),
@@ -131,7 +130,6 @@ func TestAddonService(t *testing.T) {
 				},
 				Metadata: models.Metadata{"name": "Test Tax Code"},
 			})
-			require.NoErrorf(t, err, "creating tax code must not fail")
 			require.NotNil(t, taxcode, "tax code must not be empty")
 
 			addonV1Input := pctestutils.NewTestAddon(t, namespace, productcatalog.RateCards{
@@ -143,11 +141,8 @@ func TestAddonService(t *testing.T) {
 						Metadata:            models.Metadata{"name": features[0].Name},
 						Feature:             productcatalog.NewFeatureReference(lo.ToPtr(features[0].ID), nil),
 						EntitlementTemplate: productcatalog.NewEntitlementTemplateFrom(productcatalog.BooleanEntitlementTemplate{}),
-						TaxConfig: &productcatalog.TaxConfig{
-							Stripe: &productcatalog.StripeTaxConfig{
-								Code: "txcd_10000000",
-							},
-							TaxCodeID: lo.ToPtr(taxcode.ID),
+						TaxConfig: &productcatalog.TaxCodeConfig{
+							TaxCodeID: taxcode.ID,
 						},
 						Price: productcatalog.NewPriceFrom(productcatalog.TieredPrice{
 							Mode: productcatalog.VolumeTieredPrice,
@@ -227,11 +222,8 @@ func TestAddonService(t *testing.T) {
 								Description: lo.ToPtr("RateCard 1"),
 								Metadata:    models.Metadata{"name": features[0].Name},
 								Feature:     productcatalog.NewFeatureReference(nil, lo.ToPtr(features[0].Key)),
-								TaxConfig: &productcatalog.TaxConfig{
-									Stripe: &productcatalog.StripeTaxConfig{
-										Code: "txcd_10000000",
-									},
-									TaxCodeID: lo.ToPtr(taxcode.ID),
+								TaxConfig: &productcatalog.TaxCodeConfig{
+									TaxCodeID: taxcode.ID,
 								},
 								Price: productcatalog.NewPriceFrom(
 									productcatalog.FlatPrice{
@@ -249,11 +241,8 @@ func TestAddonService(t *testing.T) {
 								Metadata:            models.Metadata{"name": features[1].Name},
 								Feature:             productcatalog.NewFeatureReference(lo.ToPtr(features[1].ID), nil),
 								EntitlementTemplate: productcatalog.NewEntitlementTemplateFrom(productcatalog.BooleanEntitlementTemplate{}),
-								TaxConfig: &productcatalog.TaxConfig{
-									Stripe: &productcatalog.StripeTaxConfig{
-										Code: "txcd_10000000",
-									},
-									TaxCodeID: lo.ToPtr(taxcode.ID),
+								TaxConfig: &productcatalog.TaxCodeConfig{
+									TaxCodeID: taxcode.ID,
 								},
 								Price: productcatalog.NewPriceFrom(productcatalog.TieredPrice{
 									Mode: productcatalog.VolumeTieredPrice,

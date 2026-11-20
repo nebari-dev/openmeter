@@ -21,7 +21,7 @@ type Pricer interface {
 }
 
 type PricerCalculateInput struct {
-	rating.StandardLineAccessor
+	rating.LegacyProgressivelyBillableLineAccessor
 	CurrencyCalculator currencyx.Currency
 
 	FullProgressivelyBilledServicePeriod timeutil.ClosedPeriod
@@ -38,7 +38,7 @@ func (i PricerCalculateInput) Validate() error {
 		return fmt.Errorf("full service period is required")
 	}
 
-	if i.StandardLineAccessor == nil {
+	if i.LegacyProgressivelyBillableLineAccessor == nil {
 		return fmt.Errorf("standard line accessor is required")
 	}
 
@@ -60,6 +60,7 @@ func (i PricerCalculateInput) IsLastInPeriod() bool {
 	}
 
 	servicePeriod := i.GetServicePeriod()
+
 	return servicePeriod.To.Equal(i.FullProgressivelyBilledServicePeriod.To)
 }
 
@@ -70,5 +71,6 @@ func (i PricerCalculateInput) IsFirstInPeriod() bool {
 	}
 
 	servicePeriod := i.GetServicePeriod()
+
 	return servicePeriod.From.Equal(i.FullProgressivelyBilledServicePeriod.From)
 }

@@ -6,9 +6,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/meter"
@@ -19,8 +19,8 @@ import (
 
 type (
 	ListMetersRequest  = meter.ListMetersParams
-	ListMetersResponse = response.PagePaginationResponse[api.Meter]
-	ListMetersParams   = api.ListMetersParams
+	ListMetersResponse = response.PagePaginationResponse[apiv3models.Meter]
+	ListMetersParams   = apiv3models.ListMetersParams
 	ListMetersHandler  httptransport.HandlerWithArgs[ListMetersRequest, ListMetersResponse, ListMetersParams]
 )
 
@@ -62,6 +62,7 @@ func (h *handler) ListMeters() ListMetersHandler {
 						{Field: "filter[key]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Key = key
 
 				name, err := filters.FromAPIFilterString(params.Filter.Name)
@@ -70,6 +71,7 @@ func (h *handler) ListMeters() ListMetersHandler {
 						{Field: "filter[name]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Name = name
 			}
 
@@ -80,10 +82,12 @@ func (h *handler) ListMeters() ListMetersHandler {
 						{Field: "sort", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				orderBy, err := FromAPIMeterSortField(ctx, sort.Field)
 				if err != nil {
 					return ListMetersRequest{}, err
 				}
+
 				req.OrderBy = orderBy
 				req.Order = sort.Order.ToSortxOrder()
 			}
@@ -96,7 +100,7 @@ func (h *handler) ListMeters() ListMetersHandler {
 				return ListMetersResponse{}, err
 			}
 
-			items := lo.Map(resp.Items, func(item meter.Meter, _ int) api.Meter {
+			items := lo.Map(resp.Items, func(item meter.Meter, _ int) apiv3models.Meter {
 				return ToAPIMeter(item)
 			})
 

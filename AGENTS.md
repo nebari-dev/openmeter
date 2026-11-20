@@ -14,18 +14,26 @@
   pre-commit hook.
 - Never run multiple `nix develop` commands concurrently in one worktree; they
   mutate shared `.devenv/` state.
-- Dev shells share downloaded Go modules through `$HOME/go/pkg/mod`. `GOPATH`,
-  `GOCACHE`, and installed tools remain per-worktree under `.devenv/state/go`.
-  Existing worktree module caches are not migrated or removed automatically;
-  clean them up separately after confirming no active shell uses them.
+- Dev shells share downloaded Go modules through `$HOME/go/pkg/mod` and the Go
+  build cache through `$HOME/go/cache`, namespaced by Go toolchain. Entering
+  the shell stamps that toolchain's `.last-used` and warns about toolchain
+  caches unused for more than 30 days; it never deletes them. When you see that
+  warning, relay it and ask the user to remove the listed caches. Do not point
+  `GOCACHE` at a worktree or temp directory. `GOPATH` and installed tools
+  remain per-worktree under `.devenv/state/go`. Existing worktree module and
+  build caches there are not migrated or removed automatically; clean them up
+  separately after confirming no active shell uses them.
 - `.nvmrc` is the GitHub Actions source of truth for Node. Keep it aligned with
   `node -v` in the Nix `.#ci` shell.
 - For slow or noisy commands, save complete output to a temporary log outside the repository, preserve and report the exit status and log path, inspect bounded slices, and never rerun solely because displayed output was truncated.
 
 ## Repository invariants
 
-- The repository has three Go modules: the production root, the publishable
-  `api/v3/client` SDK, and the test-only `e2e` module.
+- The repository has four Go modules: the production root, `collector`, the
+  publishable `api/v3/client` SDK, and the test-only `e2e` module.
+- Shared package imports can expand nested module dependency graphs. Run
+  `make mod` and module-aware checks for affected consumers; root-module checks
+  do not validate `collector` or `e2e` dependency metadata.
 - The root module must never require `api/v3/client`. The nested SDK is not
   independently tagged, and local `replace` directives are invisible to
   downstream consumers.
@@ -55,6 +63,9 @@
   propagation. Propagate the caller context or remove an unnecessary context
   parameter.
 - Never use `panic` in non-test code. Return and propagate errors.
+- Map external provider failures to explicitly approved public HTTP messages;
+  never return raw provider error text. Preserve the original cause for internal
+  diagnostics.
 - Production constructors must receive a `*slog.Logger`; do not fall back to
   `slog.Default()`.
 - Prefer standard `slices` and `maps`, then `github.com/samber/lo` where it is
@@ -63,6 +74,15 @@
 - Mapping helpers between API, domain, and DB representations follow
   [Type Translation Naming](docs/development/type-conversions.md). Use
   `map`/`mapped`, not `project`/`projected`, for representation translation.
+- `alpacadecimal.Decimal.Div` can round: its fallback uses `DivRound` at
+  `DivisionPrecision` (16 decimal places by default), with ties away from zero.
+  Do not use `Div` before exact floor/ceiling, remainder comparisons, or boundary
+  decisions. For example, dividing decimal `9.99999999999999999` by `10` rounds
+  to `1` while the exact remainder is non-zero. Use `QuoRem(divisor, precision)`
+  for a truncating quotient and exact remainder, accounting for signs when
+  applying floor or ceiling. Apply the intended rounding once at the owning
+  precision; increasing global division precision only moves the boundary and
+  is not a fix.
 
 ## Testing conventions
 
@@ -99,6 +119,21 @@ See [Testing](docs/development/testing.md) for harness patterns and examples.
 - Preserve explanatory comments during refactors unless the change makes them
   false or misleading.
 - Keep project documentation short enough that humans will read it.
+- Write comments like you're explaining the code to a teammate: plain words,
+  concrete reasons, no formal filler. Keep the useful explanation:
+
+  Bad:
+  ```go
+  // scopedEntries applies the account, route, provenance, and whole-history
+  // exclusions shared by both branches. AsOf is left to each branch: filtering
+  // here would hide future postings whose balance impact must be preserved.
+  ```
+
+  Good:
+  ```go
+  // Apply the shared filters, but keep entries after AsOf: we need those to see
+  // how low the balance gets later.
+  ```
 
 ## Further guidance
 

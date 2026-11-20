@@ -8,12 +8,13 @@ import (
 	"github.com/oapi-codegen/nullable"
 	"github.com/samber/lo"
 
-	apilegacy "github.com/openmeterio/openmeter/api"
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
 	appcustominvoicing "github.com/openmeterio/openmeter/openmeter/app/custominvoicing"
 	appstripe "github.com/openmeterio/openmeter/openmeter/app/stripe"
+	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 )
 
@@ -26,61 +27,61 @@ import (
 // goverter:enum:unknown @error
 // goverter:extend ResolveIDFromCustomerId
 var (
-	FromAPIBillingAppStripeCreateCheckoutSessionRequestOptions func(source api.BillingAppStripeCreateCheckoutSessionRequestOptions) (apilegacy.CreateStripeCheckoutSessionRequestOptions, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionRequestOptions func(source apiv3models.BillingAppStripeCreateCheckoutSessionRequestOptions) (apiv1models.CreateStripeCheckoutSessionRequestOptions, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionBillingAddressCollectionAuto CreateStripeCheckoutSessionBillingAddressCollectionAuto
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionBillingAddressCollectionRequired CreateStripeCheckoutSessionBillingAddressCollectionRequired
-	FromAPIBillingAppStripeCreateCheckoutSessionBillingAddressCollection func(source api.BillingAppStripeCreateCheckoutSessionBillingAddressCollection) (apilegacy.CreateStripeCheckoutSessionBillingAddressCollection, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionBillingAddressCollection func(source apiv3models.BillingAppStripeCreateCheckoutSessionBillingAddressCollection) (apiv1models.CreateStripeCheckoutSessionBillingAddressCollection, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPositionAuto CreateStripeCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPositionAuto
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPositionHidden CreateStripeCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPositionHidden
-	FromAPIBillingAppStripeCreateCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPosition func(source api.BillingAppStripeCreateCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPosition) (apilegacy.CreateStripeCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPosition, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPosition func(source apiv3models.BillingAppStripeCreateCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPosition) (apiv1models.CreateStripeCheckoutSessionConsentCollectionPaymentMethodReuseAgreementPosition, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionConsentCollectionPromotionsAuto CreateStripeCheckoutSessionConsentCollectionPromotionsAuto
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionConsentCollectionPromotionsNone CreateStripeCheckoutSessionConsentCollectionPromotionsNone
-	FromAPIBillingAppStripeCreateCheckoutSessionConsentCollectionPromotions func(source api.BillingAppStripeCreateCheckoutSessionConsentCollectionPromotions) (apilegacy.CreateStripeCheckoutSessionConsentCollectionPromotions, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionConsentCollectionPromotions func(source apiv3models.BillingAppStripeCreateCheckoutSessionConsentCollectionPromotions) (apiv1models.CreateStripeCheckoutSessionConsentCollectionPromotions, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionConsentCollectionTermsOfServiceNone CreateStripeCheckoutSessionConsentCollectionTermsOfServiceNone
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionConsentCollectionTermsOfServiceRequired CreateStripeCheckoutSessionConsentCollectionTermsOfServiceRequired
-	FromAPIBillingAppStripeCreateCheckoutSessionConsentCollectionTermsOfService func(source api.BillingAppStripeCreateCheckoutSessionConsentCollectionTermsOfService) (apilegacy.CreateStripeCheckoutSessionConsentCollectionTermsOfService, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionConsentCollectionTermsOfService func(source apiv3models.BillingAppStripeCreateCheckoutSessionConsentCollectionTermsOfService) (apiv1models.CreateStripeCheckoutSessionConsentCollectionTermsOfService, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionCustomerUpdateBehaviorAuto CreateStripeCheckoutSessionCustomerUpdateBehaviorAuto
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionCustomerUpdateBehaviorNever CreateStripeCheckoutSessionCustomerUpdateBehaviorNever
-	FromAPIBillingAppStripeCreateCheckoutSessionCustomerUpdateBehavior func(source api.BillingAppStripeCreateCheckoutSessionCustomerUpdateBehavior) (apilegacy.CreateStripeCheckoutSessionCustomerUpdateBehavior, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionCustomerUpdateBehavior func(source apiv3models.BillingAppStripeCreateCheckoutSessionCustomerUpdateBehavior) (apiv1models.CreateStripeCheckoutSessionCustomerUpdateBehavior, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionRedirectOnCompletionAlways CreateStripeCheckoutSessionRedirectOnCompletionAlways
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionRedirectOnCompletionIfRequired CreateStripeCheckoutSessionRedirectOnCompletionIfRequired
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionRedirectOnCompletionNever CreateStripeCheckoutSessionRedirectOnCompletionNever
-	FromAPIBillingAppStripeCreateCheckoutSessionRedirectOnCompletion func(source api.BillingAppStripeCreateCheckoutSessionRedirectOnCompletion) (apilegacy.CreateStripeCheckoutSessionRedirectOnCompletion, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionRedirectOnCompletion func(source apiv3models.BillingAppStripeCreateCheckoutSessionRedirectOnCompletion) (apiv1models.CreateStripeCheckoutSessionRedirectOnCompletion, error)
 
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionTaxIdCollectionRequiredIfSupported CreateCheckoutSessionTaxIdCollectionRequiredIfSupported
 	// goverter:enum:map BillingAppStripeCreateCheckoutSessionTaxIdCollectionRequiredNever CreateCheckoutSessionTaxIdCollectionRequiredNever
-	FromAPIBillingAppStripeCreateCheckoutSessionTaxIdCollectionRequired func(source api.BillingAppStripeCreateCheckoutSessionTaxIdCollectionRequired) (apilegacy.CreateCheckoutSessionTaxIdCollectionRequired, error)
+	FromAPIBillingAppStripeCreateCheckoutSessionTaxIdCollectionRequired func(source apiv3models.BillingAppStripeCreateCheckoutSessionTaxIdCollectionRequired) (apiv1models.CreateCheckoutSessionTaxIdCollectionRequired, error)
 
 	// goverter:enum:map BillingAppStripeCheckoutSessionUIModeEmbedded CheckoutSessionUIModeEmbedded
 	// goverter:enum:map BillingAppStripeCheckoutSessionUIModeHosted CheckoutSessionUIModeHosted
-	FromAPIBillingAppStripeCheckoutSessionUIMode func(source api.BillingAppStripeCheckoutSessionUIMode) (apilegacy.CheckoutSessionUIMode, error)
+	FromAPIBillingAppStripeCheckoutSessionUIMode func(source apiv3models.BillingAppStripeCheckoutSessionUIMode) (apiv1models.CheckoutSessionUIMode, error)
 
 	// goverter:map Configuration.ID ConfigurationId
-	ToAPIBillingAppStripeCreateCustomerPortalSessionResult func(portalSession appstripe.StripePortalSession) api.BillingAppStripeCreateCustomerPortalSessionResult
+	ToAPIBillingAppStripeCreateCustomerPortalSessionResult func(portalSession appstripe.StripePortalSession) apiv3models.BillingAppStripeCreateCustomerPortalSessionResult
 
 	// goverter:autoMap StripeCheckoutSession
-	ToAPIBillingAppStripeCreateCheckoutSessionResult func(source appstripe.CreateCheckoutSessionOutput) api.BillingAppStripeCreateCheckoutSessionResult
+	ToAPIBillingAppStripeCreateCheckoutSessionResult func(source appstripe.CreateCheckoutSessionOutput) apiv3models.BillingAppStripeCreateCheckoutSessionResult
 )
 
 func ResolveIDFromCustomerId(namespacedID customer.CustomerID) string {
 	return namespacedID.ID
 }
 
-func fromAPIBillingAppCustomerData(ctx context.Context, application app.App, data app.CustomerData) (*api.BillingAppCustomerData, error) {
-	appData := &api.BillingAppCustomerData{}
+func fromAPIBillingAppCustomerData(ctx context.Context, application app.App, data app.CustomerData) (*apiv3models.BillingAppCustomerData, error) {
+	appData := &apiv3models.BillingAppCustomerData{}
 
 	switch application.GetType() {
 	case app.AppTypeStripe:
 		// data is nil when the customer has no stripe data for the configured
 		// payment app
 		if data == nil {
-			appData.Stripe = nullable.NewNullNullable[api.BillingAppCustomerDataStripe]()
+			appData.Stripe = nullable.NewNullNullable[apiv3models.BillingAppCustomerDataStripe]()
 			return appData, nil
 		}
 
@@ -92,15 +93,16 @@ func fromAPIBillingAppCustomerData(ctx context.Context, application app.App, dat
 		}
 
 		// TODO: we don't have metadata on the stripe customer data yet
-		appData.Stripe = nullable.NewNullableWithValue(api.BillingAppCustomerDataStripe{
+		appData.Stripe = nullable.NewNullableWithValue(apiv3models.BillingAppCustomerDataStripe{
 			CustomerId:             &stripeData.StripeCustomerID,
 			DefaultPaymentMethodId: stripeData.StripeDefaultPaymentMethodID,
 		})
+
 		return appData, nil
 
 	case app.AppTypeCustomInvoicing:
 		if data == nil {
-			appData.ExternalInvoicing = nullable.NewNullNullable[api.BillingAppCustomerDataExternalInvoicing]()
+			appData.ExternalInvoicing = nullable.NewNullNullable[apiv3models.BillingAppCustomerDataExternalInvoicing]()
 			return appData, nil
 		}
 
@@ -109,9 +111,10 @@ func fromAPIBillingAppCustomerData(ctx context.Context, application app.App, dat
 			return nil, apierrors.NewInternalError(ctx, fmt.Errorf("custom invoicing app returned %T, want appcustominvoicing.CustomerData", data))
 		}
 
-		appData.ExternalInvoicing = nullable.NewNullableWithValue(api.BillingAppCustomerDataExternalInvoicing{
-			Labels: (*api.Labels)(lo.ToPtr(invoicingData.Metadata.ToMap())),
+		appData.ExternalInvoicing = nullable.NewNullableWithValue(apiv3models.BillingAppCustomerDataExternalInvoicing{
+			Labels: (*apiv3models.Labels)(lo.ToPtr(invoicingData.Metadata.ToMap())),
 		})
+
 		return appData, nil
 
 	case app.AppTypeSandbox:
@@ -121,4 +124,17 @@ func fromAPIBillingAppCustomerData(ctx context.Context, application app.App, dat
 	default:
 		return nil, apierrors.NewInternalError(ctx, fmt.Errorf("unsupported app type: %s", application.GetType()))
 	}
+}
+
+func mapCustomerBillingProfileToAPI(customerProfile billing.CustomerBillingProfile) apiv3models.BillingCustomerProfile {
+	profile := apiv3models.BillingCustomerProfile{
+		EffectiveBillingProfile: apiv3models.BillingProfileReference{Id: customerProfile.EffectiveProfile.ID},
+	}
+	if customerProfile.AssignedProfile != nil {
+		profile.BillingProfile = nullable.NewNullableWithValue(apiv3models.BillingProfileReference{
+			Id: customerProfile.AssignedProfile.ProfileID,
+		})
+	}
+
+	return profile
 }

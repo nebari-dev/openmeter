@@ -230,6 +230,7 @@ func (a attributesWrapper) Error() string {
 	for key := range a.attributes {
 		keys = append(keys, key)
 	}
+
 	slices.Sort(keys)
 
 	attributes := make([]string, 0, len(keys))
@@ -308,6 +309,11 @@ func WrapAsValidationIssue(err error, options ...WrapAsValidationIssueOption) er
 }
 
 type ValidationIssues []ValidationIssue
+
+// ValidationIssueAppender adds issues without replacing existing issues or components.
+type ValidationIssueAppender interface {
+	AppendValidationIssues(issues ...ValidationIssue)
+}
 
 func (v ValidationIssues) AllWarnings() bool {
 	return len(v) > 0 && !slices.ContainsFunc(v, func(issue ValidationIssue) bool {
@@ -523,14 +529,33 @@ func toValidationIssue(err error, fieldPrefix string, component ComponentName, m
 				Attributes: mergedAttributes,
 			},
 		}, nil
+	case models.Error:
+		// Generic errors remain system errors unless explicitly converted with WrapAsValidationIssue.
+		if ordinaryErrorSeverity == "" {
+			return nil, err
+		}
+
+		// Conversion is explicit at this boundary; keep the structured context.
+		severity := models.ErrorSeverityCritical
+		if ordinaryErrorSeverity == ValidationIssueSeverityWarning {
+			severity = models.ErrorSeverityWarning
+		}
+
+		return modelErrorAsBillingValidationIssue(errT.WithSeverity(severity), fieldPrefix, component, messagePrefix, attributes)
+	case *models.Error:
+		if errT == nil {
+			return nil, nil
+		}
+
+		return toValidationIssue(*errT, fieldPrefix, component, messagePrefix, attributes, ordinaryErrorSeverity)
 	case models.ValidationIssue:
-		return modelValidationIssueAsBillingValidationIssue(errT, fieldPrefix, component, messagePrefix, attributes)
+		return modelErrorAsBillingValidationIssue(models.Error(errT), fieldPrefix, component, messagePrefix, attributes)
 	case *models.ValidationIssue:
 		if errT == nil {
 			return nil, nil
 		}
 
-		return modelValidationIssueAsBillingValidationIssue(*errT, fieldPrefix, component, messagePrefix, attributes)
+		return modelErrorAsBillingValidationIssue(models.Error(*errT), fieldPrefix, component, messagePrefix, attributes)
 	}
 
 	switch errT := err.(type) {
@@ -541,6 +566,7 @@ func toValidationIssue(err error, fieldPrefix string, component ComponentName, m
 			if err != nil {
 				return nil, err
 			}
+
 			if len(out) > 0 {
 				issues = append(issues, out...)
 			}
@@ -571,7 +597,7 @@ func toValidationIssue(err error, fieldPrefix string, component ComponentName, m
 	}
 }
 
-func modelValidationIssueAsBillingValidationIssue(issue models.ValidationIssue, fieldPrefix string, component ComponentName, messagePrefix string, attributes models.Annotations) ([]ValidationIssue, error) {
+func modelErrorAsBillingValidationIssue(issue models.Error, fieldPrefix string, component ComponentName, messagePrefix string, attributes models.Annotations) ([]ValidationIssue, error) {
 	issueComponent := component
 	if issueComponent == "" {
 		issueComponent = ComponentName(issue.Component())
@@ -682,6 +708,7 @@ func (r *ValidationIssueRecorder) Record(err error, options ...ValidationIssueRe
 	for _, option := range options {
 		option.apply(&appliedOptions)
 	}
+
 	err = appliedOptions.wrap(err)
 
 	if !IsValidationIssueOnly(err) {
@@ -690,6 +717,7 @@ func (r *ValidationIssueRecorder) Record(err error, options ...ValidationIssueRe
 
 	// At this point we know that the errors are all validation issues
 	r.issues = append(r.issues, err)
+
 	return nil
 }
 

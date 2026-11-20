@@ -26,7 +26,7 @@ func main() {
 	v, flags := viper.NewWithOptions(viper.WithDecodeHook(config.DecodeHook())), pflag.NewFlagSet("OpenMeter", pflag.ExitOnError)
 	ctx := context.Background()
 
-	config.SetViperDefaults(v, flags)
+	config.SetViperDefaultsWithMetadata(v, flags, config.MetadataConfiguration{Revision: revision, Version: version})
 
 	flags.String("config", "", "Configuration file")
 	flags.Bool("version", false, "Show version information")
@@ -89,14 +89,18 @@ func main() {
 	}
 
 	// Create  subscriber
+	subscriptionStatus := watermillkafka.NewSubscriptionStatus([]string{conf.Events.SystemEvents.Topic})
 	wmSubscriber, err := watermillkafka.NewSubscriber(watermillkafka.SubscriberOptions{
-		Broker:            app.BrokerOptions,
-		ConsumerGroupName: conf.Notification.Consumer.ConsumerGroupName,
+		Broker:             app.BrokerOptions,
+		ConsumerGroupName:  conf.Notification.Consumer.ConsumerGroupName,
+		SubscriptionStatus: subscriptionStatus,
 	})
 	if err != nil {
 		logger.Error("failed to initialize Kafka subscriber", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	app.TelemetryServer.Handle("/healthz/subscriptions", subscriptionStatus)
 
 	// Initialize consumer
 	consumerOptions := consumer.Options{
@@ -113,6 +117,8 @@ func main() {
 		Marshaler: app.EventPublisher.Marshaler(),
 
 		Notification: app.Notification,
+
+		TaxCodeResolver: app.TaxCodeResolver,
 
 		Logger: logger,
 	}

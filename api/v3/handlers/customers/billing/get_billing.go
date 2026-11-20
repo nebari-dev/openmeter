@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/customer"
@@ -17,7 +17,7 @@ type (
 	GetCustomerBillingRequest struct {
 		CustomerID customer.CustomerID
 	}
-	GetCustomerBillingResponse = api.BillingCustomerData
+	GetCustomerBillingResponse = apiv3models.BillingCustomerData
 	GetCustomerBillingParams   = string
 	GetCustomerBillingHandler  httptransport.HandlerWithArgs[GetCustomerBillingRequest, GetCustomerBillingResponse, GetCustomerBillingParams]
 )
@@ -39,9 +39,9 @@ func (h *handler) GetCustomerBilling() GetCustomerBillingHandler {
 		},
 		func(ctx context.Context, request GetCustomerBillingRequest) (GetCustomerBillingResponse, error) {
 			resp := GetCustomerBillingResponse{}
-			override, err := h.billingService.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+			override, err := h.billingService.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 				Customer: request.CustomerID,
-				Expand: billing.CustomerOverrideExpand{
+				Expand: billing.CustomerBillingProfileExpand{
 					Apps: true,
 				},
 			})
@@ -51,7 +51,7 @@ func (h *handler) GetCustomerBilling() GetCustomerBillingHandler {
 
 			// TODO: Only one app ID can be in the billing profile right now.
 			// We pick the payment app for now.
-			application := override.MergedProfile.Apps.Payment
+			application := override.EffectiveProfile.Apps.Payment
 			data, err := application.GetCustomerData(ctx, app.GetAppInstanceCustomerDataInput{
 				CustomerID: request.CustomerID,
 			})
@@ -70,11 +70,12 @@ func (h *handler) GetCustomerBilling() GetCustomerBillingHandler {
 				return resp, err
 			}
 
-			return GetCustomerBillingResponse{
-				BillingProfile: &api.BillingProfileReference{
-					Id: override.MergedProfile.ID,
-				},
-				AppData: apiAppData,
+			profile := mapCustomerBillingProfileToAPI(override)
+
+			return apiv3models.BillingCustomerData{
+				BillingProfile:          profile.BillingProfile,
+				EffectiveBillingProfile: profile.EffectiveBillingProfile,
+				AppData:                 apiAppData,
 			}, nil
 		},
 		commonhttp.JSONResponseEncoderWithStatus[GetCustomerBillingResponse](http.StatusOK),

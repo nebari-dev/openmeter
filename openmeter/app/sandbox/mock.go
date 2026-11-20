@@ -56,6 +56,10 @@ func (m *MockApp) UpdateAppConfig(ctx context.Context, input app.AppConfigUpdate
 	return nil
 }
 
+func (m *MockApp) ExecuteAction(appID app.AppID, input app.ExecuteAppActionInput) error {
+	return app.NewAppActionUnsupportedError(appID, input.Type)
+}
+
 func (m *MockApp) ValidateCustomer(appID string, customer *customer.Customer, capabilities []app.CapabilityType) error {
 	m.validateCustomerCalled = true
 	return m.validateCustomerResponse.MustGet()
@@ -106,6 +110,10 @@ func (m *MockApp) FinalizeInvoiceCallCount() int {
 func (m *MockApp) DeleteStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) error {
 	m.deleteInvoiceCalls++
 	return m.deleteInvoiceResponse.MustGet()
+}
+
+func (m *MockApp) WouldStandardInvoiceBeEmpty(billing.StandardInvoice) (bool, error) {
+	return false, nil
 }
 
 func (m *MockApp) OnDeleteStandardInvoice(err error) {
@@ -195,6 +203,10 @@ func (m *mockAppInstance) UpdateAppConfig(ctx context.Context, input app.AppConf
 	return m.parent.UpdateAppConfig(ctx, input)
 }
 
+func (m *mockAppInstance) ExecuteAction(ctx context.Context, input app.ExecuteAppActionInput) error {
+	return m.parent.ExecuteAction(m.GetID(), input)
+}
+
 func (m *mockAppInstance) ValidateCustomer(ctx context.Context, customer *customer.Customer, capabilities []app.CapabilityType) error {
 	return m.parent.ValidateCustomer(m.GetID().ID, customer, capabilities)
 }
@@ -213,6 +225,10 @@ func (m *mockAppInstance) FinalizeStandardInvoice(ctx context.Context, invoice b
 
 func (m *mockAppInstance) DeleteStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) error {
 	return m.parent.DeleteStandardInvoice(ctx, invoice)
+}
+
+func (m *mockAppInstance) WouldStandardInvoiceBeEmpty(invoice billing.StandardInvoice) (bool, error) {
+	return m.parent.WouldStandardInvoiceBeEmpty(invoice)
 }
 
 func (m *mockAppInstance) GetEventAppData() (app.EventAppData, error) {

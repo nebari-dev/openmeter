@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"time"
@@ -15,7 +16,6 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/notificationchannel"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/notificationevent"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/notificationrule"
-	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
@@ -88,7 +88,7 @@ func (_c *NotificationRuleCreate) SetMetadata(v map[string]string) *Notification
 }
 
 // SetType sets the "type" field.
-func (_c *NotificationRuleCreate) SetType(v notification.EventType) *NotificationRuleCreate {
+func (_c *NotificationRuleCreate) SetType(v string) *NotificationRuleCreate {
 	_c.mutation.SetType(v)
 	return _c
 }
@@ -114,7 +114,7 @@ func (_c *NotificationRuleCreate) SetNillableDisabled(v *bool) *NotificationRule
 }
 
 // SetConfig sets the "config" field.
-func (_c *NotificationRuleCreate) SetConfig(v notification.RuleConfig) *NotificationRuleCreate {
+func (_c *NotificationRuleCreate) SetConfig(v jsontext.Value) *NotificationRuleCreate {
 	_c.mutation.SetConfig(v)
 	return _c
 }
@@ -235,11 +235,6 @@ func (_c *NotificationRuleCreate) check() error {
 	if _, ok := _c.mutation.GetType(); !ok {
 		return &ValidationError{Name: "type", err: errors.New(`db: missing required field "NotificationRule.type"`)}
 	}
-	if v, ok := _c.mutation.GetType(); ok {
-		if err := notificationrule.TypeValidator(v); err != nil {
-			return &ValidationError{Name: "type", err: fmt.Errorf(`db: validator failed for field "NotificationRule.type": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.Name(); !ok {
 		return &ValidationError{Name: "name", err: errors.New(`db: missing required field "NotificationRule.name"`)}
 	}
@@ -250,11 +245,6 @@ func (_c *NotificationRuleCreate) check() error {
 	}
 	if _, ok := _c.mutation.Config(); !ok {
 		return &ValidationError{Name: "config", err: errors.New(`db: missing required field "NotificationRule.config"`)}
-	}
-	if v, ok := _c.mutation.Config(); ok {
-		if err := v.Validate(); err != nil {
-			return &ValidationError{Name: "config", err: fmt.Errorf(`db: validator failed for field "NotificationRule.config": %w`, err)}
-		}
 	}
 	return nil
 }
@@ -320,7 +310,7 @@ func (_c *NotificationRuleCreate) createSpec() (*NotificationRule, *sqlgraph.Cre
 		_node.Metadata = value
 	}
 	if value, ok := _c.mutation.GetType(); ok {
-		_spec.SetField(notificationrule.FieldType, field.TypeEnum, value)
+		_spec.SetField(notificationrule.FieldType, field.TypeString, value)
 		_node.Type = value
 	}
 	if value, ok := _c.mutation.Name(); ok {
@@ -520,7 +510,7 @@ func (u *NotificationRuleUpsert) ClearDisabled() *NotificationRuleUpsert {
 }
 
 // SetConfig sets the "config" field.
-func (u *NotificationRuleUpsert) SetConfig(v notification.RuleConfig) *NotificationRuleUpsert {
+func (u *NotificationRuleUpsert) SetConfig(v jsontext.Value) *NotificationRuleUpsert {
 	u.Set(notificationrule.FieldConfig, v)
 	return u
 }
@@ -701,7 +691,7 @@ func (u *NotificationRuleUpsertOne) ClearDisabled() *NotificationRuleUpsertOne {
 }
 
 // SetConfig sets the "config" field.
-func (u *NotificationRuleUpsertOne) SetConfig(v notification.RuleConfig) *NotificationRuleUpsertOne {
+func (u *NotificationRuleUpsertOne) SetConfig(v jsontext.Value) *NotificationRuleUpsertOne {
 	return u.Update(func(s *NotificationRuleUpsert) {
 		s.SetConfig(v)
 	})
@@ -1054,7 +1044,7 @@ func (u *NotificationRuleUpsertBulk) ClearDisabled() *NotificationRuleUpsertBulk
 }
 
 // SetConfig sets the "config" field.
-func (u *NotificationRuleUpsertBulk) SetConfig(v notification.RuleConfig) *NotificationRuleUpsertBulk {
+func (u *NotificationRuleUpsertBulk) SetConfig(v jsontext.Value) *NotificationRuleUpsertBulk {
 	return u.Update(func(s *NotificationRuleUpsert) {
 		s.SetConfig(v)
 	})

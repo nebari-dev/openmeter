@@ -8,6 +8,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/require"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/legacylineage"
@@ -443,6 +444,7 @@ func TestOnUsageBasedPaymentAuthorized(t *testing.T) {
 			requireLedgerBookedAtEqual(t, eventTime, bookedAt)
 			requireLedgerBookedAtNotEqual(t, charge.Intent.GetEffectiveInvoiceAt(), bookedAt)
 		}
+
 		for _, entry := range env.TransactionGroupEntries(t, ref.TransactionGroupID) {
 			require.Nil(t, entry.SourceChargeID)
 			require.NotNil(t, entry.SpendChargeID)
@@ -528,6 +530,7 @@ func TestOnUsageBasedPaymentSettled(t *testing.T) {
 			requireLedgerBookedAtEqual(t, eventTime, bookedAt)
 			requireLedgerBookedAtNotEqual(t, settledCharge.Intent.GetEffectiveInvoiceAt(), bookedAt)
 		}
+
 		for _, entry := range env.TransactionGroupEntries(t, ref.TransactionGroupID) {
 			require.Nil(t, entry.SourceChargeID)
 			require.NotNil(t, entry.SpendChargeID)
@@ -577,6 +580,7 @@ func newUsageBasedHandlerTestEnv(t *testing.T) *usageBasedHandlerTestEnv {
 	advanceService := advancetestutils.NewService(t, base.Deps, breakageService)
 
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:   metricnoop.NewMeterProvider().Meter("test"),
 		Logger:  omtestutils.NewDiscardLogger(t),
 		Advance: advanceService,
 		Ledger:  base.Deps.HistoricalLedger,
@@ -707,7 +711,7 @@ func (e *usageBasedHandlerTestEnv) newRun() chargeusagebased.RealizationRun {
 			ServicePeriodTo: now,
 			MeteredQuantity: alpacadecimal.NewFromInt(30),
 			FeatureID:       featureID,
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount:       alpacadecimal.NewFromInt(30),
 				CreditsTotal: alpacadecimal.NewFromInt(30),
 				Total:        alpacadecimal.Zero,
@@ -719,6 +723,7 @@ func (e *usageBasedHandlerTestEnv) newRun() chargeusagebased.RealizationRun {
 func (e *usageBasedHandlerTestEnv) newRunWithLine(lineID string) chargeusagebased.RealizationRun {
 	run := e.newRun()
 	run.LineID = &lineID
+
 	return run
 }
 
@@ -726,7 +731,7 @@ func (e *usageBasedHandlerTestEnv) newRunWithInvoiceUsage(lineID string, total a
 	run := e.newRunWithLine(lineID)
 	run.InvoiceUsage = &invoicedusage.AccruedUsage{
 		ServicePeriod: e.newCharge(productcatalog.CreditThenInvoiceSettlementMode).Intent.GetEffectiveServicePeriod(),
-		Totals: totals.Totals{
+		Totals: totals.DeltaTotals{
 			Amount: total,
 			Total:  total,
 		},
@@ -842,6 +847,7 @@ func (e *usageBasedHandlerTestEnv) fundPriorityForOptionalSource(t *testing.T, p
 func (e *usageBasedHandlerTestEnv) creditAccruedSubAccount(t *testing.T) ledger.SubAccount {
 	zeroCostBasis := alpacadecimal.Zero
 	taxCodeID := testChargeTaxCodeID
+
 	return e.AccruedSubAccountWithCostBasisAndTaxCode(t, &zeroCostBasis, &taxCodeID)
 }
 
@@ -893,6 +899,7 @@ func (e *usageBasedHandlerTestEnv) invoiceEarningsSubAccount(t *testing.T) ledge
 func (e *usageBasedHandlerTestEnv) creditEarningsSubAccount(t *testing.T) ledger.SubAccount {
 	zeroCostBasis := alpacadecimal.Zero
 	taxCodeID := testChargeTaxCodeID
+
 	return e.EarningsSubAccountWithCostBasisAndTaxCode(t, &zeroCostBasis, &taxCodeID)
 }
 

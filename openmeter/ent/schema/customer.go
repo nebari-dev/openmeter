@@ -61,10 +61,10 @@ func (Customer) Indexes() []ent.Index {
 			).
 			Unique(),
 		index.Fields("namespace", "key", "deleted_at"),
-		index.Fields("name"),
+		index.Fields("namespace", "name"),
 		index.Fields("primary_email"),
 		// Indexes because of API OrderBy
-		index.Fields("created_at"),
+		index.Fields("namespace", "created_at"),
 	}
 }
 
@@ -133,6 +133,15 @@ func (CustomerSubjects) Indexes() []ent.Index {
 		// For other common queries based on analytics
 		index.Fields("customer_id"),
 		index.Fields("deleted_at", "customer_id"),
+		// Trigram index for the contains (ILIKE '%...%') filter on subject_key used by
+		// customer listing. B-tree indexes cannot serve patterns with a leading wildcard.
+		// Requires the pg_trgm extension, which the migration creates.
+		index.Fields("subject_key").
+			StorageKey("customersubjects_subject_key_trgm").
+			Annotations(
+				entsql.IndexType("GIN"),
+				entsql.OpClass("gin_trgm_ops"),
+			),
 	}
 }
 

@@ -9,14 +9,12 @@ import (
 	"github.com/samber/lo"
 	"github.com/samber/mo"
 
-	"github.com/openmeterio/openmeter/api"
-	apphttpdriver "github.com/openmeterio/openmeter/openmeter/app/httpdriver"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/billing"
-	"github.com/openmeterio/openmeter/openmeter/billing/models/externalid"
-	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
+	billingconvert "github.com/openmeterio/openmeter/openmeter/billing/apiconvert"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	customerhttpdriver "github.com/openmeterio/openmeter/openmeter/customer/httpdriver"
-	"github.com/openmeterio/openmeter/pkg/convert"
+	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/filter"
@@ -26,15 +24,14 @@ import (
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/slicesx"
 	"github.com/openmeterio/openmeter/pkg/sortx"
-	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
 
 var _ InvoiceHandler = (*handler)(nil)
 
 type (
 	ListInvoicesRequest  = billing.ListInvoicesInput
-	ListInvoicesResponse = api.InvoicePaginatedResponse
-	ListInvoicesParams   = api.ListInvoicesParams
+	ListInvoicesResponse = apiv1models.InvoicePaginatedResponse
+	ListInvoicesParams   = apiv1models.ListInvoicesParams
 	ListInvoicesHandler  httptransport.HandlerWithArgs[ListInvoicesRequest, ListInvoicesResponse, ListInvoicesParams]
 )
 
@@ -51,7 +48,7 @@ func (h *handler) ListInvoices() ListInvoicesHandler {
 
 				Statuses: lo.Map(
 					lo.FromPtr(input.Statuses),
-					func(status api.InvoiceStatus, _ int) string {
+					func(status apiv1models.InvoiceStatus, _ int) string {
 						return string(status)
 					},
 				),
@@ -69,7 +66,7 @@ func (h *handler) ListInvoices() ListInvoicesHandler {
 				Expand: mapInvoiceExpandsToEntity(lo.FromPtr(input.Expand)).
 					With(billing.InvoiceExpandCalculateGatheringInvoiceWithLiveData),
 
-				Order:   sortx.Order(lo.FromPtrOr(input.Order, api.InvoiceOrderByOrderingOrder(sortx.OrderDefault))),
+				Order:   sortx.Order(lo.FromPtrOr(input.Order, apiv1models.InvoiceOrderByOrderingOrder(sortx.OrderDefault))),
 				OrderBy: lo.FromPtr(input.OrderBy),
 
 				IncludeDeleted: lo.FromPtrOr(input.IncludeDeleted, false),
@@ -98,20 +95,18 @@ func (h *handler) ListInvoices() ListInvoicesHandler {
 			}
 
 			res := ListInvoicesResponse{
-				Items:      make([]api.Invoice, 0, len(invoices.Items)),
+				Items:      make([]apiv1models.Invoice, 0, len(invoices.Items)),
 				Page:       invoices.Page.PageNumber,
 				PageSize:   invoices.Page.PageSize,
 				TotalCount: invoices.TotalCount,
 			}
 
-			for _, invoice := range invoices.Items {
-				invoice, err := h.MapInvoiceToAPI(ctx, invoice)
-				if err != nil {
-					return ListInvoicesResponse{}, err
-				}
-
-				res.Items = append(res.Items, invoice)
+			items, err := h.mapInvoicesToAPI(ctx, request.Namespace, invoices.Items...)
+			if err != nil {
+				return ListInvoicesResponse{}, err
 			}
+
+			res.Items = append(res.Items, items...)
 
 			return res, nil
 		},
@@ -129,14 +124,14 @@ type (
 		billing.InvoicePendingLinesInput
 		Options []billing.InvoicePendingLinesOption
 	}
-	InvoicePendingLinesActionResponse = []api.Invoice
+	InvoicePendingLinesActionResponse = []apiv1models.Invoice
 	InvoicePendingLinesActionHandler  httptransport.Handler[InvoicePendingLinesActionRequest, InvoicePendingLinesActionResponse]
 )
 
 func (h *handler) InvoicePendingLinesAction() InvoicePendingLinesActionHandler {
 	return httptransport.NewHandler(
 		func(ctx context.Context, r *http.Request) (InvoicePendingLinesActionRequest, error) {
-			body := api.InvoicePendingLinesActionInput{}
+			body := apiv1models.InvoicePendingLinesActionInput{}
 
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return InvoicePendingLinesActionRequest{}, err
@@ -183,10 +178,15 @@ func (h *handler) InvoicePendingLinesAction() InvoicePendingLinesActionHandler {
 				return nil, err
 			}
 
-			out := make([]api.Invoice, 0, len(invoices))
+			out := make([]apiv1models.Invoice, 0, len(invoices))
+
+			taxCodes, err := h.taxCodesForStandardInvoices(ctx, request.Customer.Namespace, invoices...)
+			if err != nil {
+				return nil, err
+			}
 
 			for _, invoice := range invoices {
-				invoice, err := MapStandardInvoiceToAPI(invoice)
+				invoice, err := MapStandardInvoiceToAPI(invoice, taxCodes)
 				if err != nil {
 					return nil, err
 				}
@@ -207,10 +207,10 @@ func (h *handler) InvoicePendingLinesAction() InvoicePendingLinesActionHandler {
 
 type (
 	GetInvoiceRequest  = billing.GetInvoiceByIdInput
-	GetInvoiceResponse = api.Invoice
+	GetInvoiceResponse = apiv1models.Invoice
 	GetInvoiceParams   struct {
 		InvoiceID           string
-		Expand              []api.InvoiceExpand
+		Expand              []apiv1models.InvoiceExpand
 		IncludeDeletedLines bool
 	}
 	GetInvoiceHandler httptransport.HandlerWithArgs[GetInvoiceRequest, GetInvoiceResponse, GetInvoiceParams]
@@ -225,7 +225,7 @@ func (h *handler) GetInvoice() GetInvoiceHandler {
 			}
 
 			if len(params.Expand) == 0 {
-				params.Expand = []api.InvoiceExpand{api.InvoiceExpandLines}
+				params.Expand = []apiv1models.InvoiceExpand{apiv1models.InvoiceExpandLines}
 			}
 
 			return GetInvoiceRequest{
@@ -283,7 +283,7 @@ type (
 	ProgressInvoiceRequest struct {
 		Invoice billing.InvoiceID
 	}
-	ProgressInvoiceResponse = api.Invoice
+	ProgressInvoiceResponse = apiv1models.Invoice
 	ProgressInvoiceParams   struct {
 		InvoiceID string
 	}
@@ -330,7 +330,7 @@ func (h *handler) ProgressInvoice(action ProgressAction) ProgressInvoiceHandler 
 				return ProgressInvoiceResponse{}, err
 			}
 
-			return MapStandardInvoiceToAPI(invoice)
+			return h.mapStandardInvoiceWithTaxCodesToAPI(ctx, invoice)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[ProgressInvoiceResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -430,7 +430,7 @@ func (h *handler) deleteStandardInvoice(ctx context.Context, request DeleteInvoi
 
 type (
 	SimulateInvoiceRequest  = billing.SimulateInvoiceInput
-	SimulateInvoiceResponse = api.Invoice
+	SimulateInvoiceResponse = apiv1models.Invoice
 	SimulateInvoiceParams   struct {
 		CustomerID string
 	}
@@ -445,7 +445,7 @@ func (h *handler) SimulateInvoice() SimulateInvoiceHandler {
 				return SimulateInvoiceRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			body := api.InvoiceSimulationInput{}
+			body := apiv1models.InvoiceSimulationInput{}
 
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return SimulateInvoiceRequest{}, err
@@ -473,7 +473,7 @@ func (h *handler) SimulateInvoice() SimulateInvoiceHandler {
 				return SimulateInvoiceResponse{}, err
 			}
 
-			return MapStandardInvoiceToAPI(invoice)
+			return h.mapStandardInvoiceWithTaxCodesToAPI(ctx, invoice)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[SimulateInvoiceResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -487,9 +487,9 @@ func (h *handler) SimulateInvoice() SimulateInvoiceHandler {
 type (
 	UpdateInvoiceRequest struct {
 		InvoiceID billing.InvoiceID
-		Input     api.InvoiceReplaceUpdate
+		Input     apiv1models.InvoiceReplaceUpdate
 	}
-	UpdateInvoiceResponse = api.Invoice
+	UpdateInvoiceResponse = apiv1models.Invoice
 	UpdateInvoiceParams   struct {
 		InvoiceID string
 	}
@@ -504,7 +504,7 @@ func (h *handler) UpdateInvoice() UpdateInvoiceHandler {
 				return UpdateInvoiceRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			body := api.InvoiceReplaceUpdate{}
+			body := apiv1models.InvoiceReplaceUpdate{}
 
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return UpdateInvoiceRequest{}, err
@@ -637,290 +637,142 @@ func (h *handler) updateStandardInvoice(ctx context.Context, invoice billing.Inv
 	return billing.NewInvoice(updatedStandardInvoice), nil
 }
 
-func (h *handler) MapInvoiceToAPI(ctx context.Context, invoice billing.Invoice) (api.Invoice, error) {
-	switch invoice.Type() {
-	case billing.InvoiceTypeStandard:
-		standardInvoice, err := invoice.AsStandardInvoice()
-		if err != nil {
-			return api.Invoice{}, fmt.Errorf("converting invoice to standard invoice: %w", err)
-		}
-
-		return MapStandardInvoiceToAPI(standardInvoice)
-	case billing.InvoiceTypeGathering:
-		gatheringInvoice, err := invoice.AsGatheringInvoice()
-		if err != nil {
-			return api.Invoice{}, fmt.Errorf("converting invoice to gathering invoice: %w", err)
-		}
-
-		// TODO: For the V3 api let's make sure that we don't return gathering invoice customer data (or even gathering invoices)
-		mergedProfile, err := h.service.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
-			Customer: gatheringInvoice.GetCustomerID(),
-			Expand: billing.CustomerOverrideExpand{
-				Customer: true,
-				Apps:     true,
-			},
-		})
-		if err != nil {
-			return UpdateInvoiceResponse{}, fmt.Errorf("failed to get customer override: %w", err)
-		}
-
-		return MapGatheringInvoiceToAPI(gatheringInvoice, mergedProfile.Customer, mergedProfile.MergedProfile)
-	default:
-		return api.Invoice{}, fmt.Errorf("invalid invoice type: %s", invoice.Type())
+func (h *handler) MapInvoiceToAPI(ctx context.Context, invoice billing.Invoice) (apiv1models.Invoice, error) {
+	genericInvoice, err := invoice.AsGenericInvoice()
+	if err != nil {
+		return apiv1models.Invoice{}, fmt.Errorf("converting invoice to generic invoice: %w", err)
 	}
+
+	mapped, err := h.mapInvoicesToAPI(ctx, genericInvoice.GetInvoiceID().Namespace, invoice)
+	if err != nil {
+		return apiv1models.Invoice{}, err
+	}
+
+	return mapped[0], nil
 }
 
-func MapStandardInvoiceToAPI(invoice billing.StandardInvoice) (api.Invoice, error) {
-	var apps *api.BillingProfileAppsOrReference
-	var err error
-	collectionAt := invoice.CollectionAt
+// invoiceToMap is an invoice prepared for mapping: standard invoices show their own workflow,
+// gathering invoices their customer's current billing profile.
+type invoiceToMap struct {
+	standard      *billing.StandardInvoice
+	gathering     *billing.GatheringInvoice
+	mergedProfile billing.CustomerBillingProfile
+}
 
-	// Preserve the historic API shape for standard invoices by emulating collectionAt when the
-	// domain model intentionally leaves it nil (for example, flat-fee-only invoices).
-	if collectionAt == nil {
-		collectionAt = lo.ToPtr(invoice.CreatedAt)
+func (i invoiceToMap) workflow() billing.WorkflowConfig {
+	if i.standard != nil {
+		return i.standard.Workflow.Config
 	}
 
-	// Sort the lines to make the response more consistent (internally we don't care about the order)
-	invoice.SortLines()
+	return i.mergedProfile.EffectiveProfile.WorkflowConfig
+}
 
-	if invoice.Workflow.Apps != nil {
-		apps, err = mapProfileAppsToAPI(invoice.Workflow.Apps)
-		if err != nil {
-			return api.Invoice{}, fmt.Errorf("failed to map profile apps to API: %w", err)
+// mapInvoicesToAPI maps invoices with one Tax Code lookup for all of their default tax configs.
+func (h *handler) mapInvoicesToAPI(ctx context.Context, namespace string, invoices ...billing.Invoice) ([]apiv1models.Invoice, error) {
+	prepared := make([]invoiceToMap, 0, len(invoices))
+
+	for _, invoice := range invoices {
+		switch invoice.Type() {
+		case billing.InvoiceTypeStandard:
+			standardInvoice, err := invoice.AsStandardInvoice()
+			if err != nil {
+				return nil, fmt.Errorf("converting invoice to standard invoice: %w", err)
+			}
+
+			prepared = append(prepared, invoiceToMap{standard: &standardInvoice})
+		case billing.InvoiceTypeGathering:
+			gatheringInvoice, err := invoice.AsGatheringInvoice()
+			if err != nil {
+				return nil, fmt.Errorf("converting invoice to gathering invoice: %w", err)
+			}
+
+			// TODO: For the V3 api let's make sure that we don't return gathering invoice customer data (or even gathering invoices)
+			mergedProfile, err := h.service.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
+				Customer: gatheringInvoice.GetCustomerID(),
+				Expand: billing.CustomerBillingProfileExpand{
+					Customer: true,
+					Apps:     true,
+				},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to get customer override: %w", err)
+			}
+
+			prepared = append(prepared, invoiceToMap{gathering: &gatheringInvoice, mergedProfile: mergedProfile})
+		default:
+			return nil, fmt.Errorf("invalid invoice type: %s", invoice.Type())
 		}
-	} else {
-		apps, err = mapProfileAppReferencesToAPI(&invoice.Workflow.AppReferences)
-		if err != nil {
-			return api.Invoice{}, fmt.Errorf("failed to map profile app references to API: %w", err)
-		}
 	}
 
-	out := api.Invoice{
-		Id: invoice.ID,
-
-		CreatedAt:            invoice.CreatedAt,
-		UpdatedAt:            invoice.UpdatedAt,
-		DeletedAt:            invoice.DeletedAt,
-		IssuedAt:             invoice.IssuedAt,
-		VoidedAt:             invoice.VoidedAt,
-		DueAt:                invoice.DueAt,
-		CollectionAt:         collectionAt,
-		DraftUntil:           invoice.DraftUntil,
-		SentToCustomerAt:     invoice.SentToCustomerAt,
-		QuantitySnapshotedAt: invoice.QuantitySnapshotedAt,
-		Period:               mapPeriodToAPI(invoice.Period),
-
-		Currency: string(invoice.Currency),
-		Customer: mapInvoiceCustomerToAPI(invoice.Customer),
-
-		Number:      invoice.Number,
-		Description: invoice.Description,
-		Metadata:    convert.MapToPointer(invoice.Metadata),
-
-		Status: api.InvoiceStatus(invoice.Status.ShortStatus()),
-		StatusDetails: api.InvoiceStatusDetails{
-			Failed:         invoice.StatusDetails.Failed,
-			Immutable:      invoice.StatusDetails.Immutable,
-			ExtendedStatus: string(invoice.Status),
-
-			AvailableActions: mapInvoiceAvailableActionsToAPI(invoice.StatusDetails.AvailableActions),
-		},
-		Supplier: mapSupplierContactToAPI(invoice.Supplier),
-		Totals:   mapTotalsToAPI(invoice.Totals),
-		// TODO[OM-943]: Implement
-		Payment: nil,
-		Type:    api.InvoiceType(invoice.Type),
-		ValidationIssues: convert.SliceToPointer(
-			lo.Map(invoice.ValidationIssues, func(v billing.ValidationIssue, _ int) api.ValidationIssue {
-				return api.ValidationIssue{
-					Id:        v.ID,
-					CreatedAt: v.CreatedAt,
-					UpdatedAt: v.UpdatedAt,
-					DeletedAt: v.DeletedAt,
-
-					Severity:  api.ValidationIssueSeverity(v.Severity),
-					Message:   v.Message,
-					Code:      lo.EmptyableToPtr(v.Code),
-					Component: string(v.Component),
-					Field:     lo.EmptyableToPtr(v.Path),
-				}
-			})),
-		ExternalIds: mapInvoiceAppExternalIdsToAPI(invoice.ExternalIDs),
-	}
-
-	workflowConfig, err := mapWorkflowConfigSettingsToAPI(invoice.Workflow.Config)
+	taxCodes, err := billingconvert.ResolveWorkflowTaxCodes(ctx, h.taxCodeResolver, namespace,
+		lo.Map(prepared, func(i invoiceToMap, _ int) billing.WorkflowConfig {
+			return i.workflow()
+		})...)
 	if err != nil {
-		return api.Invoice{}, fmt.Errorf("failed to map workflow config to API: %w", err)
+		return nil, err
 	}
 
-	out.Workflow = api.InvoiceWorkflowSettings{
-		Apps:                   apps,
-		SourceBillingProfileId: invoice.Workflow.SourceBillingProfileID,
-		Workflow:               workflowConfig,
-	}
+	out := make([]apiv1models.Invoice, 0, len(prepared))
 
-	outLines, err := slicesx.MapWithErr(invoice.Lines.OrEmpty(), func(line *billing.StandardLine) (api.InvoiceLine, error) {
-		mappedLine, err := mapInvoiceLineToAPI(line)
-		if err != nil {
-			return api.InvoiceLine{}, fmt.Errorf("failed to map billing line[%s] to API: %w", line.ID, err)
+	for _, i := range prepared {
+		var (
+			mapped apiv1models.Invoice
+			err    error
+		)
+
+		if i.standard != nil {
+			mapped, err = MapStandardInvoiceToAPI(*i.standard, taxCodes)
+		} else {
+			mapped, err = MapGatheringInvoiceToAPI(*i.gathering, i.mergedProfile.Customer, i.mergedProfile.EffectiveProfile, taxCodes)
 		}
 
-		return mappedLine, nil
-	})
-	if err != nil {
-		return api.Invoice{}, err
-	}
+		if err != nil {
+			return nil, err
+		}
 
-	if len(outLines) > 0 {
-		out.Lines = &outLines
+		out = append(out, mapped)
 	}
 
 	return out, nil
 }
 
-func mapInvoiceAppExternalIdsToAPI(externalIds externalid.InvoiceExternalIDs) *api.InvoiceAppExternalIds {
-	if lo.IsEmpty(externalIds) {
-		return nil
-	}
-
-	return &api.InvoiceAppExternalIds{
-		Invoicing: lo.EmptyableToPtr(externalIds.Invoicing),
-		Payment:   lo.EmptyableToPtr(externalIds.Payment),
-	}
+func (h *handler) taxCodesForStandardInvoices(ctx context.Context, namespace string, invoices ...billing.StandardInvoice) (map[string]*taxcode.TaxCode, error) {
+	return billingconvert.ResolveWorkflowTaxCodes(ctx, h.taxCodeResolver, namespace, lo.Map(invoices, func(invoice billing.StandardInvoice, _ int) billing.WorkflowConfig {
+		return invoice.Workflow.Config
+	})...)
 }
 
-func MapEventInvoiceToAPI(event billing.EventStandardInvoice) (api.Invoice, error) {
-	// Prefer the apps from the event
-	event.Invoice.Workflow.Apps = nil
-
-	invoice, err := MapStandardInvoiceToAPI(event.Invoice)
+func (h *handler) mapStandardInvoiceWithTaxCodesToAPI(ctx context.Context, invoice billing.StandardInvoice) (apiv1models.Invoice, error) {
+	taxCodes, err := h.taxCodesForStandardInvoices(ctx, invoice.Namespace, invoice)
 	if err != nil {
-		return api.Invoice{}, err
+		return apiv1models.Invoice{}, err
 	}
 
-	// Let's map the apps, if there are no apps in the event, we will skip generating the profile apps
-
-	apps := api.BillingProfileApps{}
-
-	if event.Apps.Invoicing.Type != "" {
-		apps.Invoicing, err = apphttpdriver.MapEventAppToAPI(event.Apps.Invoicing)
-		if err != nil {
-			return api.Invoice{}, err
-		}
-	}
-
-	if event.Apps.Payment.Type != "" {
-		apps.Payment, err = apphttpdriver.MapEventAppToAPI(event.Apps.Payment)
-		if err != nil {
-			return api.Invoice{}, err
-		}
-	}
-
-	if event.Apps.Tax.Type != "" {
-		apps.Tax, err = apphttpdriver.MapEventAppToAPI(event.Apps.Tax)
-		if err != nil {
-			return api.Invoice{}, err
-		}
-	}
-
-	invoice.Workflow.Apps = &api.BillingProfileAppsOrReference{}
-	if err := invoice.Workflow.Apps.FromBillingProfileApps(apps); err != nil {
-		return api.Invoice{}, err
-	}
-
-	return invoice, nil
+	return MapStandardInvoiceToAPI(invoice, taxCodes)
 }
 
-func mapPeriodToAPI(p *timeutil.ClosedPeriod) *api.Period {
-	if p == nil {
-		return nil
-	}
-
-	// TODO[later]: let's use a common model for this
-	return &api.Period{
-		From: p.From,
-		To:   p.To,
-	}
+// MapStandardInvoiceToAPI maps a standard invoice. taxCodes must hold the invoice's default Tax
+// Code (see ResolveWorkflowTaxCodes) for its stripe.code to show.
+func MapStandardInvoiceToAPI(invoice billing.StandardInvoice, taxCodes map[string]*taxcode.TaxCode) (apiv1models.Invoice, error) {
+	return billingconvert.ToAPIStandardInvoice(invoice, taxCodes)
 }
 
-func mapInvoiceCustomerToAPI(c billing.InvoiceCustomer) api.BillingInvoiceCustomerExtendedDetails {
-	a := c.BillingAddress
-
-	out := api.BillingInvoiceCustomerExtendedDetails{
-		Id:   lo.ToPtr(c.CustomerID),
-		Key:  c.Key,
-		Name: lo.EmptyableToPtr(c.Name),
-	}
-
-	if c.UsageAttribution != nil {
-		out.UsageAttribution = api.CustomerUsageAttribution{
-			SubjectKeys: c.UsageAttribution.SubjectKeys,
-		}
-	}
-
-	if a != nil && !lo.IsEmpty(*a) {
-		out.Addresses = lo.ToPtr([]api.Address{
-			{
-				Country:     (*string)(a.Country),
-				PostalCode:  a.PostalCode,
-				State:       a.State,
-				City:        a.City,
-				Line1:       a.Line1,
-				Line2:       a.Line2,
-				PhoneNumber: a.PhoneNumber,
-			},
-		})
-	}
-
-	return out
+// MapEventInvoiceToAPI maps an invoice event to the v1 invoice shape notifications carry. The event
+// has no Stripe code for the invoice default; taxCodes (see ResolveWorkflowTaxCodes) supplies it.
+func MapEventInvoiceToAPI(event billing.EventStandardInvoice, taxCodes map[string]*taxcode.TaxCode) (apiv1models.Invoice, error) {
+	return billingconvert.ToAPIEventInvoice(event, taxCodes)
 }
 
-func mapInvoiceExpandsToEntity(expand []api.InvoiceExpand) billing.InvoiceExpands {
+func mapInvoiceExpandsToEntity(expand []apiv1models.InvoiceExpand) billing.InvoiceExpands {
 	if len(expand) == 0 {
 		return nil
 	}
 
 	return billing.InvoiceExpands{}.
-		SetOrUnsetIf(slices.Contains(expand, api.InvoiceExpandLines), billing.InvoiceExpandLines)
+		SetOrUnsetIf(slices.Contains(expand, apiv1models.InvoiceExpandLines), billing.InvoiceExpandLines)
 }
 
-func mapTotalsToAPI(t totals.Totals) api.InvoiceTotals {
-	return api.InvoiceTotals{
-		Amount:              t.Amount.String(),
-		ChargesTotal:        t.ChargesTotal.String(),
-		CreditsTotal:        t.CreditsTotal.String(),
-		DiscountsTotal:      t.DiscountsTotal.String(),
-		TaxesInclusiveTotal: t.TaxesInclusiveTotal.String(),
-		TaxesExclusiveTotal: t.TaxesExclusiveTotal.String(),
-		TaxesTotal:          t.TaxesTotal.String(),
-		Total:               t.Total.String(),
-	}
-}
-
-func mapInvoiceAvailableActionsToAPI(actions billing.StandardInvoiceAvailableActions) api.InvoiceAvailableActions {
-	return api.InvoiceAvailableActions{
-		Advance:            mapInvoiceAvailableActionDetailsToAPI(actions.Advance),
-		Approve:            mapInvoiceAvailableActionDetailsToAPI(actions.Approve),
-		Delete:             mapInvoiceAvailableActionDetailsToAPI(actions.Delete),
-		Retry:              mapInvoiceAvailableActionDetailsToAPI(actions.Retry),
-		Void:               mapInvoiceAvailableActionDetailsToAPI(actions.Void),
-		SnapshotQuantities: mapInvoiceAvailableActionDetailsToAPI(actions.SnapshotQuantities),
-		Invoice:            lo.If(actions.Invoice != nil, &api.InvoiceAvailableActionInvoiceDetails{}).Else(nil),
-	}
-}
-
-func mapInvoiceAvailableActionDetailsToAPI(actions *billing.StandardInvoiceAvailableActionDetails) *api.InvoiceAvailableActionDetails {
-	if actions == nil {
-		return nil
-	}
-
-	return &api.InvoiceAvailableActionDetails{
-		ResultingState: string(actions.ResultingState),
-	}
-}
-
-func mergeInvoiceSupplierFromAPI(existing billing.SupplierContact, updatedSupplier api.BillingPartyReplaceUpdate) billing.SupplierContact {
+func mergeInvoiceSupplierFromAPI(existing billing.SupplierContact, updatedSupplier apiv1models.BillingPartyReplaceUpdate) billing.SupplierContact {
 	existing.Name = lo.FromPtr(updatedSupplier.Name)
 
 	if updatedSupplier.Addresses == nil || len(*updatedSupplier.Addresses) == 0 {
@@ -939,7 +791,7 @@ func mergeInvoiceSupplierFromAPI(existing billing.SupplierContact, updatedSuppli
 	return existing
 }
 
-func mergeInvoiceCustomerFromAPI(existing billing.InvoiceCustomer, updatedCustomer api.BillingPartyReplaceUpdate) billing.InvoiceCustomer {
+func mergeInvoiceCustomerFromAPI(existing billing.InvoiceCustomer, updatedCustomer apiv1models.BillingPartyReplaceUpdate) billing.InvoiceCustomer {
 	existing.Name = lo.FromPtr(updatedCustomer.Name)
 
 	if updatedCustomer.Addresses == nil || len(*updatedCustomer.Addresses) == 0 {
@@ -952,7 +804,7 @@ func mergeInvoiceCustomerFromAPI(existing billing.InvoiceCustomer, updatedCustom
 	return existing
 }
 
-func mergeInvoiceWorkflowFromAPI(existing billing.InvoiceWorkflow, updatedWorkflow api.InvoiceWorkflowReplaceUpdate) (billing.InvoiceWorkflow, error) {
+func mergeInvoiceWorkflowFromAPI(existing billing.InvoiceWorkflow, updatedWorkflow apiv1models.InvoiceWorkflowReplaceUpdate) (billing.InvoiceWorkflow, error) {
 	existing.Config.Invoicing.AutoAdvance = lo.FromPtrOr(
 		updatedWorkflow.Workflow.Invoicing.AutoAdvance,
 		billing.DefaultWorkflowConfig.Invoicing.AutoAdvance)

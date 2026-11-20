@@ -1476,6 +1476,21 @@ class CustomSubscriptionCreate(TypedDict, total=False):
      normalized according to the billing cadence to the nearest recurrence before start time. If not
      provided, the subscription start time will be used.
     :vartype billing_anchor: str
+    :ivar billing_starts_at: When billing starts for the subscription. Nothing is billed for
+     service before this time, while access,
+     entitlements and metering start with the subscription. Use it when the time before was already
+     billed elsewhere,
+     for example when importing a subscription from another billing system.
+
+     It cannot be before the start of the subscription and cannot be changed later. On subscriptions
+     billed through
+     invoice lines it must be the start of a billing period. If not provided, billing starts with
+     the subscription.
+
+     When billing starts inside a billing period, we recommend enabling price pro-rating
+     (``prorate_prices``) on the
+     plan. Without it that billing period's flat fees are billed in full.
+    :vartype billing_starts_at: str
     """
 
     costBasisMode: Union[str, "SubscriptionCostBasisMode"]
@@ -1495,6 +1510,21 @@ class CustomSubscriptionCreate(TypedDict, total=False):
     """The billing anchor of the subscription. The provided date will be normalized according to the
      billing cadence to the nearest recurrence before start time. If not provided, the subscription
      start time will be used."""
+    billingStartsAt: str
+    """When billing starts for the subscription. Nothing is billed for service before this time, while
+     access,
+     entitlements and metering start with the subscription. Use it when the time before was already
+     billed elsewhere,
+     for example when importing a subscription from another billing system.
+     
+     It cannot be before the start of the subscription and cannot be changed later. On subscriptions
+     billed through
+     invoice lines it must be the start of a billing period. If not provided, billing starts with
+     the subscription.
+     
+     When billing starts inside a billing period, we recommend enabling price pro-rating
+     (``prorate_prices``) on the
+     plan. Without it that billing period's flat fees are billed in full."""
 
 
 class DiscountPercentage(TypedDict, total=False):
@@ -2309,7 +2339,8 @@ class InstallWithApiKeyRequest(TypedDict, total=False):
     :vartype name: str
     :ivar create_billing_profile: If true, a billing profile will be created for the app. The
      Stripe app will be also set as the default billing profile if the current default is a Sandbox
-     app.
+     app. Custom Invoicing apps use the Auto Collection preset with an OpenMeter supplier in the US
+     (postal code 94114), without replacing the default profile.
     :vartype create_billing_profile: bool
     :ivar api_key: The API key for the provider. For example, the Stripe API key. Required.
     :vartype api_key: str
@@ -2321,7 +2352,9 @@ class InstallWithApiKeyRequest(TypedDict, total=False):
      If name is not provided defaults to the marketplace listing's name."""
     createBillingProfile: bool
     """If true, a billing profile will be created for the app. The Stripe app will be also set as the
-     default billing profile if the current default is a Sandbox app."""
+     default billing profile if the current default is a Sandbox app. Custom Invoicing apps use the
+     Auto Collection preset with an OpenMeter supplier in the US (postal code 94114), without
+     replacing the default profile."""
     apiKey: Required[str]
     """The API key for the provider. For example, the Stripe API key. Required."""
 
@@ -2803,7 +2836,8 @@ class MarketplaceInstallRequestPayload(TypedDict, total=False):
     :vartype name: str
     :ivar create_billing_profile: If true, a billing profile will be created for the app. The
      Stripe app will be also set as the default billing profile if the current default is a Sandbox
-     app.
+     app. Custom Invoicing apps use the Auto Collection preset with an OpenMeter supplier in the US
+     (postal code 94114), without replacing the default profile.
     :vartype create_billing_profile: bool
     """
 
@@ -2813,7 +2847,9 @@ class MarketplaceInstallRequestPayload(TypedDict, total=False):
      If name is not provided defaults to the marketplace listing's name."""
     createBillingProfile: bool
     """If true, a billing profile will be created for the app. The Stripe app will be also set as the
-     default billing profile if the current default is a Sandbox app."""
+     default billing profile if the current default is a Sandbox app. Custom Invoicing apps use the
+     Auto Collection preset with an OpenMeter supplier in the US (postal code 94114), without
+     replacing the default profile."""
 
 
 class MarketplaceListing(TypedDict, total=False):
@@ -3552,6 +3588,21 @@ class PlanSubscriptionCreate(TypedDict, total=False):
      normalized according to the billing cadence to the nearest recurrence before start time. If not
      provided, the subscription start time will be used.
     :vartype billing_anchor: str
+    :ivar billing_starts_at: When billing starts for the subscription. Nothing is billed for
+     service before this time, while access,
+     entitlements and metering start with the subscription. Use it when the time before was already
+     billed elsewhere,
+     for example when importing a subscription from another billing system.
+
+     It cannot be before the start of the subscription and cannot be changed later. On subscriptions
+     billed through
+     invoice lines it must be the start of a billing period. If not provided, billing starts with
+     the subscription.
+
+     When billing starts inside a billing period, we recommend enabling price pro-rating
+     (``prorate_prices``) on the
+     plan. Without it that billing period's flat fees are billed in full.
+    :vartype billing_starts_at: str
     """
 
     alignment: "Alignment"
@@ -3585,6 +3636,21 @@ class PlanSubscriptionCreate(TypedDict, total=False):
     """The billing anchor of the subscription. The provided date will be normalized according to the
      billing cadence to the nearest recurrence before start time. If not provided, the subscription
      start time will be used."""
+    billingStartsAt: str
+    """When billing starts for the subscription. Nothing is billed for service before this time, while
+     access,
+     entitlements and metering start with the subscription. Use it when the time before was already
+     billed elsewhere,
+     for example when importing a subscription from another billing system.
+     
+     It cannot be before the start of the subscription and cannot be changed later. On subscriptions
+     billed through
+     invoice lines it must be the start of a billing period. If not provided, billing starts with
+     the subscription.
+     
+     When billing starts inside a billing period, we recommend enabling price pro-rating
+     (``prorate_prices``) on the
+     plan. Without it that billing period's flat fees are billed in full."""
 
 
 class PortalToken(TypedDict, total=False):

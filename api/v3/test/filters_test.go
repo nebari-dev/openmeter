@@ -89,6 +89,7 @@ func parseHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(target)
@@ -167,7 +168,7 @@ func TestFieldFilterValidation(t *testing.T) {
 			name:             "ulid invalid short pattern",
 			query:            "filter[ulid]=not-a-ulid",
 			wantStatus:       http.StatusBadRequest,
-			wantField:        "ulid",
+			wantField:        "filter[ulid]",
 			wantRule:         "anyOf",
 			wantReasonSubstr: "doesn't match any schema",
 		},
@@ -175,7 +176,7 @@ func TestFieldFilterValidation(t *testing.T) {
 			name:             "ulid invalid eq pattern",
 			query:            "filter[ulid][eq]=not-a-ulid",
 			wantStatus:       http.StatusBadRequest,
-			wantField:        "ulid",
+			wantField:        "filter[ulid]",
 			wantRule:         "anyOf",
 			wantReasonSubstr: "doesn't match any schema",
 		},
@@ -193,7 +194,7 @@ func TestFieldFilterValidation(t *testing.T) {
 			name:             "datetime invalid short format",
 			query:            "filter[datetime]=not-a-datetime",
 			wantStatus:       http.StatusBadRequest,
-			wantField:        "datetime",
+			wantField:        "filter[datetime]",
 			wantRule:         "anyOf",
 			wantReasonSubstr: "doesn't match any schema",
 		},
@@ -201,7 +202,7 @@ func TestFieldFilterValidation(t *testing.T) {
 			name:             "datetime invalid eq format",
 			query:            "filter[datetime][eq]=not-a-datetime",
 			wantStatus:       http.StatusBadRequest,
-			wantField:        "datetime",
+			wantField:        "filter[datetime]",
 			wantRule:         "anyOf",
 			wantReasonSubstr: "doesn't match any schema",
 		},
@@ -224,7 +225,7 @@ func TestFieldFilterValidation(t *testing.T) {
 			name:             "labels bare scalar rejected",
 			query:            "filter[labels]=team-a",
 			wantStatus:       http.StatusBadRequest,
-			wantField:        "labels",
+			wantField:        "filter[labels]",
 			wantRule:         "type",
 			wantReasonSubstr: "must be an object",
 		},
@@ -295,9 +296,11 @@ func TestFieldFilterValidation(t *testing.T) {
 			if tc.wantField != "" {
 				assert.Equal(t, tc.wantField, ip.Field)
 			}
+
 			if tc.wantRule != "" {
 				assert.Equal(t, tc.wantRule, ip.Rule)
 			}
+
 			if tc.wantReasonSubstr != "" {
 				assert.Contains(t, ip.Reason, tc.wantReasonSubstr)
 			}
@@ -643,6 +646,7 @@ func TestFieldFilterParse(t *testing.T) {
 				if tc.wantBodySubstr != "" {
 					assert.Contains(t, string(body), tc.wantBodySubstr)
 				}
+
 				return
 			}
 

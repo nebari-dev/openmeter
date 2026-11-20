@@ -11,8 +11,16 @@ make env-local-down    # tear down
 ```
 
 Server listens on `http://localhost:38888`. `config.yaml` is bind-mounted, so config
-changes need only `make env-local-up` (force-recreate), not a full down/up. Logs land in
-`e2e/logs/`.
+changes need only `make env-local-up` (force-recreate), not a full down/up. View service logs from this directory with
+
+```sh
+docker compose -f docker-compose.infra.yaml -f docker-compose.openmeter.yaml -f docker-compose.openmeter-local.yaml logs -f
+```
+
+The local E2E build stamps the checked-out Git SHA and version `v0.0.0-e2e`.
+When running `TestLedgerWriterBuild` against a separately built server, set
+`OPENMETER_E2E_EXPECTED_COMMIT_SHA` and `OPENMETER_E2E_EXPECTED_VERSION` to
+its build inputs. Set the expected version to an empty string for an unversioned build.
 
 ## Benchmarks
 
@@ -60,6 +68,15 @@ High-fan-out requests emit thousands of SQL spans; bump Tempo's `max_bytes_per_t
 (default 5MB) or traces get dropped at ingest.
 
 ## Standard e2e tests
+
+`make test-http-errors` runs the shared error handling contract through real HTTP/1,
+HTTP/2, gRPC, and PostgreSQL connections. The test handlers provide controlled
+failures without adding fault injection to production endpoints. These scenarios
+start their own HTTP/gRPC servers and run as part of `make test-base`.
+
+For an existing PostgreSQL instance, override `OPENMETER_E2E_POSTGRES_URL`; the
+default is the local compose instance. Without that variable, direct
+`go test ./httperrors` runs the protocol scenarios and skips the SQL scenario.
 
 ```sh
 make test-local        # full down → up → go test ./... → down

@@ -76,12 +76,23 @@ func (p CostBasisPin) Validate() error {
 		if p.CostBasis.CurrencyID != p.CustomCurrencyID {
 			errs = append(errs, errors.New("cost basis custom currency does not match pin"))
 		}
+
 		if p.CostBasis.FiatCode != p.InvoiceCurrency {
 			errs = append(errs, errors.New("cost basis fiat currency does not match pin"))
 		}
 	}
 
 	return models.NewNillableGenericValidationError(errors.Join(errs...))
+}
+
+// DefaultCurrency returns the referenced plan's default when available,
+// falling back to invoice currency when no plan default was retained.
+func (s Subscription) DefaultCurrency() currencies.CurrencyReference {
+	if s.Currency != nil {
+		return s.Currency.Clone()
+	}
+
+	return currencies.NewCurrencyReference(s.InvoiceCurrency)
 }
 
 func (s SubscriptionSpec) HasCustomCurrencyBillables() bool {

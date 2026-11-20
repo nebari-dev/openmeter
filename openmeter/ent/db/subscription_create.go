@@ -22,9 +22,9 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/plan"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscription"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionaddon"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionbillingsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptioncostbasispin"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionphase"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
@@ -190,6 +190,20 @@ func (_c *SubscriptionCreate) SetNillableCostBasisMode(v *subscription.CostBasis
 // SetBillingAnchor sets the "billing_anchor" field.
 func (_c *SubscriptionCreate) SetBillingAnchor(v time.Time) *SubscriptionCreate {
 	_c.mutation.SetBillingAnchor(v)
+	return _c
+}
+
+// SetBillingStartsAt sets the "billing_starts_at" field.
+func (_c *SubscriptionCreate) SetBillingStartsAt(v time.Time) *SubscriptionCreate {
+	_c.mutation.SetBillingStartsAt(v)
+	return _c
+}
+
+// SetNillableBillingStartsAt sets the "billing_starts_at" field if the given value is not nil.
+func (_c *SubscriptionCreate) SetNillableBillingStartsAt(v *time.Time) *SubscriptionCreate {
+	if v != nil {
+		_c.SetBillingStartsAt(*v)
+	}
 	return _c
 }
 
@@ -371,23 +385,23 @@ func (_c *SubscriptionCreate) AddAddons(v ...*SubscriptionAddon) *SubscriptionCr
 	return _c.AddAddonIDs(ids...)
 }
 
-// SetBillingSyncStateID sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity by ID.
-func (_c *SubscriptionCreate) SetBillingSyncStateID(id string) *SubscriptionCreate {
-	_c.mutation.SetBillingSyncStateID(id)
+// SetSyncStateID sets the "sync_state" edge to the SubscriptionSyncState entity by ID.
+func (_c *SubscriptionCreate) SetSyncStateID(id string) *SubscriptionCreate {
+	_c.mutation.SetSyncStateID(id)
 	return _c
 }
 
-// SetNillableBillingSyncStateID sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity by ID if the given value is not nil.
-func (_c *SubscriptionCreate) SetNillableBillingSyncStateID(id *string) *SubscriptionCreate {
+// SetNillableSyncStateID sets the "sync_state" edge to the SubscriptionSyncState entity by ID if the given value is not nil.
+func (_c *SubscriptionCreate) SetNillableSyncStateID(id *string) *SubscriptionCreate {
 	if id != nil {
-		_c = _c.SetBillingSyncStateID(*id)
+		_c = _c.SetSyncStateID(*id)
 	}
 	return _c
 }
 
-// SetBillingSyncState sets the "billing_sync_state" edge to the SubscriptionBillingSyncState entity.
-func (_c *SubscriptionCreate) SetBillingSyncState(v *SubscriptionBillingSyncState) *SubscriptionCreate {
-	return _c.SetBillingSyncStateID(v.ID)
+// SetSyncState sets the "sync_state" edge to the SubscriptionSyncState entity.
+func (_c *SubscriptionCreate) SetSyncState(v *SubscriptionSyncState) *SubscriptionCreate {
+	return _c.SetSyncStateID(v.ID)
 }
 
 // AddCostBasisPinIDs adds the "cost_basis_pins" edge to the SubscriptionCostBasisPin entity by IDs.
@@ -637,6 +651,10 @@ func (_c *SubscriptionCreate) createSpec() (*Subscription, *sqlgraph.CreateSpec,
 		_spec.SetField(subscription.FieldBillingAnchor, field.TypeTime, value)
 		_node.BillingAnchor = value
 	}
+	if value, ok := _c.mutation.BillingStartsAt(); ok {
+		_spec.SetField(subscription.FieldBillingStartsAt, field.TypeTime, value)
+		_node.BillingStartsAt = &value
+	}
 	if value, ok := _c.mutation.BillingCadence(); ok {
 		_spec.SetField(subscription.FieldBillingCadence, field.TypeString, value)
 		_node.BillingCadence = value
@@ -815,15 +833,15 @@ func (_c *SubscriptionCreate) createSpec() (*Subscription, *sqlgraph.CreateSpec,
 		}
 		_spec.Edges = append(_spec.Edges, edge)
 	}
-	if nodes := _c.mutation.BillingSyncStateIDs(); len(nodes) > 0 {
+	if nodes := _c.mutation.SyncStateIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2O,
 			Inverse: false,
-			Table:   subscription.BillingSyncStateTable,
-			Columns: []string{subscription.BillingSyncStateColumn},
+			Table:   subscription.SyncStateTable,
+			Columns: []string{subscription.SyncStateColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(subscriptionbillingsyncstate.FieldID, field.TypeString),
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionsyncstate.FieldID, field.TypeString),
 			},
 		}
 		for _, k := range nodes {
@@ -1101,6 +1119,9 @@ func (u *SubscriptionUpsertOne) UpdateNewValues() *SubscriptionUpsertOne {
 		}
 		if _, exists := u.create.mutation.CostBasisMode(); exists {
 			s.SetIgnore(subscription.FieldCostBasisMode)
+		}
+		if _, exists := u.create.mutation.BillingStartsAt(); exists {
+			s.SetIgnore(subscription.FieldBillingStartsAt)
 		}
 		if _, exists := u.create.mutation.SettlementMode(); exists {
 			s.SetIgnore(subscription.FieldSettlementMode)
@@ -1535,6 +1556,9 @@ func (u *SubscriptionUpsertBulk) UpdateNewValues() *SubscriptionUpsertBulk {
 			}
 			if _, exists := b.mutation.CostBasisMode(); exists {
 				s.SetIgnore(subscription.FieldCostBasisMode)
+			}
+			if _, exists := b.mutation.BillingStartsAt(); exists {
+				s.SetIgnore(subscription.FieldBillingStartsAt)
 			}
 			if _, exists := b.mutation.SettlementMode(); exists {
 				s.SetIgnore(subscription.FieldSettlementMode)

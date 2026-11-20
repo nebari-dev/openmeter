@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
@@ -17,17 +17,17 @@ import (
 type (
 	UpdateBillingInvoiceRequest struct {
 		Invoice billing.InvoiceID
-		Update  api.UpdateInvoiceRequest
+		Update  apiv3models.UpdateInvoiceRequest
 	}
 	UpdateBillingInvoiceParams   = string
-	UpdateBillingInvoiceResponse = api.BillingInvoice
+	UpdateBillingInvoiceResponse = apiv3models.BillingInvoice
 	UpdateBillingInvoiceHandler  = httptransport.HandlerWithArgs[UpdateBillingInvoiceRequest, UpdateBillingInvoiceResponse, UpdateBillingInvoiceParams]
 )
 
 func (h *handler) UpdateBillingInvoice() UpdateBillingInvoiceHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, invoiceId UpdateBillingInvoiceParams) (UpdateBillingInvoiceRequest, error) {
-			body := api.UpdateInvoiceRequest{}
+			body := apiv3models.UpdateInvoiceRequest{}
 			if err := request.ParseBody(r, &body); err != nil {
 				return UpdateBillingInvoiceRequest{}, err
 			}
@@ -54,6 +54,7 @@ func (h *handler) UpdateBillingInvoice() UpdateBillingInvoiceHandler {
 			if err != nil {
 				return UpdateBillingInvoiceResponse{}, err
 			}
+
 			if existing.Type() != billing.InvoiceTypeStandard {
 				return UpdateBillingInvoiceResponse{}, billing.NotFoundError{
 					ID:     request.Invoice.ID,
@@ -68,8 +69,9 @@ func (h *handler) UpdateBillingInvoice() UpdateBillingInvoiceHandler {
 					{Field: "body.type", Reason: err.Error(), Source: apierrors.InvalidParamSourceBody},
 				})
 			}
+
 			switch invoiceType {
-			case string(api.BillingInvoiceStandardTypeStandard):
+			case string(apiv3models.BillingInvoiceStandardTypeStandard):
 				req, err := request.Update.AsUpdateInvoiceStandardRequest()
 				if err != nil {
 					return UpdateBillingInvoiceResponse{}, err
@@ -85,9 +87,11 @@ func (h *handler) UpdateBillingInvoice() UpdateBillingInvoiceHandler {
 				if err != nil {
 					return UpdateBillingInvoiceResponse{}, err
 				}
+
 				return ToAPIBillingInvoice(billing.NewInvoice(updated))
 			default:
 				err := fmt.Errorf("unsupported invoice type: %s", invoiceType)
+
 				return UpdateBillingInvoiceResponse{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
 					{Field: "body", Reason: err.Error(), Source: apierrors.InvalidParamSourceBody},
 				})

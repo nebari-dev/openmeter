@@ -151,6 +151,10 @@ func (BillingWorkflowConfig) Fields() []ent.Field {
 			GoType(billing.SubscriptionEndProrationMode("")).
 			Default(string(billing.SubscriptionEndProrationModeBillActualPeriod)),
 
+		field.Enum("empty_invoice_mode").
+			GoType(billing.EmptyInvoiceMode("")).
+			Default(string(billing.EmptyInvoiceModeCreate)),
+
 		// TODO: remove this legacy JSON field after all workflow-config read and write
 		// paths use the normalized tax columns as the sole representation.
 		field.JSON("invoice_default_tax_settings", productcatalog.TaxConfig{}).
@@ -204,7 +208,6 @@ func (BillingCustomerOverride) Mixin() []ent.Mixin {
 		entutils.IDMixin{},
 		entutils.NamespaceMixin{},
 		entutils.TimeMixin{},
-		TaxMixin{},
 	}
 }
 
@@ -217,9 +220,6 @@ func (BillingCustomerOverride) Fields() []ent.Field {
 				dialect.Postgres: "char(26)",
 			}),
 
-		// For now we are not allowing for provider type overrides (that should be a separate billing provider entity).
-		//
-		// When we have the provider configs ready, we will add the field overrides for those specific fields.
 		field.String("billing_profile_id").
 			Optional().
 			Nillable().
@@ -227,53 +227,77 @@ func (BillingCustomerOverride) Fields() []ent.Field {
 				dialect.Postgres: "char(26)",
 			}),
 
-		// Workflow config overrides
+		// Historical workflow fields remain in storage until the cleanup migration.
 		field.Enum("collection_alignment").
 			GoType(billing.AlignmentKind("")).
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.JSON("anchored_alignment_detail", &billing.AnchoredAlignmentDetail{}).
 			SchemaType(map[string]string{
 				dialect.Postgres: "jsonb",
 			}).
-			Optional(),
+			Optional().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.String("line_collection_period").
 			GoType(datetime.ISODurationString("")).
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.Bool("invoice_auto_advance").
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.String("invoice_draft_period").
 			GoType(datetime.ISODurationString("")).
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.String("invoice_due_after").
 			GoType(datetime.ISODurationString("")).
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.Enum("invoice_collection_method").
 			GoType(billing.CollectionMethod("")).
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.Bool("invoice_progressive_billing").
 			Optional().
-			Nillable(),
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 
 		field.JSON("invoice_default_tax_config", productcatalog.TaxConfig{}).
-			Optional(),
+			Optional().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
+
+		field.String("tax_code_id").
+			Optional().
+			Nillable().
+			SchemaType(map[string]string{
+				dialect.Postgres: "char(26)",
+			}).
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
+
+		field.Enum("tax_behavior").
+			GoType(productcatalog.TaxBehavior("")).
+			Optional().
+			Nillable().
+			Deprecated("customer workflow overrides are no longer supported; assign a billing profile instead"),
 	}
 }
 
 func (BillingCustomerOverride) Indexes() []ent.Index {
 	return []ent.Index{
+		index.Fields("tax_code_id"),
 		index.Fields("namespace", "id").Unique(),
 		index.Fields("namespace", "customer_id").Unique(),
 	}
@@ -546,10 +570,8 @@ func (BillingInvoiceLine) Annotations() []schema.Annotation {
 
 func (BillingInvoiceLine) Indexes() []ent.Index {
 	return []ent.Index{
-		// PostgreSQL looks up child rows by the foreign-key column alone when a line
-		// config is deleted, so these indexes prevent a scan of all invoice lines.
-		index.Edges("flat_fee_line").
-			StorageKey("billing_invoice_lines_fee_config_id_idx"),
+		// PostgreSQL looks up child rows by the foreign-key column alone when a usage
+		// config is deleted, so this index prevents a scan of all invoice lines.
 		index.Edges("usage_based_line").
 			StorageKey("billing_invoice_lines_usage_config_id_idx"),
 		// Self-referencing foreign-key actions filter by parent_line_id without the
@@ -557,6 +579,7 @@ func (BillingInvoiceLine) Indexes() []ent.Index {
 		index.Fields("parent_line_id").
 			StorageKey("billing_invoice_lines_parent_id_idx"),
 		index.Fields("namespace", "invoice_id"),
+		index.Fields("namespace", "charge_id"),
 		index.Fields("namespace", "parent_line_id"),
 		index.Fields("namespace", "parent_line_id", "child_unique_reference_id").
 			Annotations(
@@ -577,10 +600,6 @@ func (BillingInvoiceLine) Edges() []ent.Edge {
 			Ref("billing_invoice_lines").
 			Field("split_line_group_id").
 			Unique(),
-		edge.To("flat_fee_line", BillingInvoiceFlatFeeLineConfig.Type).
-			StorageKey(edge.Column("fee_line_config_id")).
-			Unique().
-			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("usage_based_line", BillingInvoiceUsageBasedLineConfig.Type).
 			StorageKey(edge.Column("usage_based_line_config_id")).
 			Unique().
@@ -593,8 +612,6 @@ func (BillingInvoiceLine) Edges() []ent.Edge {
 		edge.To("detailed_lines_v2", BillingStandardInvoiceDetailedLine.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("line_usage_discounts", BillingInvoiceLineUsageDiscount.Type).
-			Annotations(entsql.OnDelete(entsql.Cascade)),
-		edge.To("line_amount_discounts", BillingInvoiceLineDiscount.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.From("subscription", Subscription.Type).
 			Ref("billing_lines").
@@ -718,36 +735,6 @@ func (BillingGatheringInvoiceLine) Edges() []ent.Edge {
 			Ref("billing_gathering_invoice_lines").
 			Field("tax_code_id").
 			Unique(),
-	}
-}
-
-type BillingInvoiceFlatFeeLineConfig struct {
-	ent.Schema
-}
-
-func (BillingInvoiceFlatFeeLineConfig) Mixin() []ent.Mixin {
-	return []ent.Mixin{
-		entutils.NamespaceMixin{},
-		entutils.IDMixin{},
-	}
-}
-
-func (BillingInvoiceFlatFeeLineConfig) Fields() []ent.Field {
-	return []ent.Field{
-		field.Other("per_unit_amount", alpacadecimal.Decimal{}).
-			SchemaType(map[string]string{
-				dialect.Postgres: "numeric",
-			}),
-		field.Enum("category").
-			GoType(stddetailedline.Category("")).
-			Default(string(stddetailedline.CategoryRegular)),
-		field.Enum("payment_term").
-			GoType(productcatalog.PaymentTermType("")).
-			Default(string(productcatalog.InAdvancePaymentTerm)),
-		// Note: this is only used for sorting the lines in the invoice, only valid for detailed lines
-		field.Int("index").
-			Optional().
-			Nillable(),
 	}
 }
 
@@ -950,72 +937,6 @@ func (BillingInvoiceSplitLineGroup) Edges() []ent.Edge {
 			Ref("billing_split_line_groups").
 			Field("charge_id").
 			Unique(),
-	}
-}
-
-// TODO[later]: Rename to BillingInvoiceLineAmountDiscount
-type BillingInvoiceLineDiscount struct {
-	ent.Schema
-}
-
-func (BillingInvoiceLineDiscount) Mixin() []ent.Mixin {
-	return []ent.Mixin{
-		entutils.IDMixin{},
-		entutils.NamespaceMixin{},
-		entutils.TimeMixin{},
-		BillingInvoiceLineDiscountBase{},
-	}
-}
-
-func (BillingInvoiceLineDiscount) Fields() []ent.Field {
-	return []ent.Field{
-		field.Other("amount", alpacadecimal.Decimal{}).
-			SchemaType(map[string]string{
-				dialect.Postgres: "numeric",
-			}),
-
-		field.Other("rounding_amount", alpacadecimal.Decimal{}).
-			SchemaType(map[string]string{
-				dialect.Postgres: "numeric",
-			}).
-			Optional().
-			Nillable(),
-
-		// TODO: Ent has issues with custom value scanners from mixins, so this is a duplicate
-		// TODO[later]: Rename to reason_details (same time as the DB table rename, as this is breaking either ways)
-		field.String("source_discount").
-			GoType(&billing.DiscountReason{}).
-			ValueScanner(BillingDiscountReasonValueScanner).
-			SchemaType(map[string]string{
-				dialect.Postgres: "jsonb",
-			}).
-			Optional().
-			Nillable(),
-	}
-}
-
-func (BillingInvoiceLineDiscount) Indexes() []ent.Index {
-	return []ent.Index{
-		// Invoice-line deletion cascades by line_id alone, so the namespace-prefixed
-		// indexes below cannot prevent a scan of all amount discounts.
-		index.Fields("line_id").
-			StorageKey("billing_invoice_line_discounts_line_id_idx"),
-		index.Fields("namespace", "line_id"),
-		index.Fields("namespace", "line_id", "child_unique_reference_id").
-			Annotations(
-				entsql.IndexWhere("child_unique_reference_id IS NOT NULL AND deleted_at IS NULL"),
-			).
-			Unique(),
-	}
-}
-
-func (BillingInvoiceLineDiscount) Edges() []ent.Edge {
-	return []ent.Edge{
-		edge.From("billing_invoice_line", BillingInvoiceLine.Type).
-			Ref("line_amount_discounts").
-			Field("line_id").
-			Unique().
-			Required(),
 	}
 }
 
@@ -1295,6 +1216,16 @@ func (BillingInvoice) Fields() []ent.Field {
 
 		field.Enum("deletion_source").
 			GoType(billing.ChangeSource("")).
+			Optional().
+			Nillable(),
+
+		field.Enum("invoicing_app_outcome").
+			GoType(billing.InvoicingAppOutcome("")).
+			Optional().
+			Nillable(),
+
+		field.Enum("invoicing_app_outcome_reason").
+			GoType(billing.InvoicingAppOutcomeReason("")).
 			Optional().
 			Nillable(),
 

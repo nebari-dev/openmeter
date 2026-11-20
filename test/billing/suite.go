@@ -31,6 +31,8 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	billingadapter "github.com/openmeterio/openmeter/openmeter/billing/adapter"
 	featuremeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
+	splitlinegrouptestutils "github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup/testutils"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	"github.com/openmeterio/openmeter/openmeter/billing/models/totals"
 	billingratingservice "github.com/openmeterio/openmeter/openmeter/billing/rating/service"
@@ -48,15 +50,14 @@ import (
 	meteradapter "github.com/openmeterio/openmeter/openmeter/meter/mockadapter"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	registrybuilder "github.com/openmeterio/openmeter/openmeter/registry/builder"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
 	"github.com/openmeterio/openmeter/openmeter/subject"
 	subjectadapter "github.com/openmeterio/openmeter/openmeter/subject/adapter"
 	subjectservice "github.com/openmeterio/openmeter/openmeter/subject/service"
 	subjecthooks "github.com/openmeterio/openmeter/openmeter/subject/service/hooks"
-	"github.com/openmeterio/openmeter/openmeter/taxcode"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
-	taxcodeservice "github.com/openmeterio/openmeter/openmeter/taxcode/service"
+	taxcodetestutils "github.com/openmeterio/openmeter/openmeter/taxcode/testutils"
 	"github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/clock"
@@ -74,6 +75,7 @@ type BaseSuite struct {
 	DBClient *db.Client
 
 	BillingAdapter          billing.Adapter
+	SplitLineGroupService   splitlinegroup.Service
 	BillingService          billing.Service
 	FeatureMeterResolver    *featuremeterservice.Resolver
 	LegacyBillingLineEngine *billinglineengine.Engine
@@ -93,7 +95,18 @@ type BaseSuite struct {
 	AppService app.Service
 	SandboxApp *appsandbox.MockableFactory
 
-	TaxCodeService taxcode.Service
+	TaxCodeEnv *taxcodetestutils.TestEnv
+	// TaxCodeResolver is the production resolver v1 handlers get; the billing service only uses
+	// its read side.
+	TaxCodeResolver productcatalog.TransactionalTaxCodeResolver
+}
+
+func (s *BaseSuite) RequireRun(name string, subtest func()) {
+	t := s.T()
+	t.Helper()
+	if !s.Run(name, subtest) {
+		t.Fatalf("test failed")
+	}
 }
 
 func (s *BaseSuite) TearDownTest() {
@@ -112,6 +125,7 @@ func (b *BaseSuite) GetSubscriptionMixInDependencies() SubscriptionMixInDependen
 		FeatureRepo:            b.FeatureRepo,
 		FeatureService:         b.FeatureService,
 		CustomerService:        b.CustomerService,
+		TaxCodeService:         b.TaxCodeEnv.Service,
 		MeterAdapter:           b.MeterAdapter,
 		MockStreamingConnector: b.MockStreamingConnector,
 	}
@@ -205,18 +219,7 @@ func (s *BaseSuite) setupSuite() {
 	s.AppService = appService
 
 	// TaxCode
-	taxCodeAdapter, err := taxcodeadapter.New(taxcodeadapter.Config{
-		Client: dbClient,
-		Logger: slog.Default(),
-	})
-	require.NoError(t, err)
-
-	taxCodeService, err := taxcodeservice.New(taxcodeservice.Config{
-		Adapter: taxCodeAdapter,
-		Logger:  slog.Default(),
-	})
-	require.NoError(t, err)
-	s.TaxCodeService = taxCodeService
+	s.TaxCodeEnv = taxcodetestutils.NewTestEnvFromClient(t, dbClient, slog.Default())
 
 	// Billing
 	billingAdapter, err := billingadapter.New(billingadapter.Config{
@@ -225,7 +228,6 @@ func (s *BaseSuite) setupSuite() {
 	})
 	require.NoError(t, err)
 	s.BillingAdapter = billingAdapter
-	require.NoError(t, billingAdapter.SetInvoiceDefaultSchemaLevel(t.Context(), billingadapter.DefaultInvoiceWriteSchemaLevel))
 
 	billingSequenceAdapter, err := billingsequenceadapter.New(billingsequenceadapter.Config{
 		Client: dbClient,
@@ -249,8 +251,10 @@ func (s *BaseSuite) setupSuite() {
 	require.NoError(t, err)
 	s.FeatureMeterResolver = featureMeterResolver
 
+	s.SplitLineGroupService = splitlinegrouptestutils.NewTestEnv(t, dbClient, slog.Default())
+
 	legacyBillingLineEngine, err := billinglineengine.New(billinglineengine.Config{
-		SplitLineGroupAdapter:        billingAdapter,
+		SplitLineGroupService:        s.SplitLineGroupService,
 		RatingService:                billingRatingService,
 		FeatureMeterResolver:         featureMeterResolver,
 		StreamingConnector:           s.MockStreamingConnector,
@@ -259,10 +263,13 @@ func (s *BaseSuite) setupSuite() {
 	require.NoError(t, err)
 	s.LegacyBillingLineEngine = legacyBillingLineEngine
 
+	taxCodeResolver, err := taxcoderesolver.NewTransactional(s.TaxCodeEnv.Service, s.TaxCodeEnv.Adapter)
+	require.NoError(t, err)
+	s.TaxCodeResolver = taxCodeResolver
+
 	billingService, err := billingservice.New(billingservice.Config{
 		Adapter:                 billingAdapter,
 		SequenceService:         billingSequenceService,
-		RatingService:           billingRatingService,
 		LegacyBillingLineEngine: legacyBillingLineEngine,
 		CustomerService:         s.CustomerService,
 		AppService:              s.AppService,
@@ -270,7 +277,8 @@ func (s *BaseSuite) setupSuite() {
 		FeatureMeterResolver:    featureMeterResolver,
 		Publisher:               publisher,
 		AdvancementStrategy:     billing.ForegroundAdvancementStrategy,
-		TaxCodeService:          taxCodeService,
+		TaxCodeService:          s.TaxCodeEnv.Service,
+		TaxCodeResolver:         taxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -304,10 +312,10 @@ func (s *BaseSuite) setupSuite() {
 
 	// customer hooks
 	customerSubjectHook, err := customerservicehooks.NewSubjectCustomerHook(customerservicehooks.SubjectCustomerHookConfig{
-		Customer:         customerService,
-		CustomerOverride: billingService,
-		Logger:           slog.Default(),
-		Tracer:           noop.NewTracerProvider().Tracer("test_env"),
+		Customer:               customerService,
+		CustomerBillingProfile: billingService,
+		Logger:                 slog.Default(),
+		Tracer:                 noop.NewTracerProvider().Tracer("test_env"),
 	})
 	require.NoError(t, err)
 	subjectService.RegisterHooks(customerSubjectHook)
@@ -361,6 +369,7 @@ func (s *BaseSuite) CreateTestCustomer(ns string, subjectKey string) *customer.C
 	})
 
 	s.NoError(err)
+
 	return customer
 }
 
@@ -397,6 +406,7 @@ func (s *BaseSuite) DebugDumpStandardInvoice(h string, i billing.StandardInvoice
 		} else if l1.Period.From.After(l2.Period.From) {
 			return 1
 		}
+
 		return 0
 	})
 
@@ -430,6 +440,7 @@ func (s *BaseSuite) DebugDumpGatheringInvoice(h string, i billing.GatheringInvoi
 		} else if l1.ServicePeriod.From.After(l2.ServicePeriod.From) {
 			return 1
 		}
+
 		return 0
 	})
 
@@ -643,7 +654,7 @@ func (s *BaseSuite) ProvisionBillingProfile(ctx context.Context, ns string, appI
 		opt(&provisionOpts)
 	}
 
-	clonedCreateProfileInput := minimalCreateProfileInputTemplate(appID)
+	clonedCreateProfileInput := MinimalCreateProfileInputTemplate(appID)
 	clonedCreateProfileInput.Namespace = ns
 
 	for _, editFn := range provisionOpts.editFns {
@@ -658,18 +669,14 @@ func (s *BaseSuite) ProvisionBillingProfile(ctx context.Context, ns string, appI
 
 // SeedProfileDefaultTaxConfigViaAdapter seeds a stored DefaultTaxConfig on an existing
 // billing profile directly through the billing adapter, bypassing the service-level tax
-// code deprecation gate (InvoicingConfig.EnforceTaxCodeDeprecation). This simulates legacy
-// rows that were created before tax codes on billing profiles were deprecated.
+// code deprecation gate. This simulates legacy rows that were created before tax codes on
+// billing profiles were deprecated.
 //
-// The tax config is resolved in place exactly like the pre-deprecation service path
-// (productcatalog.ResolveTaxConfig cross-populates TaxCodeID and Stripe.Code), then
-// persisted via the adapter so the JSON column, tax_code_id FK and tax_behavior columns
+// It's persisted via the adapter so the JSON column, tax_code_id FK and tax_behavior columns
 // are written by the production adapter code path. Returns the re-read profile so tests
-// can assert on the stored state including read-time backfill.
-func (s *BaseSuite) SeedProfileDefaultTaxConfigViaAdapter(ctx context.Context, profileID billing.ProfileID, taxConfig *productcatalog.TaxConfig) *billing.AdapterGetProfileResponse {
+// can assert on the stored state.
+func (s *BaseSuite) SeedProfileDefaultTaxConfigViaAdapter(ctx context.Context, profileID billing.ProfileID, taxConfig *productcatalog.TaxCodeConfig) *billing.AdapterGetProfileResponse {
 	s.T().Helper()
-
-	s.Require().NoError(productcatalog.ResolveTaxConfig(ctx, s.TaxCodeService, profileID.Namespace, taxConfig))
 
 	adapterProfile, err := s.BillingAdapter.GetProfile(ctx, billing.GetProfileInput{Profile: profileID})
 	s.Require().NoError(err)
@@ -689,60 +696,6 @@ func (s *BaseSuite) SeedProfileDefaultTaxConfigViaAdapter(ctx context.Context, p
 	s.Require().NoError(err)
 
 	return updatedProfile
-}
-
-// ProvisionDefaultTaxCodes creates the invoicing and credit-grant tax codes for the
-// namespace and stores them as the organization defaults. Tests that create charges
-// via the real charges service must call this for the namespace, because charge
-// creation auto-stamps the namespace's default tax code when the caller's TaxConfig
-// has no TaxCodeID.
-func (s *BaseSuite) ProvisionDefaultTaxCodes(ctx context.Context, ns string) taxcode.OrganizationDefaultTaxCodes {
-	s.T().Helper()
-
-	invoicing := s.ProvisionProviderDefaultTaxCode(ctx, ns)
-	creditGrant := s.getOrCreateTaxCodeByKey(ctx, ns, "default-credit-grant", "Default Credit Grant")
-
-	defaults, err := s.TaxCodeService.UpsertOrganizationDefaultTaxCodes(ctx, taxcode.UpsertOrganizationDefaultTaxCodesInput{
-		Namespace:            ns,
-		InvoicingTaxCodeID:   invoicing.ID,
-		CreditGrantTaxCodeID: creditGrant.ID,
-	})
-	s.Require().NoError(err, "upserting organization default tax codes")
-	return defaults
-}
-
-// ProvisionProviderDefaultTaxCode creates the tax code used when an invoicing app
-// omits an app-specific provider code. This is distinct from organization default
-// tax-code settings: API invoice edit diffing needs the provider-default tax code
-// row to resolve empty provider tax config, but it must not imply that the
-// namespace has configured org-level default tax codes.
-func (s *BaseSuite) ProvisionProviderDefaultTaxCode(ctx context.Context, ns string) taxcode.TaxCode {
-	s.T().Helper()
-
-	return s.getOrCreateTaxCodeByKey(ctx, ns, taxcode.ProviderDefaultTaxCodeKey, "Provider Default")
-}
-
-func (s *BaseSuite) getOrCreateTaxCodeByKey(ctx context.Context, ns string, key string, name string) taxcode.TaxCode {
-	s.T().Helper()
-
-	taxCode, err := s.TaxCodeService.GetTaxCodeByKey(ctx, taxcode.GetTaxCodeByKeyInput{
-		Namespace: ns,
-		Key:       key,
-	})
-	if err == nil {
-		return taxCode
-	}
-
-	s.Require().True(taxcode.IsTaxCodeNotFoundError(err), "getting tax code by key should either succeed or return not found")
-
-	taxCode, err = s.TaxCodeService.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-		Namespace: ns,
-		Key:       key,
-		Name:      name,
-	})
-	s.Require().NoError(err, "creating tax code")
-
-	return taxCode
 }
 
 type SetupCustomInvoicingResponse struct {

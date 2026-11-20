@@ -21,6 +21,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/ledgertransaction"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/payment"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
+	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
 	"github.com/openmeterio/openmeter/pkg/clock"
@@ -49,7 +50,7 @@ func (s *UsageBasedChargesTestSuite) TearDownTest() {
 func (s *UsageBasedChargesTestSuite) TestUsageBasedCustomCurrencyCreditThenInvoiceCreatesFiatOveragePlaceholder() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-custom-currency")
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	customer := s.CreateTestCustomer(ns, "test-subject")
 	_ = s.ProvisionBillingProfile(ctx, ns, customInvoicing.App.GetID())
@@ -69,6 +70,18 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCustomCurrencyCreditThenInvoi
 	costBasisIntent := costbasis.NewIntent(costbasis.DynamicIntent{
 		FiatCurrency: fiatCurrency,
 	})
+	clock.FreezeTime(servicePeriod.From.Add(-time.Hour))
+	defer clock.UnFreeze()
+
+	_, err = s.CurrencyService.CreateCostBasis(ctx, currencies.CreateCostBasisInput{
+		Namespace:  ns,
+		CurrencyID: customCurrency.ID,
+		FiatCode:   USD,
+		Rate:       alpacadecimal.NewFromFloat(0.25),
+	})
+	s.Require().NoError(err)
+
+	clock.FreezeTime(servicePeriod.From)
 
 	var charge usagebased.Charge
 
@@ -308,7 +321,6 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyFiatOverageAfter
 	// - issuing is retried after the invoicing app recovers
 	// then:
 	// - retry reuses gross preparation, and sync retry reuses completed settlement
-
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-fiat-overage-sync-retry")
 
@@ -329,7 +341,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyFiatOverageAfter
 	clock.FreezeTime(createAt)
 	defer clock.UnFreeze()
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -519,7 +531,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyFiatOverageAfter
 		s.Require().NoError(err)
 		s.Require().NotNil(run.InvoiceUsage)
 		s.False(run.Immutable)
-		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.InvoiceUsage.Totals)
+		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.InvoiceUsage.Totals.Totals)
 		s.Empty(run.FiatOverageCreditRealizations)
 		s.False(run.FiatOverageCreditAllocationCompleted)
 		s.False(run.NoFiatTransactionRequired)
@@ -559,7 +571,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyFiatOverageAfter
 		s.Require().NotNil(run.InvoiceUsage)
 		s.False(run.Immutable)
 		s.Require().NotNil(run.InvoiceUsage.LedgerTransaction)
-		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.InvoiceUsage.Totals)
+		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.InvoiceUsage.Totals.Totals)
 		s.True(run.FiatOverageCreditAllocationCompleted)
 		s.True(run.NoFiatTransactionRequired)
 		s.requireCreditRealizations(
@@ -780,7 +792,7 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCustomCurrencyCreditThenInvoi
 	clock.UnFreeze()
 	s.T().Cleanup(clock.UnFreeze)
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -900,7 +912,7 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCustomCurrencyCreditThenInvoi
 		s.Equal(usagebased.RealizationRunTypeFinalRealization, initialRun.Type)
 		s.RequireTotals(
 			billingtest.ExpectedTotals{Amount: 26, CreditsTotal: 12, Total: 14},
-			initialRun.Totals,
+			initialRun.Totals.Totals,
 		)
 		s.requireCreditRealizations(
 			[]expectedCreditRealization{{Type: creditrealization.TypeAllocation, Amount: 12}},
@@ -1352,7 +1364,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 			clock.UnFreeze()
 			defer clock.UnFreeze()
 
-			defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+			defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 			sandboxApp := s.InstallSandboxApp(s.T(), ns)
 			customer := s.CreateTestCustomer(ns, "customer-c1")
 			profileOptions := []billingtest.BillingProfileProvisionOption{
@@ -1362,6 +1374,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 			if realizationVariant.enableProgressiveBilling {
 				profileOptions = append(profileOptions, billingtest.WithProgressiveBilling())
 			}
+
 			_ = s.ProvisionBillingProfile(
 				ctx,
 				ns,
@@ -1490,7 +1503,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 				s.Equal(realizationVariant.expectedRunType, initialRun.Type)
 				s.True(realizationVariant.invoiceAt.Equal(initialRun.ServicePeriodTo))
 				s.Equal(test.onRunCreated.usageAdded, initialRun.MeteredQuantity.InexactFloat64())
-				s.RequireTotals(test.onRunCreated.expectRunTotals, initialRun.Totals)
+				s.RequireTotals(test.onRunCreated.expectRunTotals, initialRun.Totals.Totals)
 				s.requireCreditRealizations(
 					nil,
 					initialRun.FiatOverageCreditRealizations,
@@ -1525,6 +1538,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 				if test.expectLineDeleted {
 					expectedStatus = realizationVariant.expectedChargeStatusAfterPayment
 				}
+
 				s.Equal(expectedStatus, charge.Status)
 
 				var collectedRun usagebased.RealizationRun
@@ -1538,9 +1552,10 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 					collectedRun, err = charge.GetCurrentRealizationRun()
 					s.Require().NoError(err)
 				}
+
 				s.Equal(realizationVariant.expectedRunType, collectedRun.Type)
 				s.Equal(test.onRunCreated.usageAdded+test.onCollectionComplete.usageAdded, collectedRun.MeteredQuantity.InexactFloat64())
-				s.RequireTotals(test.onCollectionComplete.expectRunTotals, collectedRun.Totals)
+				s.RequireTotals(test.onCollectionComplete.expectRunTotals, collectedRun.Totals.Totals)
 				s.requireCreditRealizations(
 					nil,
 					collectedRun.FiatOverageCreditRealizations,
@@ -1568,6 +1583,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 						line.CreditsApplied.SumAmount(fiatCurrency).InexactFloat64(),
 					)
 				}
+
 				s.RequireTotals(test.onCollectionComplete.expectInvoiceTotals, invoice.Totals)
 			})
 
@@ -1687,7 +1703,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 					s.Nil(realizedRun.InvoiceUsage)
 				} else {
 					s.Require().NotNil(realizedRun.InvoiceUsage)
-					s.RequireTotals(test.onCollectionComplete.expectInvoiceTotals, realizedRun.InvoiceUsage.Totals)
+					s.RequireTotals(test.onCollectionComplete.expectInvoiceTotals, realizedRun.InvoiceUsage.Totals.Totals)
 				}
 
 				if test.expectPaymentSettled {
@@ -1706,6 +1722,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 					} else {
 						s.Equal(1, customCurrencyOverageAccruedInvocations)
 					}
+
 					s.Nil(realizedRun.Payment)
 					s.True(realizedRun.NoFiatTransactionRequired)
 				}
@@ -1719,6 +1736,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 				if test.expectLineDeleted {
 					expectedInvoiceStatus = billing.StandardInvoiceStatusDeleted
 				}
+
 				s.Equal(expectedInvoiceStatus, activeInvoice.Status)
 
 				if test.expectLineDeleted {
@@ -1816,7 +1834,7 @@ func (s *UsageBasedChargesTestSuite) runUsageBasedCustomCurrencyCreditThenInvoic
 func (s *UsageBasedChargesTestSuite) TestUsageBasedCreditThenInvoicePartialInvoiceLifecycle() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-partial-invoice-lifecycle")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -2023,7 +2041,7 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCreditThenInvoicePartialInvoi
 		})
 
 		// then
-		s.NoError(err)
+		s.Require().ErrorIs(err, billing.ErrInvoiceCreateAllLinesGated)
 		s.Empty(invoices)
 
 		charge := s.mustGetUsageBasedChargeByID(usageBasedChargeID)
@@ -2281,7 +2299,7 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCreditThenInvoicePartialInvoi
 func (s *UsageBasedChargesTestSuite) TestUsageBasedCreditThenInvoicePendingPartialInvoiceBlocksFinalRealizationUntilApproval() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-pending-partial-invoice-blocks-final")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -2412,7 +2430,7 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCreditThenInvoicePendingParti
 		})
 
 		// then
-		s.NoError(err)
+		s.Require().ErrorIs(err, billing.ErrInvoiceCreateAllLinesGated)
 		s.Empty(invoices)
 
 		charge := s.mustGetUsageBasedChargeByID(usageBasedChargeID)
@@ -2434,7 +2452,7 @@ func (s *UsageBasedChargesTestSuite) TestUsageBasedCreditThenInvoicePendingParti
 
 		// then
 		// the gate remains idempotent
-		s.NoError(err)
+		s.Require().ErrorIs(err, billing.ErrInvoiceCreateAllLinesGated)
 		s.Empty(invoices)
 		charge = s.mustGetUsageBasedChargeByID(usageBasedChargeID)
 		s.Len(charge.ValidationIssues, 1)

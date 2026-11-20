@@ -12,6 +12,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/creditpurchase"
+	chargedetailedline "github.com/openmeterio/openmeter/openmeter/billing/charges/models/detailedline"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating/service/mutator"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
@@ -170,7 +171,7 @@ func calculateFiatOverageForRun(charge usagebased.Charge, run usagebased.Realiza
 		return calculateFiatOverageForRunResult{}, nil
 	}
 
-	fiatOverage, err := charge.ConvertCustomCurrencyOverageToFiat(run.Totals)
+	fiatOverage, err := charge.ConvertCustomCurrencyOverageToFiat(run.Totals.Totals)
 	if err != nil {
 		return calculateFiatOverageForRunResult{}, err
 	}
@@ -310,6 +311,7 @@ func populateCustomCurrencyOverageFromRun(
 	if err != nil {
 		return fmt.Errorf("custom currency charge[%s] converting overage to fiat: %w", charge.ID, err)
 	}
+
 	if fiatOverage.FiatCurrency == nil {
 		return fmt.Errorf("custom currency charge[%s] does not have an invoiceable fiat overage", charge.ID)
 	}
@@ -326,6 +328,7 @@ func populateCustomCurrencyOverageFromRun(
 	if stdLine.Annotations == nil {
 		stdLine.Annotations = models.Annotations{}
 	}
+
 	stdLine.Annotations[billing.AnnotationKeyReason] = lo.ToPtr(billing.AnnotationValueReasonOverage)
 
 	stdLine.RateCardDiscounts = billing.Discounts{}
@@ -362,18 +365,21 @@ func populateCustomCurrencyOverageFromRun(
 	if err != nil {
 		return fmt.Errorf("populating custom currency overage line: %w", err)
 	}
+
 	*stdLine = *stdLineWithDetails
 
 	fiatCreditsApplied, err := run.FiatOverageCreditRealizations.AsCreditsApplied()
 	if err != nil {
 		return fmt.Errorf("mapping fiat overage credit realizations: %w", err)
 	}
+
 	stdLine.CreditsApplied = fiatCreditsApplied
 
 	detailedLines, err := stdLine.DetailedLines.WithCreditsApplied(fiatCreditsApplied, fiatOverage.FiatCurrency)
 	if err != nil {
 		return fmt.Errorf("applying fiat overage credits to detailed lines: %w", err)
 	}
+
 	stdLine.DetailedLines = stdLine.DetailedLinesWithIDReuse(detailedLines)
 	stdLine.Totals = stdLine.DetailedLines.SumTotals().RoundToPrecision(fiatOverage.FiatCurrency)
 
@@ -412,6 +418,7 @@ func mapUsageBasedDetailedLines(
 				Base:      base,
 				InvoiceID: stdLine.InvoiceID,
 			},
+			AmountDiscounts: chargedetailedline.MapAmountDiscountsToBilling(line.AmountDiscounts),
 		}
 	}))
 

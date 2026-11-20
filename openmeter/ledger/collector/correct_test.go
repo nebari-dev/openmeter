@@ -31,7 +31,7 @@ import (
 func TestCollectToReceivableAndCorrectPreservesChargeProvenance(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-receivable")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given: settlement-fiat credit purchased by one charge
 	sourceChargeID := testChargeID(1)
@@ -40,14 +40,13 @@ func TestCollectToReceivableAndCorrectPreservesChargeProvenance(t *testing.T) {
 
 	// when: part of it covers the custom overage charge's receivable
 	allocations, err := collector.collectToReceivable(t.Context(), CollectToReceivableInput{
-		Namespace:         env.Namespace,
-		ChargeID:          spendChargeID,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          env.CurrencyReference(),
-		ServicePeriod:     testServicePeriod(env),
-		Amount:            alpacadecimal.NewFromInt(20),
+		Namespace:     env.Namespace,
+		ChargeID:      spendChargeID,
+		CustomerID:    env.CustomerID.ID,
+		BookedAt:      env.Now(),
+		Currency:      env.CurrencyReference(),
+		ServicePeriod: testServicePeriod(env),
+		Amount:        alpacadecimal.NewFromInt(20),
 	})
 	require.NoError(t, err)
 	require.Len(t, allocations, 1)
@@ -103,7 +102,7 @@ func TestCollectToReceivableAndCorrectPreservesChargeProvenance(t *testing.T) {
 func TestCorrectCollectedAccruedUsesReverseFeatureAwareCollectionOrder(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - one spend charge fully consumes a feature-restricted source and an unrestricted source
@@ -124,16 +123,15 @@ func TestCorrectCollectedAccruedUsesReverseFeatureAwareCollectionOrder(t *testin
 	chargeID := testChargeID(1)
 
 	allocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
-		Namespace:         env.Namespace,
-		ChargeID:          chargeID,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          env.CurrencyReference(),
-		SettlementMode:    productcatalog.CreditThenInvoiceSettlementMode,
-		ServicePeriod:     servicePeriod,
-		Filters:           ledger.CreditFilters{Version: ledger.CreditFiltersVersion1, Features: []string{"api-calls"}},
-		Amount:            alpacadecimal.NewFromInt(restrictedAmount + unrestrictedAmount),
+		Namespace:      env.Namespace,
+		ChargeID:       chargeID,
+		CustomerID:     env.CustomerID.ID,
+		BookedAt:       env.Now(),
+		Currency:       env.CurrencyReference(),
+		SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+		ServicePeriod:  servicePeriod,
+		Filters:        ledger.CreditFilters{Version: ledger.CreditFiltersVersion1, Features: []string{"api-calls"}},
+		Amount:         alpacadecimal.NewFromInt(restrictedAmount + unrestrictedAmount),
 	})
 	require.NoError(t, err)
 	require.Len(t, allocations, 2) // two allocations: restricted source first, unrestricted source second.
@@ -168,8 +166,8 @@ func TestCorrectCollectedAccruedUsesReverseFeatureAwareCollectionOrder(t *testin
 func TestCorrectCollectedAccruedReopensBreakageByReverseFeatureAwareCollectionOrder(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-breakage")
 	breakageService := newTestBreakageService(t, env)
-	collector := newTestAccrualCollectorWithBreakage(t, env, breakageService)
-	corrector := newTestAccrualCorrector(t, env, breakageService)
+	collector := newTestAccrualCollector(t, env)
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - two expiring sources are fully consumed and their planned breakage is released
@@ -191,16 +189,15 @@ func TestCorrectCollectedAccruedReopensBreakageByReverseFeatureAwareCollectionOr
 	chargeID := testChargeID(3)
 
 	allocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
-		Namespace:         env.Namespace,
-		ChargeID:          chargeID,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          env.CurrencyReference(),
-		SettlementMode:    productcatalog.CreditThenInvoiceSettlementMode,
-		ServicePeriod:     servicePeriod,
-		Filters:           ledger.CreditFilters{Version: ledger.CreditFiltersVersion1, Features: []string{"api-calls"}},
-		Amount:            alpacadecimal.NewFromInt(restrictedAmount + unrestrictedAmount),
+		Namespace:      env.Namespace,
+		ChargeID:       chargeID,
+		CustomerID:     env.CustomerID.ID,
+		BookedAt:       env.Now(),
+		Currency:       env.CurrencyReference(),
+		SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
+		ServicePeriod:  servicePeriod,
+		Filters:        ledger.CreditFilters{Version: ledger.CreditFiltersVersion1, Features: []string{"api-calls"}},
+		Amount:         alpacadecimal.NewFromInt(restrictedAmount + unrestrictedAmount),
 	})
 	require.NoError(t, err)
 	require.Len(t, allocations, 2) // two consumed plans should produce two release records.
@@ -264,8 +261,8 @@ func TestCorrectCollectedAccruedReopensBreakageByReverseFeatureAwareCollectionOr
 func TestCorrectCollectedAccruedBreakageReopenTracksSourceOnBreakage(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-breakage")
 	breakageService := newTestBreakageService(t, env)
-	collector := newTestAccrualCollectorWithBreakage(t, env, breakageService)
-	corrector := newTestAccrualCorrector(t, env, breakageService)
+	collector := newTestAccrualCollector(t, env)
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - sourced expiring credit has been consumed by one spend charge
@@ -345,7 +342,7 @@ func TestCorrectCollectedAccruedBreakageReopenTracksSourceOnBreakage(t *testing.
 func TestCorrectCollectedAccruedPreservesSourceAndSpendBuckets(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-provenance")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - one spend charge consumes two same-route source charges
@@ -403,7 +400,7 @@ func TestCorrectCollectedAccruedPreservesSourceAndSpendBuckets(t *testing.T) {
 func TestCorrectCollectedAccruedPartiallyReversesAdvanceBackedCollection(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-advance")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - credit-only usage has no real source, so it creates advance receivable and accrued exposure
@@ -418,15 +415,14 @@ func TestCorrectCollectedAccruedPartiallyReversesAdvanceBackedCollection(t *test
 	chargeID := testChargeID(1)
 
 	allocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
-		Namespace:         env.Namespace,
-		ChargeID:          chargeID,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          env.CurrencyReference(),
-		SettlementMode:    productcatalog.CreditOnlySettlementMode,
-		ServicePeriod:     servicePeriod,
-		Amount:            alpacadecimal.NewFromInt(advanceAmount),
+		Namespace:      env.Namespace,
+		ChargeID:       chargeID,
+		CustomerID:     env.CustomerID.ID,
+		BookedAt:       env.Now(),
+		Currency:       env.CurrencyReference(),
+		SettlementMode: productcatalog.CreditOnlySettlementMode,
+		ServicePeriod:  servicePeriod,
+		Amount:         alpacadecimal.NewFromInt(advanceAmount),
 	})
 	require.NoError(t, err)
 	require.Len(t, allocations, 1) // credit-only shortfall creates one advance-backed allocation.
@@ -471,7 +467,7 @@ func TestCorrectSourceLessCustomCurrencyPromotionalCollection(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-custom-promotion")
 	env.Currency = currencyx.Code("ACME")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - 100 promotional ACME credits with no fiat exchange source
@@ -583,7 +579,7 @@ func TestCorrectFiatFundedCustomCurrencyCreditOnlyShortfall(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-funded-custom-shortfall")
 	env.Currency = currencyx.Code("ACME")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - 100 ACME credits funded from 25 USD at a copied 0.25 cost basis
@@ -692,17 +688,16 @@ func TestCorrectFiatFundedCustomCurrencyCreditOnlyShortfall(t *testing.T) {
 	require.NoError(t, err)
 
 	allocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
-		Namespace:         env.Namespace,
-		ChargeID:          spendCharge,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          customCurrencyReference,
-		SettlementMode:    productcatalog.CreditOnlySettlementMode,
-		ServicePeriod:     servicePeriod,
-		Amount:            alpacadecimal.NewFromInt(120),
-		TaxCode:           &taxCode,
-		TaxBehavior:       &taxBehavior,
+		Namespace:      env.Namespace,
+		ChargeID:       spendCharge,
+		CustomerID:     env.CustomerID.ID,
+		BookedAt:       env.Now(),
+		Currency:       customCurrencyReference,
+		SettlementMode: productcatalog.CreditOnlySettlementMode,
+		ServicePeriod:  servicePeriod,
+		Amount:         alpacadecimal.NewFromInt(120),
+		TaxCode:        &taxCode,
+		TaxBehavior:    &taxBehavior,
 	})
 	require.NoError(t, err)
 	require.Len(t, allocations, 2)
@@ -852,7 +847,7 @@ func TestCorrectCustomCurrencyCreditOnlyShortfall_MultipleFundingSourcesDoNotCro
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-custom-multi-source")
 	env.Currency = currencyx.Code("ACME")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given:
 	// - 100 ACME funded from USD at priority 1 (cost basis 0.25)
@@ -955,29 +950,27 @@ func TestCorrectCustomCurrencyCreditOnlyShortfall_MultipleFundingSourcesDoNotCro
 	// collections booked in independent transactions are independently
 	// correctable.
 	usdAllocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
-		Namespace:         env.Namespace,
-		ChargeID:          usdChargeID,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          customCurrencyReference,
-		SettlementMode:    productcatalog.CreditOnlySettlementMode,
-		ServicePeriod:     servicePeriod,
-		Amount:            alpacadecimal.NewFromInt(100),
+		Namespace:      env.Namespace,
+		ChargeID:       usdChargeID,
+		CustomerID:     env.CustomerID.ID,
+		BookedAt:       env.Now(),
+		Currency:       customCurrencyReference,
+		SettlementMode: productcatalog.CreditOnlySettlementMode,
+		ServicePeriod:  servicePeriod,
+		Amount:         alpacadecimal.NewFromInt(100),
 	})
 	require.NoError(t, err)
 	require.Len(t, usdAllocations, 1)
 
 	eurAllocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
-		Namespace:         env.Namespace,
-		ChargeID:          eurChargeID,
-		CustomerID:        env.CustomerID.ID,
-		BookedAt:          env.Now(),
-		SourceBalanceAsOf: env.Now(),
-		Currency:          customCurrencyReference,
-		SettlementMode:    productcatalog.CreditOnlySettlementMode,
-		ServicePeriod:     servicePeriod,
-		Amount:            alpacadecimal.NewFromInt(20),
+		Namespace:      env.Namespace,
+		ChargeID:       eurChargeID,
+		CustomerID:     env.CustomerID.ID,
+		BookedAt:       env.Now(),
+		Currency:       customCurrencyReference,
+		SettlementMode: productcatalog.CreditOnlySettlementMode,
+		ServicePeriod:  servicePeriod,
+		Amount:         alpacadecimal.NewFromInt(20),
 	})
 	require.NoError(t, err)
 	require.Len(t, eurAllocations, 1)
@@ -1016,10 +1009,10 @@ func TestCorrectCustomCurrencyCreditOnlyShortfall_MultipleFundingSourcesDoNotCro
 func newTestAccrualCorrector(
 	t testing.TB,
 	env *ledgertestutils.IntegrationEnv,
-	breakageService ledgerbreakage.Service,
 ) *correction.Corrector {
 	t.Helper()
 
+	breakageService := newTestBreakageService(t, env)
 	corrector, err := correction.New(correction.Config{
 		Logger:  omtestutils.NewDiscardLogger(t),
 		Advance: advancetestutils.NewService(t, env.Deps, breakageService),
@@ -1069,7 +1062,7 @@ func realizationsFromAllocations(env *ledgertestutils.IntegrationEnv, allocation
 func TestCorrectCollectedAccruedResumesCollapsedSourceSuffix(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-source-suffix")
 	collector := newTestAccrualCollector(t, env)
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 
 	// given: one allocation collapses two source charges, followed by another route.
 	sourceA, sourceB, sourceC, spend := testChargeID(1), testChargeID(2), testChargeID(3), testChargeID(4)
@@ -1078,7 +1071,7 @@ func TestCorrectCollectedAccruedResumesCollapsedSourceSuffix(t *testing.T) {
 	otherFBO := fundSourceCharge(t, env, sourceC, 2, 15)
 	allocations, err := collector.collectToAccrued(t.Context(), CollectToAccruedInput{
 		Namespace: env.Namespace, ChargeID: spend, CustomerID: env.CustomerID.ID,
-		BookedAt: env.Now(), SourceBalanceAsOf: env.Now(), Currency: env.CurrencyReference(),
+		BookedAt: env.Now(), Currency: env.CurrencyReference(),
 		SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
 		ServicePeriod:  testServicePeriod(env), Amount: alpacadecimal.NewFromInt(45),
 	})
@@ -1110,7 +1103,7 @@ func TestCorrectCollectedAccruedResumesCollapsedSourceSuffix(t *testing.T) {
 func TestCorrectRecognizedBackfillSelectsOriginalSpend(t *testing.T) {
 	env := ledgertestutils.NewIntegrationEnv(t, "collector-correct-shared-backfill")
 	env.Currency = "ACME"
-	corrector := newTestAccrualCorrector(t, env, ledgerbreakage.NewNoopService())
+	corrector := newTestAccrualCorrector(t, env)
 	deps := transactions.ResolverDependencies{
 		AccountService: env.Deps.ResolversService,
 		AccountCatalog: env.Deps.AccountService,
@@ -1186,6 +1179,7 @@ func TestCorrectRecognizedBackfillSelectsOriginalSpend(t *testing.T) {
 			},
 		)
 	}
+
 	scope := transactions.ResolutionScope{
 		Namespace:  env.Namespace,
 		CustomerID: env.CustomerID,
@@ -1245,6 +1239,7 @@ func TestCorrectRecognizedBackfillSelectsOriginalSpend(t *testing.T) {
 			}
 		}
 	}
+
 	require.Equal(t, float64(30), earnings[spends[0]].InexactFloat64())
 	require.Equal(t, float64(0), earnings[spends[1]].InexactFloat64())
 }

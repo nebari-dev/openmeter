@@ -107,7 +107,7 @@ func (s *InvoicableChargesTestSuite) TearDownTest() {
 func (s *InvoicableChargesTestSuite) TestFlatFeeGatheringPreviewPopulatesTotalsWithoutRealizationRun() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-gathering-preview")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateTestCustomer(ns, "test-subject")
@@ -313,7 +313,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 			clock.UnFreeze()
 			defer clock.UnFreeze()
 
-			defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+			defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 			sandboxApp := s.InstallSandboxApp(s.T(), ns)
 			customer := s.CreateTestCustomer(ns, "customer-c1")
 			_ = s.ProvisionBillingProfile(
@@ -440,6 +440,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 						if amount.GreaterThan(creditsAllocated) {
 							amount = creditsAllocated
 						}
+
 						if amount.IsZero() {
 							return nil
 						}
@@ -489,6 +490,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 						expectFiatTotals:   test.expectDraftInvoiceTotals,
 					})
 				}
+
 				s.Equal(overageName, line.Name)
 				s.Empty(line.RateCardDiscounts)
 				s.Empty(line.Discounts)
@@ -524,6 +526,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 				if test.creditsAllocated > 0 {
 					expectedCreditsApplied = 1
 				}
+
 				s.Len(run.CreditRealizations, expectedCreditsApplied)
 				s.Len(run.DetailedLines.OrEmpty()[0].CreditsApplied, expectedCreditsApplied)
 				s.Equal(test.expectLineDeleted, run.NoFiatTransactionRequired)
@@ -630,6 +633,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 				if expectedFiatCreditsAllocated > 0 {
 					expectedFiatRealizations = 1
 				}
+
 				s.Len(run.FiatOverageCreditRealizations, expectedFiatRealizations)
 
 				if !test.expectLineDeleted {
@@ -640,7 +644,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 					s.RequireTotals(billingtest.ExpectedTotals{
 						Amount: test.expectInvoiceTotals.Amount,
 						Total:  test.expectInvoiceTotals.Amount,
-					}, run.AccruedUsage.Totals)
+					}, run.AccruedUsage.Totals.Totals)
 				} else {
 					s.Zero(customCurrencyOverageAccruedCalls)
 					s.Nil(run.AccruedUsage)
@@ -672,6 +676,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceL
 				if test.expectLineDeleted {
 					expectedInvoiceStatus = billing.StandardInvoiceStatusDeleted
 				}
+
 				s.Equal(expectedInvoiceStatus, activeInvoice.Status)
 				s.Equal(currencyx.FiatCode(USD), activeInvoice.Currency)
 				s.RequireTotals(test.expectInvoiceTotals, activeInvoice.Totals)
@@ -774,7 +779,6 @@ func (s *InvoicableChargesTestSuite) runFlatFeeCustomCurrencyFiatOverageAfterInv
 	// - issuing is retried after the invoicing app recovers
 	// then:
 	// - issuing reuses the persisted allocation without invoking allocation again
-
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-fiat-overage-sync-retry")
 
@@ -791,7 +795,7 @@ func (s *InvoicableChargesTestSuite) runFlatFeeCustomCurrencyFiatOverageAfterInv
 	clock.FreezeTime(createAt)
 	defer clock.UnFreeze()
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -977,7 +981,7 @@ func (s *InvoicableChargesTestSuite) runFlatFeeCustomCurrencyFiatOverageAfterInv
 		s.Require().NotNil(run.AccruedUsage)
 		s.False(run.Immutable)
 		s.Require().NotNil(run.AccruedUsage.LedgerTransaction)
-		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.AccruedUsage.Totals)
+		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.AccruedUsage.Totals.Totals)
 		s.False(run.FiatOverageCreditAllocationCompleted)
 		s.False(run.NoFiatTransactionRequired)
 		s.Empty(run.FiatOverageCreditRealizations)
@@ -1010,7 +1014,7 @@ func (s *InvoicableChargesTestSuite) runFlatFeeCustomCurrencyFiatOverageAfterInv
 		s.Require().NotNil(run.AccruedUsage)
 		s.False(run.Immutable)
 		s.Require().NotNil(run.AccruedUsage.LedgerTransaction)
-		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.AccruedUsage.Totals)
+		s.RequireTotals(billingtest.ExpectedTotals{Amount: 5, Total: 5}, run.AccruedUsage.Totals.Totals)
 		s.True(run.FiatOverageCreditAllocationCompleted)
 		s.True(run.NoFiatTransactionRequired)
 		s.Require().Len(run.FiatOverageCreditRealizations, 1)
@@ -1212,7 +1216,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceR
 	clock.UnFreeze()
 	s.T().Cleanup(clock.UnFreeze)
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -1242,6 +1246,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceR
 		if amount.GreaterThan(chargeCurrencyCreditsAvailable) {
 			amount = chargeCurrencyCreditsAvailable
 		}
+
 		if amount.IsZero() {
 			return nil, nil
 		}
@@ -1456,7 +1461,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceM
 	clock.UnFreeze()
 	s.T().Cleanup(clock.UnFreeze)
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -1682,7 +1687,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyGatheringPreviewAn
 	clock.UnFreeze()
 	defer clock.UnFreeze()
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -1821,6 +1826,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyGatheringPreviewAn
 					lines := invoice.Lines.OrEmpty()
 					s.Require().Len(lines, 1)
 					test.mutate(&lines[0])
+
 					return nil
 				},
 				IncludeDeletedLines: true,
@@ -1930,6 +1936,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyGatheringPreviewAn
 					lines := invoice.Lines.OrEmpty()
 					s.Require().Len(lines, 1)
 					test.mutate(lines[0])
+
 					return nil
 				},
 				IncludeDeletedLines: true,
@@ -1954,6 +1961,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyGatheringPreviewAn
 				s.Equal(flatfee.StatusDeleted, charge.Status)
 				s.Nil(charge.Realizations.CurrentRun)
 				s.Equal(1, allocationCallback.nrInvocations)
+
 				return
 			}
 
@@ -2030,7 +2038,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyInvalidAccrualResu
 			clock.UnFreeze()
 			defer clock.UnFreeze()
 
-			defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+			defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 			sandboxApp := s.InstallSandboxApp(s.T(), ns)
 			customer := s.CreateTestCustomer(ns, "customer-c1")
 			_ = s.ProvisionBillingProfile(
@@ -2120,6 +2128,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyInvalidAccrualResu
 				accrualCalls++
 				s.Equal(chargeID.ID, input.Charge.ID)
 				s.Equal(runID, input.Run.ID)
+
 				return test.accrualResult, nil
 			}
 
@@ -2185,7 +2194,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyInvalidAccrualResu
 				s.Equal(accruedTransactionGroupID, persistedCharge.Realizations.CurrentRun.AccruedUsage.LedgerTransaction.TransactionGroupID)
 				s.RequireTotals(
 					billingtest.ExpectedTotals{Amount: 5, Total: 5},
-					persistedCharge.Realizations.CurrentRun.AccruedUsage.Totals,
+					persistedCharge.Realizations.CurrentRun.AccruedUsage.Totals.Totals,
 				)
 				s.Require().NotNil(persistedCharge.Realizations.CurrentRun.Payment)
 				s.Equal(payment.StatusSettled, persistedCharge.Realizations.CurrentRun.Payment.Status)
@@ -2211,7 +2220,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceS
 	clock.UnFreeze()
 	defer clock.UnFreeze()
 
-	defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+	defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	customer := s.CreateTestCustomer(ns, "customer-c1")
 	_ = s.ProvisionBillingProfile(
@@ -2512,7 +2521,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCustomCurrencyCreditThenInvoiceS
 func (s *InvoicableChargesTestSuite) TestUsageBasedGatheringPreviewPopulatesTotalsWithoutRealizationRun() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-gathering-preview")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -2619,7 +2628,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceImmutableProrat
 func runFlatFeeCreditThenInvoiceImmutableProrationScenario(s *BaseSuite, expectReplacementGatheringLine bool) {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-then-invoice-immutable-proration")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateTestCustomer(ns, "test-subject")
@@ -2756,6 +2765,7 @@ func runFlatFeeCreditThenInvoiceImmutableProrationScenario(s *BaseSuite, expectR
 			s.Require().Len(activeGatheringLines, 1)
 			s.Equal(servicePeriod.From, activeGatheringLines[0].ServicePeriod.From)
 			s.Equal(shrunkServicePeriodTo, activeGatheringLines[0].ServicePeriod.To)
+
 			return
 		}
 
@@ -2770,7 +2780,7 @@ func runFlatFeeCreditThenInvoiceImmutableProrationScenario(s *BaseSuite, expectR
 func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceZeroAmountCreatesNoGatheringLine() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-then-invoice-zero-amount")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateTestCustomer(ns, "test-subject")
@@ -2821,7 +2831,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceZeroAmountCreat
 func (s *InvoicableChargesTestSuite) TestFlatFeePartialCreditRealizations() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-partial-credit-realizations")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -3037,7 +3047,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeePartialCreditRealizations() {
 			Amount:       100,
 			Total:        70,
 			CreditsTotal: 30,
-		}, accruedUsage.Totals)
+		}, accruedUsage.Totals.Totals)
 
 		// Payment authorization should not be persisted until the payment flow advances past pending.
 		s.Nil(updatedFlatFeeCharge.Realizations.CurrentRun.Payment)
@@ -3095,7 +3105,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeePartialCreditRealizations() {
 func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceInAdvanceWithPromotionalCredits() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-then-invoice-in-advance-promotional")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -3246,7 +3256,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceInAdvanceWithPr
 func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceInvoiceAtBeforeServicePeriodStart() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-then-invoice-before-service-period")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateTestCustomer(ns, "test-subject")
@@ -3404,7 +3414,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceInvoiceAtBefore
 func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceFullyCreditedDoesNotAccrueInvoiceUsage() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-then-invoice-fully-credited")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -3497,13 +3507,13 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceFullyCreditedDo
 		s.Len(flatFeeWithDetailedLines.Realizations.CurrentRun.DetailedLines.OrEmpty(), len(invoice.Lines.OrEmpty()[0].DetailedLines))
 	})
 
+	lineEngine := s.Charges.flatFeeService.GetLineEngine()
 	s.Run("finalize invoice without invoice usage accrual", func() {
 		defer s.FlatFeeTestHandler.Reset()
 
 		invoiceUsageAccruedCallback := newCountedLedgerTransactionCallback[flatfee.OnInvoiceUsageAccruedInput]()
 		s.FlatFeeTestHandler.onInvoiceUsageAccrued = invoiceUsageAccruedCallback.Handler(s.T())
 
-		lineEngine := s.Charges.flatFeeService.GetLineEngine()
 		lines, err := lineEngine.OnCollectionCompleted(ctx, billing.OnCollectionCompletedInput{
 			Invoice: invoice,
 			Lines:   invoice.Lines.OrEmpty(),
@@ -3548,12 +3558,30 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceFullyCreditedDo
 		s.Require().NotNil(updatedFlatFeeCharge.Realizations.CurrentRun)
 		s.True(updatedFlatFeeCharge.Realizations.CurrentRun.Immutable)
 	})
+
+	s.Run("replay issued callback without invoice usage accrual", func() {
+		defer s.FlatFeeTestHandler.Reset()
+
+		invoiceUsageAccruedCallback := newCountedLedgerTransactionCallback[flatfee.OnInvoiceUsageAccruedInput]()
+		s.FlatFeeTestHandler.onInvoiceUsageAccrued = invoiceUsageAccruedCallback.Handler(s.T())
+
+		err := lineEngine.OnInvoiceIssued(ctx, billing.OnInvoiceIssuedInput{
+			Invoice: invoice,
+			Lines:   invoice.Lines.OrEmpty(),
+		})
+		s.NoError(err)
+		s.Equal(0, invoiceUsageAccruedCallback.nrInvocations)
+		updatedFlatFeeCharge := s.mustGetFlatFeeChargeByIDWithDetailedLines(flatFeeChargeID)
+		s.Equal(flatfee.StatusFinal, updatedFlatFeeCharge.Status)
+		s.Require().NotNil(updatedFlatFeeCharge.Realizations.CurrentRun)
+		s.True(updatedFlatFeeCharge.Realizations.CurrentRun.Immutable)
+	})
 }
 
 func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceZeroAmountNonZeroChargesAccruesInvoiceUsage() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-then-invoice-zero-amount-charges")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -3651,6 +3679,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceZeroAmountNonZe
 		for idx := range lines[0].DetailedLines {
 			lines[0].DetailedLines[idx].Totals = lines[0].Totals
 		}
+
 		invoice.Lines = billing.NewStandardInvoiceLines(lines)
 
 		lineEngine := s.Charges.flatFeeService.GetLineEngine()
@@ -3697,14 +3726,14 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditThenInvoiceZeroAmountNonZe
 			Amount:       0,
 			ChargesTotal: 100,
 			Total:        100,
-		}, updatedFlatFeeCharge.Realizations.CurrentRun.AccruedUsage.Totals)
+		}, updatedFlatFeeCharge.Realizations.CurrentRun.AccruedUsage.Totals.Totals)
 	})
 }
 
 func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycle() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-credit-only-lifecycle")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -3909,7 +3938,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycle() {
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       3,
 			CreditsTotal: 3,
-		}, currentRun.Totals)
+		}, currentRun.Totals.Totals)
 		s.Len(currentRun.CreditsAllocated, 1)
 		s.Equal(float64(3), currentRun.CreditsAllocated[0].Amount.InexactFloat64())
 
@@ -4005,7 +4034,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycle() {
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       8,
 			CreditsTotal: 8,
-		}, finalRun.Totals)
+		}, finalRun.Totals.Totals)
 		s.Len(finalRun.CreditsAllocated, 2)
 		s.Equal(float64(3), finalRun.CreditsAllocated[0].Amount.InexactFloat64())
 		s.Equal(float64(5), finalRun.CreditsAllocated[1].Amount.InexactFloat64())
@@ -4033,7 +4062,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycleVolumeTier
 
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-credit-only-lifecycle-volume-tiered-correction")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -4150,7 +4179,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycleVolumeTier
 			s.RequireTotals(billingtest.ExpectedTotals{
 				Amount: 20,
 				Total:  20,
-			}, input.Run.Totals)
+			}, input.Run.Totals.Totals)
 			s.Empty(input.Run.CreditsAllocated)
 
 			return creditrealization.CreateAllocationInputs{
@@ -4189,7 +4218,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycleVolumeTier
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       20,
 			CreditsTotal: 20,
-		}, currentRun.Totals)
+		}, currentRun.Totals.Totals)
 		s.Len(currentRun.CreditsAllocated, 1)
 		s.Equal(creditrealization.TypeAllocation, currentRun.CreditsAllocated[0].Type)
 		s.Equal(float64(20), currentRun.CreditsAllocated[0].Amount.InexactFloat64())
@@ -4218,7 +4247,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycleVolumeTier
 			s.RequireTotals(billingtest.ExpectedTotals{
 				Amount:       20,
 				CreditsTotal: 20,
-			}, input.Run.Totals)
+			}, input.Run.Totals.Totals)
 			s.Len(input.Run.CreditsAllocated, 1)
 			s.Equal(creditrealization.TypeAllocation, input.Run.CreditsAllocated[0].Type)
 			s.Equal(float64(20), input.Run.CreditsAllocated[0].Amount.InexactFloat64())
@@ -4277,7 +4306,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycleVolumeTier
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       11,
 			CreditsTotal: 11,
-		}, finalRun.Totals)
+		}, finalRun.Totals.Totals)
 		s.Len(finalRun.CreditsAllocated, 2)
 
 		s.Equal(creditrealization.TypeAllocation, finalRun.CreditsAllocated[0].Type)
@@ -4299,7 +4328,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyLifecycleVolumeTier
 func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceLifecycle() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-credit-then-invoice")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -4367,7 +4396,8 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceLifecycle() 
 		s.Equal(meta.ChargeStatusCreated, meta.ChargeStatus(fetched.Status))
 		s.Equal(usagebased.RatingEngineDelta, fetched.State.RatingEngine)
 		s.Empty(fetched.Realizations)
-		s.Nil(fetched.State.AdvanceAfter)
+		s.Require().NotNil(fetched.State.AdvanceAfter)
+		s.True(servicePeriod.From.Equal(*fetched.State.AdvanceAfter))
 	})
 
 	s.Run("#4 invoice pending lines at service period end", func() {
@@ -4527,7 +4557,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceLifecycle() 
 			Amount:       12.5,
 			Total:        4.5,
 			CreditsTotal: 8,
-		}, finalRun.InvoiceUsage.Totals)
+		}, finalRun.InvoiceUsage.Totals.Totals)
 		s.NotNil(finalRun.InvoiceUsage.LedgerTransaction)
 		s.Equal(invoiceUsageAccruedCallback.id, finalRun.InvoiceUsage.LedgerTransaction.TransactionGroupID)
 	})
@@ -4598,7 +4628,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceLifecycle() 
 func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceFullyCreditedDoesNotAccrueInvoiceUsage() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-credit-then-invoice-fully-credited")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -4664,7 +4694,8 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceFullyCredite
 		fetched := s.mustGetUsageBasedChargeByID(usageBasedChargeID)
 		s.Equal(meta.ChargeStatusCreated, meta.ChargeStatus(fetched.Status))
 		s.Empty(fetched.Realizations)
-		s.Nil(fetched.State.AdvanceAfter)
+		s.Require().NotNil(fetched.State.AdvanceAfter)
+		s.True(servicePeriod.From.Equal(*fetched.State.AdvanceAfter))
 	})
 
 	s.Run("#3 invoice pending lines fully settled by credits", func() {
@@ -4824,14 +4855,14 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceFullyCredite
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       10,
 			CreditsTotal: 10,
-		}, finalRun.InvoiceUsage.Totals)
+		}, finalRun.InvoiceUsage.Totals.Totals)
 	})
 }
 
 func (s *InvoicableChargesTestSuite) TestUsageBasedCreateImmediatelyActive() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-create-immediately-active")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -4906,10 +4937,9 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditThenInvoiceDirectPaidFl
 	// Then
 	// - billing should run the usage-based payment authorization and settlement hooks in order
 	//   and persist the finalized payment state on the realization run.
-
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-credit-then-invoice-direct-paid")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -5049,7 +5079,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreateImmediatelyFinal() {
 
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-based-create-immediately-final")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -5146,7 +5176,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreateImmediatelyFinal() {
 	s.RequireTotals(billingtest.ExpectedTotals{
 		Amount:       expectedUsage,
 		CreditsTotal: expectedUsage,
-	}, finalRun.Totals)
+	}, finalRun.Totals.Totals)
 	s.Len(finalRun.CreditsAllocated, 1)
 	s.Equal(expectedUsage, finalRun.CreditsAllocated[0].Amount.InexactFloat64())
 
@@ -5161,7 +5191,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreateImmediatelyFinal() {
 func (s *InvoicableChargesTestSuite) TestFlatFeeCreditOnlyLifecycle() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-only-lifecycle")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -5360,7 +5390,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditOnlyCreateImmediatelyFinal
 
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-only-create-immediately-final")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -5449,7 +5479,9 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditOnlyWithCustomCurrency() {
 	s.Run("#1 setup customer and custom currency", func() {
 		// given:
 		// - a customer and a persisted custom currency
-		s.ProvisionDefaultTaxCodes(ctx, ns)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+		sandboxApp := s.InstallSandboxApp(s.T(), ns)
+		s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID())
 
 		cust := s.CreateTestCustomer(ns, "test-subject")
 		s.NotEmpty(cust.ID)
@@ -5661,7 +5693,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyWithCustomCurrency(
 	s.Run("#1 setup metered customer and custom currency", func() {
 		// given:
 		// - a metered customer, a persisted custom currency, and usage events
-		s.ProvisionDefaultTaxCodes(ctx, ns)
+		s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 		customInvoicing := s.SetupCustomInvoicing(ns)
 		cust := s.CreateTestCustomer(ns, "test-subject")
@@ -5791,7 +5823,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyWithCustomCurrency(
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       9.872,
 			CreditsTotal: 9.872,
-		}, finalRun.Totals)
+		}, finalRun.Totals.Totals)
 		s.Require().Len(finalRun.CreditsAllocated, 1)
 		s.Equal(float64(9.872), finalRun.CreditsAllocated[0].Amount.InexactFloat64())
 		s.Equal(allocationTransactionGroupID, finalRun.CreditsAllocated[0].LedgerTransaction.TransactionGroupID)
@@ -5811,7 +5843,7 @@ func (s *InvoicableChargesTestSuite) TestUsageBasedCreditOnlyWithCustomCurrency(
 		s.RequireTotals(billingtest.ExpectedTotals{
 			Amount:       9.872,
 			CreditsTotal: 9.872,
-		}, persisted.Realizations[0].Totals)
+		}, persisted.Realizations[0].Totals.Totals)
 		s.Require().Len(persisted.Realizations[0].CreditsAllocated, 1)
 		s.Equal(allocationTransactionGroupID, persisted.Realizations[0].CreditsAllocated[0].LedgerTransaction.TransactionGroupID)
 	})
@@ -5822,7 +5854,7 @@ func (s *InvoicableChargesTestSuite) TestFlatFeeCreditOnlyInArrearsAllocatesAtIn
 
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-flatfee-credit-only-in-arrears")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 
@@ -6091,7 +6123,7 @@ func (s *InvoicableChargesTestSuite) assertFlatFeeCreditThenInvoiceLineAndRun(in
 		s.Require().NotNil(currentRun.AccruedUsage.LedgerTransaction)
 		s.Equal(input.InvoiceUsageAccruedCallbackID, currentRun.AccruedUsage.LedgerTransaction.TransactionGroupID)
 		s.Equal(input.ServicePeriod, currentRun.AccruedUsage.ServicePeriod)
-		s.RequireTotals(input.ExpectedTotals, currentRun.AccruedUsage.Totals)
+		s.RequireTotals(input.ExpectedTotals, currentRun.AccruedUsage.Totals.Totals)
 	} else {
 		s.Nil(currentRun.AccruedUsage)
 	}

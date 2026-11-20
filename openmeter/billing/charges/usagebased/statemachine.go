@@ -14,8 +14,9 @@ const (
 	StatusCreated Status = Status(meta.ChargeStatusCreated)
 
 	// Active status and substates
-	StatusActive              Status = Status(meta.ChargeStatusActive)
-	StatusActiveClearOverride Status = "active.clear_override"
+	StatusActive                Status = Status(meta.ChargeStatusActive)
+	StatusActiveClearOverride   Status = "active.clear_override"
+	StatusActiveEarlyActivation Status = "active.early_activation"
 
 	StatusActiveRealizationStarted                        Status = "active.realization.started"
 	StatusActiveRealizationWaitingForCollection           Status = "active.realization.waiting_for_collection"
@@ -48,6 +49,7 @@ func (Status) Values() []string {
 		string(StatusCreated),
 		string(StatusActive),
 		string(StatusActiveClearOverride),
+		string(StatusActiveEarlyActivation),
 		string(StatusActiveRealizationStarted),
 		string(StatusActiveRealizationWaitingForCollection),
 		string(StatusActiveRealizationProcessing),
@@ -65,6 +67,7 @@ func (s Status) Validate() error {
 	if !slices.Contains(s.Values(), string(s)) {
 		return models.NewGenericValidationError(fmt.Errorf("invalid status: %s", s))
 	}
+
 	return nil
 }
 

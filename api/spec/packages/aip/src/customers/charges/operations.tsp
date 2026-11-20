@@ -6,6 +6,7 @@ import "../../common/pagination.tsp";
 import "../../shared/index.tsp";
 import "../../common/parameters.tsp";
 import "./charges.tsp";
+import "../../invoices/index.tsp";
 
 using TypeSpec.Http;
 using TypeSpec.OpenAPI;
@@ -53,6 +54,34 @@ model ListCustomerChargesParamsFilter {
   service_period_to?: Common.DateTimeFieldFilter;
 }
 
+/**
+ * Options for manually collecting a customer's pending lines into invoices.
+ */
+@friendlyName("InvoiceCustomerChargesInput")
+model InvoiceCustomerChargesInput {
+  /**
+   * Collection cutoff. Defaults to the current time and cannot be in the future.
+   */
+  as_of?: Shared.DateTime;
+
+  /**
+   * Override the customer's progressive billing setting for this collection. When
+   * enabled, eligible usage-based lines can be collected for a partial period.
+   */
+  progressive_billing_override?: boolean;
+}
+
+/**
+ * Result of manually collecting a customer's pending lines into invoices.
+ */
+@friendlyName("InvoiceCustomerChargesResult")
+model InvoiceCustomerChargesResult {
+  /**
+   * Created standard invoices, one per collected currency.
+   */
+  invoices: Invoices.Invoice[];
+}
+
 namespace Charges {
   interface CustomerChargesOperations {
     /**
@@ -62,8 +91,6 @@ namespace Charges {
      * usage-based charges.
      */
     @extension(Shared.UnstableExtension, true)
-    @extension(Shared.PrivateExtension, true)
-    @extension(Shared.InternalExtension, true)
     @get
     @operationId("list-customer-charges")
     @summary("List customer charges")
@@ -104,8 +131,10 @@ namespace Charges {
        *
        * Supported values are:
        *
-       * - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage`
-       *   and the `totals.realtime` fields.
+       * - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based
+       *   charges and created usage-based charges whose effective service period
+       *   contains the current time (inclusive start, exclusive end). Deleted charges
+       *   are skipped.
        * - `customer`: Expand the charge's customer to the complete entity.
        * - `feature`: Expand the charge's feature to the complete entity.
        * - `subscription`: Expand the charge's subscription to the complete entity.
@@ -125,13 +154,39 @@ namespace Charges {
      * Create customer charge.
      */
     @extension(Shared.UnstableExtension, true)
-    @extension(Shared.PrivateExtension, true)
-    @extension(Shared.InternalExtension, true)
     @post
     @operationId("create-customer-charges")
     @summary("Create customer charge")
     create(@path customerId: Shared.ULID, @body charge: CreateCharge):
       | Shared.CreateResponse<Charge>
+      | Common.ErrorResponses;
+
+    /**
+     * Invoice a customer's charges outside the normal billing cycle. Collection
+     * alignment is bypassed. The customer's progressive billing setting applies unless
+     * explicitly overridden. All eligible pending lines are considered.
+     *
+     * Returns the created standard invoices, one per collected currency. Lines blocked
+     * by their owning engine remain pending. If all eligible lines are blocked or no
+     * lines are eligible, returns a validation error.
+     */
+    @post
+    @route("/invoice")
+    @operationId("invoice-customer-charges")
+    @summary("Invoice a customer's charges")
+    @extension(Shared.RPCEndpointExtension, true)
+    @extension(Shared.UnstableExtension, true)
+    @extension(Shared.PrivateExtension, true)
+    @extension(Shared.InternalExtension, true)
+    invoiceCharges(
+      @path customerId: Shared.ULID,
+      @body request?: InvoiceCustomerChargesInput,
+    ):
+      | {
+          @statusCode _: 201;
+          @body body: InvoiceCustomerChargesResult;
+        }
+      | Common.NotFound
       | Common.ErrorResponses;
   }
 }

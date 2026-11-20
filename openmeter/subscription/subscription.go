@@ -3,6 +3,7 @@ package subscription
 import (
 	"time"
 
+	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
@@ -23,6 +24,10 @@ type Subscription struct {
 	PlanRef *PlanRef `json:"planRef"`
 
 	CustomerId string `json:"customerId,omitempty"`
+	// Currency is the referenced plan's default, hydrated on reads rather than
+	// persisted on the subscription. Inline plans have no retained default.
+	// Keep it out of events whose legacy currency field means invoice fiat.
+	Currency *currencies.CurrencyReference `json:"-"`
 	// Keep the legacy JSON key because v1 subscription events embed this domain type.
 	InvoiceCurrency currencyx.Code `json:"currency,omitempty"`
 	CostBasisMode   CostBasisMode  `json:"costBasisMode"`
@@ -30,6 +35,7 @@ type Subscription struct {
 
 	BillingCadence  datetime.ISODuration           `json:"billing_cadence"`
 	BillingAnchor   time.Time                      `json:"billingAnchor"`
+	BillingStartsAt *time.Time                     `json:"billingStartsAt,omitempty"`
 	ProRatingConfig productcatalog.ProRatingConfig `json:"pro_rating_config"`
 	SettlementMode  productcatalog.SettlementMode  `json:"settlement_mode"`
 
@@ -52,6 +58,7 @@ func (s Subscription) AsEntityInput() CreateSubscriptionEntityInput {
 		CostBasisMode:   s.CostBasisMode,
 		BillingCadence:  s.BillingCadence,
 		BillingAnchor:   s.BillingAnchor,
+		BillingStartsAt: s.BillingStartsAt,
 		ProRatingConfig: s.ProRatingConfig,
 		SettlementMode:  s.SettlementMode,
 	}
@@ -73,6 +80,7 @@ func (s Subscription) GetStatusAt(at time.Time) SubscriptionStatus {
 		if s.ActiveTo == nil {
 			return SubscriptionStatusActive
 		}
+
 		// ...and it has been canceled, it is canceled
 		if s.ActiveTo.After(at) {
 			return SubscriptionStatusCanceled

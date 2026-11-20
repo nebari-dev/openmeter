@@ -224,6 +224,26 @@ func (e *AppStripeCustomer) GetDeletedAt() *time.Time {
 	return e.DeletedAt
 }
 
+func (e *AppStripeInvoiceGeneration) GetID() string {
+	return e.ID
+}
+
+func (e *AppStripeInvoiceGeneration) GetNamespace() string {
+	return e.Namespace
+}
+
+func (e *AppStripeInvoiceGeneration) GetCreatedAt() time.Time {
+	return e.CreatedAt
+}
+
+func (e *AppStripeInvoiceGeneration) GetUpdatedAt() time.Time {
+	return e.UpdatedAt
+}
+
+func (e *AppStripeInvoiceGeneration) GetDeletedAt() *time.Time {
+	return e.DeletedAt
+}
+
 func (e *BalanceSnapshot) GetNamespace() string {
 	return e.Namespace
 }
@@ -266,14 +286,6 @@ func (e *BillingCustomerOverride) GetUpdatedAt() time.Time {
 
 func (e *BillingCustomerOverride) GetDeletedAt() *time.Time {
 	return e.DeletedAt
-}
-
-func (e *BillingCustomerOverride) GetTaxCodeID() *string {
-	return e.TaxCodeID
-}
-
-func (e *BillingCustomerOverride) GetTaxBehavior() *productcatalog.TaxBehavior {
-	return e.TaxBehavior
 }
 
 func (e *BillingGatheringInvoiceLine) GetID() string {
@@ -504,14 +516,6 @@ func (e *BillingInvoice) GetTaxAppExternalID() *string {
 	return e.TaxAppExternalID
 }
 
-func (e *BillingInvoiceFlatFeeLineConfig) GetID() string {
-	return e.ID
-}
-
-func (e *BillingInvoiceFlatFeeLineConfig) GetNamespace() string {
-	return e.Namespace
-}
-
 func (e *BillingInvoiceLine) GetID() string {
 	return e.ID
 }
@@ -598,46 +602,6 @@ func (e *BillingInvoiceLine) GetTotal() alpacadecimal.Decimal {
 
 func (e *BillingInvoiceLine) GetInvoicingAppExternalID() *string {
 	return e.InvoicingAppExternalID
-}
-
-func (e *BillingInvoiceLineDiscount) GetID() string {
-	return e.ID
-}
-
-func (e *BillingInvoiceLineDiscount) GetNamespace() string {
-	return e.Namespace
-}
-
-func (e *BillingInvoiceLineDiscount) GetCreatedAt() time.Time {
-	return e.CreatedAt
-}
-
-func (e *BillingInvoiceLineDiscount) GetUpdatedAt() time.Time {
-	return e.UpdatedAt
-}
-
-func (e *BillingInvoiceLineDiscount) GetDeletedAt() *time.Time {
-	return e.DeletedAt
-}
-
-func (e *BillingInvoiceLineDiscount) GetInvoicingAppExternalID() *string {
-	return e.InvoicingAppExternalID
-}
-
-func (e *BillingInvoiceLineDiscount) GetLineID() string {
-	return e.LineID
-}
-
-func (e *BillingInvoiceLineDiscount) GetChildUniqueReferenceID() *string {
-	return e.ChildUniqueReferenceID
-}
-
-func (e *BillingInvoiceLineDiscount) GetDescription() *string {
-	return e.Description
-}
-
-func (e *BillingInvoiceLineDiscount) GetReason() billing.DiscountReasonType {
-	return e.Reason
 }
 
 func (e *BillingInvoiceLineUsageDiscount) GetID() string {
@@ -3272,14 +3236,6 @@ func (e *SubscriptionAddonQuantity) GetDeletedAt() *time.Time {
 	return e.DeletedAt
 }
 
-func (e *SubscriptionBillingSyncState) GetID() string {
-	return e.ID
-}
-
-func (e *SubscriptionBillingSyncState) GetNamespace() string {
-	return e.Namespace
-}
-
 func (e *SubscriptionCostBasisPin) GetID() string {
 	return e.ID
 }
@@ -3354,6 +3310,26 @@ func (e *SubscriptionPhase) GetDeletedAt() *time.Time {
 
 func (e *SubscriptionPhase) GetMetadata() map[string]string {
 	return e.Metadata
+}
+
+func (e *SubscriptionSyncState) GetID() string {
+	return e.ID
+}
+
+func (e *SubscriptionSyncState) GetNamespace() string {
+	return e.Namespace
+}
+
+func (e *SubscriptionSyncState) GetCreatedAt() time.Time {
+	return e.CreatedAt
+}
+
+func (e *SubscriptionSyncState) GetUpdatedAt() time.Time {
+	return e.UpdatedAt
+}
+
+func (e *SubscriptionSyncState) GetDeletedAt() *time.Time {
+	return e.DeletedAt
 }
 
 func (e *TaxCode) GetID() string {

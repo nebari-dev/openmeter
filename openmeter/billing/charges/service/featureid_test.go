@@ -59,7 +59,7 @@ func (s *ChargeFeatureIDTestSuite) TearDownTest() {
 func (s *ChargeFeatureIDTestSuite) TestCreateResolvesFeatureIDsForUsageBasedAndMeterlessFlatFeeCharges() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("charges-service-feature-id-create")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "feature-id-create")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -140,7 +140,7 @@ func (s *ChargeFeatureIDTestSuite) TestCreateResolvesFeatureIDsForUsageBasedAndM
 func (s *ChargeFeatureIDTestSuite) TestUsageBasedActivationRecalculatesFeatureIDAndRunsKeepUsingIt() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("charges-service-feature-id-usage")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "feature-id-usage")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -249,7 +249,7 @@ func (s *ChargeFeatureIDTestSuite) TestUsageBasedActivationRecalculatesFeatureID
 func (s *ChargeFeatureIDTestSuite) TestCreateCustomerChargeResolvesFeatureByID() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("charges-service-feature-id-api")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "feature-id-api")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -275,26 +275,32 @@ func (s *ChargeFeatureIDTestSuite) TestCreateCustomerChargeResolvesFeatureByID()
 	s.Run("flat fee charge created by feature ID", func() {
 		// given:
 		// - a caller that only knows the feature ID, as the v3 create endpoint does
+		discounts := billing.DiscountsFromProductCatalog(productcatalog.Discounts{
+			Percentage: &productcatalog.PercentageDiscount{Percentage: models.NewPercentage(10)},
+		})
+		flatFeeInput := &charges.CreateCustomerChargeFlatFeeInput{
+			IntentMutableFields: flatfee.IntentMutableFields{
+				IntentMutableFields: meta.IntentMutableFields{
+					Name:              "flat fee by feature id",
+					ServicePeriod:     servicePeriod,
+					FullServicePeriod: servicePeriod,
+					BillingPeriod:     servicePeriod,
+				},
+				InvoiceAt:             servicePeriod.From,
+				PaymentTerm:           productcatalog.InAdvancePaymentTerm,
+				PercentageDiscounts:   discounts.Percentage,
+				AmountBeforeProration: alpacadecimal.NewFromInt(25),
+			},
+			FeatureID:      lo.ToPtr(flatFeeFeature.ID),
+			SettlementMode: productcatalog.CreditOnlySettlementMode,
+		}
+
 		// when:
 		created, err := s.Charges.CreateCustomerCharge(ctx, charges.CreateCustomerChargeInput{
 			Namespace:    ns,
 			CustomerID:   cust.ID,
 			CurrencyCode: USD,
-			FlatFee: &charges.CreateCustomerChargeFlatFeeInput{
-				IntentMutableFields: flatfee.IntentMutableFields{
-					IntentMutableFields: meta.IntentMutableFields{
-						Name:              "flat fee by feature id",
-						ServicePeriod:     servicePeriod,
-						FullServicePeriod: servicePeriod,
-						BillingPeriod:     servicePeriod,
-					},
-					InvoiceAt:             servicePeriod.From,
-					PaymentTerm:           productcatalog.InAdvancePaymentTerm,
-					AmountBeforeProration: alpacadecimal.NewFromInt(25),
-				},
-				FeatureID:      lo.ToPtr(flatFeeFeature.ID),
-				SettlementMode: productcatalog.CreditOnlySettlementMode,
-			},
+			FlatFee:      flatFeeInput,
 		})
 		s.Require().NoError(err)
 
@@ -305,6 +311,8 @@ func (s *ChargeFeatureIDTestSuite) TestCreateCustomerChargeResolvesFeatureByID()
 		s.Require().NotNil(flatFeeCharge.State.FeatureID)
 		s.Equal(flatFeeFeature.ID, *flatFeeCharge.State.FeatureID)
 		s.Equal(flatFeeFeature.Key, flatFeeCharge.Intent.GetFeatureKey())
+		s.Require().NotNil(flatFeeCharge.Intent.GetEffectiveIntent().PercentageDiscounts)
+		s.NotEmpty(flatFeeCharge.Intent.GetEffectiveIntent().PercentageDiscounts.CorrelationID)
 
 		fetched, err := s.mustGetChargeByID(flatFeeCharge.GetChargeID()).AsFlatFeeCharge()
 		s.Require().NoError(err)
@@ -314,27 +322,33 @@ func (s *ChargeFeatureIDTestSuite) TestCreateCustomerChargeResolvesFeatureByID()
 	})
 
 	s.Run("usage based charge created by feature ID", func() {
+		discounts := billing.DiscountsFromProductCatalog(productcatalog.Discounts{
+			Usage: &productcatalog.UsageDiscount{Quantity: alpacadecimal.NewFromInt(1)},
+		})
+		usageBasedInput := &charges.CreateCustomerChargeUsageBasedInput{
+			IntentMutableFields: usagebased.IntentMutableFields{
+				IntentMutableFields: meta.IntentMutableFields{
+					Name:              "usage based by feature id",
+					ServicePeriod:     servicePeriod,
+					FullServicePeriod: servicePeriod,
+					BillingPeriod:     servicePeriod,
+				},
+				InvoiceAt: servicePeriod.From,
+				Price: *productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+					Amount: alpacadecimal.NewFromInt(2),
+				}),
+				Discounts: discounts,
+			},
+			FeatureID:      usageFeature.ID,
+			SettlementMode: productcatalog.CreditOnlySettlementMode,
+		}
+
 		// when:
 		created, err := s.Charges.CreateCustomerCharge(ctx, charges.CreateCustomerChargeInput{
 			Namespace:    ns,
 			CustomerID:   cust.ID,
 			CurrencyCode: USD,
-			UsageBased: &charges.CreateCustomerChargeUsageBasedInput{
-				IntentMutableFields: usagebased.IntentMutableFields{
-					IntentMutableFields: meta.IntentMutableFields{
-						Name:              "usage based by feature id",
-						ServicePeriod:     servicePeriod,
-						FullServicePeriod: servicePeriod,
-						BillingPeriod:     servicePeriod,
-					},
-					InvoiceAt: servicePeriod.From,
-					Price: *productcatalog.NewPriceFrom(productcatalog.UnitPrice{
-						Amount: alpacadecimal.NewFromInt(2),
-					}),
-				},
-				FeatureID:      usageFeature.ID,
-				SettlementMode: productcatalog.CreditOnlySettlementMode,
-			},
+			UsageBased:   usageBasedInput,
 		})
 		s.Require().NoError(err)
 
@@ -343,6 +357,8 @@ func (s *ChargeFeatureIDTestSuite) TestCreateCustomerChargeResolvesFeatureByID()
 		s.Require().NoError(err)
 		s.Equal(usageFeature.ID, usageBasedCharge.State.FeatureID)
 		s.Equal(usageFeature.Key, usageBasedCharge.Intent.GetFeatureKey())
+		s.Require().NotNil(usageBasedCharge.Intent.GetEffectiveIntent().Discounts.Usage)
+		s.NotEmpty(usageBasedCharge.Intent.GetEffectiveIntent().Discounts.Usage.CorrelationID)
 
 		fetched, err := s.mustGetChargeByID(usageBasedCharge.GetChargeID()).AsUsageBasedCharge()
 		s.Require().NoError(err)
@@ -429,7 +445,7 @@ func (s *ChargeFeatureIDTestSuite) TestCreateFlatFeeWithUnresolvableFeatureKeyRe
 	// - creation returns a feature validation issue without persisting a charge
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("charges-service-feature-key-unresolvable")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "feature-key-unresolvable")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -485,7 +501,9 @@ func (s *ChargeFeatureIDTestSuite) TestCreateUsageBasedWithUnresolvableFeatureKe
 	// - creation returns a feature validation issue without persisting a charge
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-feature-key-unresolvable")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	sandboxApp := s.InstallSandboxApp(s.T(), ns)
+	s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID())
 
 	cust := s.CreateTestCustomer(ns, "usage-feature-key-unresolvable")
 	servicePeriod := timeutil.ClosedPeriod{
@@ -534,7 +552,9 @@ func (s *ChargeFeatureIDTestSuite) TestCreateUsageBasedRequiresFeatureMeterBefor
 	// - validation rejects the whole request before either charge is persisted
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-feature-meter-required")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	sandboxApp := s.InstallSandboxApp(s.T(), ns)
+	s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID())
 
 	cust := s.CreateTestCustomer(ns, "usage-feature-meter-required")
 	meterlessFeature, err := s.FeatureService.CreateFeature(ctx, featurepkg.CreateFeatureInputs{
@@ -599,7 +619,9 @@ func (s *ChargeFeatureIDTestSuite) TestCreateUsageBasedReturnsAllFeatureValidati
 	// - one usage-based intent references a missing feature and another a meterless feature
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("charges-service-usage-mixed-feature-errors")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	sandboxApp := s.InstallSandboxApp(s.T(), ns)
+	s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID())
 
 	cust := s.CreateTestCustomer(ns, "usage-mixed-feature-errors")
 	meterlessFeature, err := s.FeatureService.CreateFeature(ctx, featurepkg.CreateFeatureInputs{
@@ -679,7 +701,7 @@ func (s *ChargeFeatureIDTestSuite) TestCreateUsageBasedReturnsAllFeatureValidati
 func (s *ChargeFeatureIDTestSuite) TestCreateCustomerChargeByIDResolvesLatestFeatureVersion() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("charges-service-feature-id-archived")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateTestCustomer(ns, "feature-id-archived")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)

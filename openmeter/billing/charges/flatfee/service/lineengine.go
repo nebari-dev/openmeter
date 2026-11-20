@@ -613,6 +613,7 @@ func validateCustomCurrencyInvoiceLineDelete(invoice billing.GenericInvoiceReade
 	if standardInvoice.Namespace != charge.Namespace || line.GetLineID().Namespace != charge.Namespace {
 		return fmt.Errorf("custom-currency flat fee line[%s] namespace does not match charge[%s]: %w", line.GetID(), charge.ID, billing.ErrCannotUpdateChargeManagedLine)
 	}
+
 	if line.GetChargeID() == nil || *line.GetChargeID() != charge.ID {
 		return fmt.Errorf("custom-currency flat fee line[%s] does not match charge[%s]: %w", line.GetID(), charge.ID, billing.ErrCannotUpdateChargeManagedLine)
 	}
@@ -722,12 +723,13 @@ func (e *LineEngine) attachManualStandardLine(ctx context.Context, invoice billi
 		return nil, fmt.Errorf("new state machine for flat fee charge[%s]: %w", charge.ID, err)
 	}
 
-	// TODO: reject cost-basis-backed charges in manual line attachment. This
-	// path bypasses StatusActive, which owns cost-basis resolution, so accepting
-	// it would create an invoice-backed charge without the required resolved value.
-	patches, err := stateMachine.FireAndAdvanceUntilInvoicePatchesOrStable(ctx, meta.TriggerAttachInvoiceLine, billing.StandardLineWithInvoiceHeader{
-		Line:    &standardLine,
-		Invoice: standardInvoice,
+	// The cost basis is resolved and saved before the run starts, so a failed attach
+	// has to undo it even when the caller keeps its transaction.
+	patches, err := transaction.Run(ctx, e.service.adapter, func(ctx context.Context) (invoiceupdater.Patches, error) {
+		return stateMachine.FireAndAdvanceUntilInvoicePatchesOrStable(ctx, meta.TriggerAttachInvoiceLine, billing.StandardLineWithInvoiceHeader{
+			Line:    &standardLine,
+			Invoice: standardInvoice,
+		})
 	})
 	if err != nil {
 		return nil, fmt.Errorf("triggering %s for charge[%s]: %w", meta.TriggerAttachInvoiceLine, charge.ID, err)
@@ -883,6 +885,7 @@ func (e *LineEngine) validateDeletedStandardLines(ctx context.Context, input bil
 		if err != nil {
 			return fmt.Errorf("calculating fiat overage for flat fee realization run[%s]: %w", run.ID.ID, err)
 		}
+
 		if fiatOverage.ShouldOmitInvoiceLine {
 			continue
 		}
@@ -1046,6 +1049,7 @@ func (e *LineEngine) OnInvoiceFinalizing(ctx context.Context, input billing.OnIn
 		if err != nil {
 			return nil, fmt.Errorf("validating finalizing update for line[%s]: %w", stdLine.ID, err)
 		}
+
 		if updatedLine == nil {
 			return stdLine, nil
 		}
@@ -1065,10 +1069,26 @@ func (e *LineEngine) OnInvoiceIssued(ctx context.Context, input billing.OnInvoic
 			return err
 		}
 
-		if err := stateMachine.FireAndAdvanceUntilStable(ctx, meta.TriggerInvoiceIssued, billing.StandardLineWithInvoiceHeader{
+		lineWithHeader := billing.StandardLineWithInvoiceHeader{
 			Line:    stdLine,
 			Invoice: input.Invoice,
-		}); err != nil {
+		}
+		charge := stateMachine.GetCharge()
+		// Billing retries invoice_issued for every line when any line callback fails.
+		// A preceding line can therefore have committed its charge and ledger updates.
+		// Immutable is persisted only after that work succeeds, so a matching run is
+		// already complete and must not receive invoice_issued again.
+		// See TestCreditThenInvoiceTestSuite/TestFlatFeeIssuingRetryPreservesCompletedChargeBooking.
+		run, err := charge.Realizations.GetByLineID(stdLine.ID)
+		if err == nil && run.Immutable {
+			if run.InvoiceID == nil || *run.InvoiceID != input.Invoice.ID {
+				return fmt.Errorf("issued realization run[%s] invoice does not match invoice[%s]", run.ID.ID, input.Invoice.ID)
+			}
+
+			continue
+		}
+
+		if err := stateMachine.FireAndAdvanceUntilStable(ctx, meta.TriggerInvoiceIssued, lineWithHeader); err != nil {
 			return fmt.Errorf("triggering invoice_issued for charge[%s]: %w", stateMachine.GetCharge().ID, err)
 		}
 	}

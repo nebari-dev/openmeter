@@ -10,10 +10,10 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	billingfeaturemeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
-	"github.com/openmeterio/openmeter/openmeter/billing/rating"
 	"github.com/openmeterio/openmeter/openmeter/billing/sequence"
 	"github.com/openmeterio/openmeter/openmeter/billing/service/invoicecalc"
 	"github.com/openmeterio/openmeter/openmeter/customer"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/framework/transaction"
@@ -28,33 +28,35 @@ type Service struct {
 	customerService      customer.Service
 	appService           app.Service
 	taxCodeService       taxcode.Service
+	taxCodeResolver      productcatalog.TaxCodeResolver
 	logger               *slog.Logger
 	invoiceCalculator    invoicecalc.Calculator
 	lineEngines          *engineRegistry
-	ratingService        rating.Service
 	featureMeterResolver *billingfeaturemeterservice.Resolver
 
 	publisher eventbus.Publisher
 
-	advancementStrategy billing.AdvancementStrategy
-	fsNamespaceLockdown []string
+	enforceInvoiceSanityChecks bool
+	advancementStrategy        billing.AdvancementStrategy
+	fsNamespaceLockdown        []string
 
 	standardInvoiceHooks *billing.StandardInvoiceHooks
 }
 
 type Config struct {
-	Adapter                 billing.Adapter
-	SequenceService         sequence.Service
-	CustomerService         customer.Service
-	AppService              app.Service
-	TaxCodeService          taxcode.Service
-	RatingService           rating.Service
-	LegacyBillingLineEngine *billinglineengine.Engine
-	Logger                  *slog.Logger
-	FeatureMeterResolver    *billingfeaturemeterservice.Resolver
-	Publisher               eventbus.Publisher
-	AdvancementStrategy     billing.AdvancementStrategy
-	FSNamespaceLockdown     []string
+	EnforceInvoiceSanityChecks bool
+	Adapter                    billing.Adapter
+	SequenceService            sequence.Service
+	CustomerService            customer.Service
+	AppService                 app.Service
+	TaxCodeService             taxcode.Service
+	TaxCodeResolver            productcatalog.TaxCodeResolver
+	LegacyBillingLineEngine    *billinglineengine.Engine
+	Logger                     *slog.Logger
+	FeatureMeterResolver       *billingfeaturemeterservice.Resolver
+	Publisher                  eventbus.Publisher
+	AdvancementStrategy        billing.AdvancementStrategy
+	FSNamespaceLockdown        []string
 }
 
 func (c Config) Validate() error {
@@ -78,8 +80,8 @@ func (c Config) Validate() error {
 		return errors.New("tax code service cannot be null")
 	}
 
-	if c.RatingService == nil {
-		return errors.New("rating service cannot be null")
+	if c.TaxCodeResolver == nil {
+		return errors.New("tax code resolver cannot be null")
 	}
 
 	if c.LegacyBillingLineEngine == nil {
@@ -111,20 +113,21 @@ func New(config Config) (*Service, error) {
 	}
 
 	svc := &Service{
-		adapter:              config.Adapter,
-		sequenceService:      config.SequenceService,
-		customerService:      config.CustomerService,
-		appService:           config.AppService,
-		taxCodeService:       config.TaxCodeService,
-		logger:               config.Logger,
-		ratingService:        config.RatingService,
-		featureMeterResolver: config.FeatureMeterResolver,
-		publisher:            config.Publisher,
-		advancementStrategy:  config.AdvancementStrategy,
-		fsNamespaceLockdown:  config.FSNamespaceLockdown,
-		invoiceCalculator:    invoicecalc.New(),
-		lineEngines:          newEngineRegistry(),
-		standardInvoiceHooks: models.NewServiceHookRegistry[billing.StandardInvoice](),
+		adapter:                    config.Adapter,
+		sequenceService:            config.SequenceService,
+		customerService:            config.CustomerService,
+		appService:                 config.AppService,
+		taxCodeService:             config.TaxCodeService,
+		taxCodeResolver:            config.TaxCodeResolver,
+		logger:                     config.Logger,
+		featureMeterResolver:       config.FeatureMeterResolver,
+		publisher:                  config.Publisher,
+		advancementStrategy:        config.AdvancementStrategy,
+		enforceInvoiceSanityChecks: config.EnforceInvoiceSanityChecks,
+		fsNamespaceLockdown:        config.FSNamespaceLockdown,
+		invoiceCalculator:          invoicecalc.New(),
+		lineEngines:                newEngineRegistry(),
+		standardInvoiceHooks:       models.NewServiceHookRegistry[billing.StandardInvoice](),
 	}
 
 	if err := svc.RegisterLineEngine(config.LegacyBillingLineEngine); err != nil {

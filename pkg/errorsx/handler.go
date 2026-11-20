@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
+	"time"
 
 	"github.com/samber/lo"
 
+	"github.com/openmeterio/openmeter/pkg/contextx"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
 )
 
@@ -33,47 +36,35 @@ func NewSlogHandler(logger *slog.Logger) SlogHandler {
 }
 
 func (h SlogHandler) Handle(err error) {
-	// Context canceled errors are logged as warnings.
-	if errors.Is(err, context.Canceled) {
-		h.Logger.Warn(err.Error())
-		return
-	}
-
-	if isAPIError(err) {
-		h.Logger.Warn(err.Error())
-		return
-	}
-
-	// Warn errors are logged as warnings.
-	if wErr, ok := lo.ErrorsAs[*warnError](err); ok {
-		h.Logger.Warn(wErr.Error())
-		return
-	}
-
-	// All other errors are logged as errors.
-	h.Logger.Error(err.Error())
+	h.log(context.Background(), err, true)
 }
 
 func (h SlogHandler) HandleContext(ctx context.Context, err error) {
-	// Context canceled errors are logged as warnings.
-	if errors.Is(err, context.Canceled) {
-		h.Logger.WarnContext(ctx, err.Error())
+	// Only downgrade cancellations of the caller's context. Independent dependency
+	// cancellations remain failures while the caller is still waiting for a response.
+	h.log(ctx, err, errors.Is(ctx.Err(), context.Canceled))
+}
+
+func (h SlogHandler) log(ctx context.Context, err error, warnOnCancellation bool) {
+	level := slog.LevelError
+	messageErr := err
+	if (warnOnCancellation && contextx.IsCanceledError(err)) || isAPIError(err) {
+		level = slog.LevelWarn
+	} else if wErr, ok := lo.ErrorsAs[*warnError](err); ok {
+		level = slog.LevelWarn
+		messageErr = wErr
+	}
+
+	if !h.Logger.Enabled(ctx, level) {
 		return
 	}
 
-	if isAPIError(err) {
-		h.Logger.WarnContext(ctx, err.Error())
-		return
-	}
-
-	// Warn errors are logged as warnings.
-	if wErr, ok := lo.ErrorsAs[*warnError](err); ok {
-		h.Logger.WarnContext(ctx, wErr.Error())
-		return
-	}
-
-	// All other errors are logged as errors.
-	h.Logger.ErrorContext(ctx, err.Error())
+	// Skip runtime.Callers, log, and Handle or HandleContext to report the call site.
+	var pcs [1]uintptr
+	runtime.Callers(3, pcs[:])
+	record := slog.NewRecord(time.Now(), level, messageErr.Error(), pcs[0])
+	record.Add(diagnosticAttributes(err)...)
+	_ = h.Logger.Handler().Handle(ctx, record)
 }
 
 // NopHandler ignores all errors. Useful for testing.

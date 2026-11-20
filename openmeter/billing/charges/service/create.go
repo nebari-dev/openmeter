@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -32,16 +33,19 @@ type chargesWithInvoiceNowActions struct {
 	pendingLineResults               []*billing.CreatePendingInvoiceLinesResult
 }
 
-// applyDefaultTaxCodes fills in nil TaxCodeID on each intent's TaxConfig using the namespace's
-// organization default tax codes. Invoicing default applies to flat-fee and usage-based charges;
-// credit-grant default applies to credit purchase charges. Fails if any intent needs the fallback
-// but the namespace has no defaults provisioned.
+// applyDefaultTaxCodes snapshots the customer's billing-profile tax code before falling
+// back to the organization invoicing default for flat-fee and usage-based intents.
+// Explicit intent tax-code IDs take precedence. Credit purchases use the organization
+// credit-grant default. Profile lookup failures abort creation so an unavailable
+// profile cannot silently select another code.
 func (s *service) applyDefaultTaxCodes(ctx context.Context, namespace string, intents charges.CreateChargeIntents) (charges.CreateChargeIntents, error) {
 	getDefaultTaxCodes := sync.OnceValues(func() (taxcode.OrganizationDefaultTaxCodes, error) {
 		return s.taxCodeService.GetOrganizationDefaultTaxCodes(ctx, taxcode.GetOrganizationDefaultTaxCodesInput{
 			Namespace: namespace,
 		})
 	})
+
+	profileTaxCodeIDs := make(map[string]*string)
 
 	return slicesx.MapWithErr(intents, func(createIntent charges.CreateChargeIntent) (charges.CreateChargeIntent, error) {
 		taxCodeID, err := createIntent.TaxCodeID()
@@ -51,6 +55,34 @@ func (s *service) applyDefaultTaxCodes(ctx context.Context, namespace string, in
 
 		if taxCodeID != "" {
 			return createIntent, nil
+		}
+
+		if createIntent.Type() != meta.ChargeTypeCreditPurchase {
+			customerID, err := createIntent.GetCustomerID()
+			if err != nil {
+				return charges.CreateChargeIntent{}, err
+			}
+
+			profileTaxCodeID, cached := profileTaxCodeIDs[customerID]
+			if !cached {
+				customerOverride, err := s.billingService.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
+					Customer: customer.CustomerID{
+						Namespace: namespace,
+						ID:        customerID,
+					},
+				})
+				if err != nil {
+					return charges.CreateChargeIntent{}, fmt.Errorf("getting customer billing profile: %w", err)
+				}
+
+				profileTaxCodeID = lo.EmptyableToPtr(customerOverride.EffectiveProfile.WorkflowConfig.Invoicing.DefaultTaxCodeID())
+
+				profileTaxCodeIDs[customerID] = profileTaxCodeID
+			}
+
+			if profileTaxCodeID != nil {
+				return createIntent.WithTaxCodeID(*profileTaxCodeID)
+			}
 		}
 
 		defaultTaxCodes, err := getDefaultTaxCodes()
@@ -86,6 +118,7 @@ func (s *service) validateTaxCodesExist(ctx context.Context, namespace string, i
 		if _, ok := seen[taxCodeID]; ok {
 			continue
 		}
+
 		seen[taxCodeID] = struct{}{}
 
 		_, err = s.taxCodeService.GetTaxCode(ctx, taxcode.GetTaxCodeInput{
@@ -141,6 +174,7 @@ func (s *service) create(ctx context.Context, input charges.CreateInput) (*charg
 	if err != nil {
 		return nil, err
 	}
+
 	input.Intents = intentsWithDefaults
 
 	if err := input.Validate(); err != nil {
@@ -293,7 +327,7 @@ func (s *service) create(ctx context.Context, input charges.CreateInput) (*charg
 // a separate transaction is used to make sure that we persist the creation state even if the advancing fails (as
 // a worker will try to advance the charges again).
 func (s *service) autoAdvanceCreatedCharges(ctx context.Context, created charges.Charges) (charges.Charges, error) {
-	// Collect unique customer IDs that have newly created credit-only charges.
+	// Collect unique customer IDs that have newly created charges due for advancement.
 	customerIDs := make([]customer.CustomerID, 0)
 	for _, c := range created {
 		switch c.Type() {
@@ -301,10 +335,6 @@ func (s *service) autoAdvanceCreatedCharges(ctx context.Context, created charges
 			ub, err := c.AsUsageBasedCharge()
 			if err != nil {
 				return nil, err
-			}
-
-			if ub.Intent.GetSettlementMode() != productcatalog.CreditOnlySettlementMode {
-				continue
 			}
 
 			if !isAdvanceDue(ub.State.AdvanceAfter) {
@@ -330,6 +360,7 @@ func (s *service) autoAdvanceCreatedCharges(ctx context.Context, created charges
 			customerIDs = append(customerIDs, ff.GetCustomerID())
 		}
 	}
+
 	customerIDs = lo.Uniq(customerIDs)
 
 	if len(customerIDs) == 0 {
@@ -350,6 +381,7 @@ func (s *service) autoAdvanceCreatedCharges(ctx context.Context, created charges
 			if err != nil {
 				return nil, err
 			}
+
 			advancedByID[chargeID.ID] = advanced
 		}
 	}
@@ -415,6 +447,10 @@ func (s *service) invokeInvoiceNowOnCreate(ctx context.Context, invoiceNowLines 
 			},
 			billing.WithBypassCollectionAlignment(),
 		); err != nil {
+			if errors.Is(err, billing.ErrInvoiceCreateAllLinesGated) {
+				continue
+			}
+
 			return fmt.Errorf("invoking invoice now on create: %w", err)
 		}
 	}
@@ -464,6 +500,7 @@ func (s *service) createGatheringLines(ctx context.Context, gatheringLinesToCrea
 		if err != nil {
 			return createGatheringLinesResult{}, fmt.Errorf("creating pending invoice lines for charges: %w", err)
 		}
+
 		if result == nil {
 			return createGatheringLinesResult{}, fmt.Errorf("creating pending invoice lines for charges: result is nil")
 		}

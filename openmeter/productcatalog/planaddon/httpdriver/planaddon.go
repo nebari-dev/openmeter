@@ -8,7 +8,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	productcataloghttp "github.com/openmeterio/openmeter/openmeter/productcatalog/http"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon"
@@ -27,22 +27,28 @@ const (
 
 type (
 	ListPlanAddonsRequest  = planaddon.ListPlanAddonsInput
-	ListPlanAddonsResponse = api.PlanAddonPaginatedResponse
+	ListPlanAddonsResponse = apiv1models.PlanAddonPaginatedResponse
 	ListPlanAddonsParams   struct {
-		api.ListPlanAddonsParams
+		apiv1models.ListPlanAddonsParams
 
 		// AddonID or Key.
 		PlanIDOrKey string
 	}
-	ListPlanAddonsHandler httptransport.HandlerWithArgs[ListPlanAddonsRequest, ListPlanAddonsResponse, ListPlanAddonsParams]
+
+	ListPlanAddonsHandlerRequest struct {
+		Namespace string
+		ListPlanAddonsRequest
+	}
+
+	ListPlanAddonsHandler httptransport.HandlerWithArgs[ListPlanAddonsHandlerRequest, ListPlanAddonsResponse, ListPlanAddonsParams]
 )
 
 func (h *handler) ListPlanAddons() ListPlanAddonsHandler {
 	return httptransport.NewHandlerWithArgs(
-		func(ctx context.Context, r *http.Request, params ListPlanAddonsParams) (ListPlanAddonsRequest, error) {
+		func(ctx context.Context, r *http.Request, params ListPlanAddonsParams) (ListPlanAddonsHandlerRequest, error) {
 			ns, err := h.resolveNamespace(ctx)
 			if err != nil {
-				return ListPlanAddonsRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
+				return ListPlanAddonsHandlerRequest{}, fmt.Errorf("failed to resolve namespace [namespace=%s]: %w", ns, err)
 			}
 
 			req := ListPlanAddonsRequest{
@@ -50,8 +56,8 @@ func (h *handler) ListPlanAddons() ListPlanAddonsHandler {
 					PageSize:   lo.FromPtrOr(params.PageSize, DefaultPageSize),
 					PageNumber: lo.FromPtrOr(params.Page, DefaultPageNumber),
 				},
-				OrderBy:          planaddon.OrderBy(lo.FromPtrOr(params.OrderBy, api.PlanAddonOrderById)),
-				Order:            sortx.Order(lo.FromPtrOr(params.Order, api.SortOrderDESC)),
+				OrderBy:          planaddon.OrderBy(lo.FromPtrOr(params.OrderBy, apiv1models.PlanAddonOrderById)),
+				Order:            sortx.Order(lo.FromPtrOr(params.Order, apiv1models.SortOrderDESC)),
 				Namespaces:       []string{ns},
 				AddonKeyVersions: lo.FromPtrOr(params.KeyVersion, nil),
 				IncludeDeleted:   lo.FromPtr(params.IncludeDeleted),
@@ -72,30 +78,40 @@ func (h *handler) ListPlanAddons() ListPlanAddonsHandler {
 				req.AddonKey = &filter.FilterString{In: lo.ToPtr(keys)}
 			}
 
-			return req, nil
+			return ListPlanAddonsHandlerRequest{
+				Namespace:             ns,
+				ListPlanAddonsRequest: req,
+			}, nil
 		},
-		func(ctx context.Context, request ListPlanAddonsRequest) (ListPlanAddonsResponse, error) {
-			resp, err := h.service.ListPlanAddons(ctx, request)
+		func(ctx context.Context, request ListPlanAddonsHandlerRequest) (ListPlanAddonsResponse, error) {
+			resp, err := h.service.ListPlanAddons(ctx, request.ListPlanAddonsRequest)
 			if err != nil {
 				return ListPlanAddonsResponse{}, fmt.Errorf("failed to list plan add-on assignments: %w", err)
 			}
 
-			items := make([]api.PlanAddon, 0, len(resp.Items))
+			taxCodes, err := h.taxCodesForPlanAddons(ctx, request.Namespace, resp.Items...)
+			if err != nil {
+				return ListPlanAddonsResponse{}, err
+			}
+
+			items := make([]apiv1models.PlanAddon, 0, len(resp.Items))
 
 			for _, a := range resp.Items {
-				var item api.PlanAddon
+				var item apiv1models.PlanAddon
 
 				if a.Plan.HasUnitConfig() || a.Addon.AsProductCatalogAddon().HasUnitConfig() {
 					return ListPlanAddonsResponse{}, productcatalog.ErrUnitConfigNotRepresentable
 				}
+
 				if a.Plan.Currency.IsCustom() || a.Addon.Currency.IsCustom() {
 					return ListPlanAddonsResponse{}, productcatalog.ErrCurrencyNotRepresentable
 				}
+
 				if a.Plan.HasCurrencyOverrides() || a.Addon.AsProductCatalogAddon().HasCurrencyOverrides() {
 					return ListPlanAddonsResponse{}, productcatalog.ErrRateCardCurrencyNotRepresentable
 				}
 
-				item, err = FromPlanAddon(a)
+				item, err = FromPlanAddon(a, taxCodes)
 				if err != nil {
 					return ListPlanAddonsResponse{}, fmt.Errorf("failed to cast plan add-on assignment [namespace=%s plan.id=%s addon.id=%s]: %w",
 						a.Namespace, a.Plan.ID, a.Addon.ID, err)
@@ -122,14 +138,14 @@ func (h *handler) ListPlanAddons() ListPlanAddonsHandler {
 
 type (
 	CreatePlanAddonRequest  = planaddon.CreatePlanAddonInput
-	CreatePlanAddonResponse = api.PlanAddon
+	CreatePlanAddonResponse = apiv1models.PlanAddon
 	CreatePlanAddonHandler  httptransport.HandlerWithArgs[CreatePlanAddonRequest, CreatePlanAddonResponse, string]
 )
 
 func (h *handler) CreatePlanAddon() CreatePlanAddonHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, planID string) (CreatePlanAddonRequest, error) {
-			body := api.PlanAddonCreate{}
+			body := apiv1models.PlanAddonCreate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return CreatePlanAddonRequest{}, fmt.Errorf("failed to decode create plan add-on assignment request: %w", err)
 			}
@@ -144,6 +160,7 @@ func (h *handler) CreatePlanAddon() CreatePlanAddonHandler {
 				return CreatePlanAddonRequest{}, fmt.Errorf("failed to parse create plan add-on assignment request [namespace=%s plan.id=%s]: %w",
 					ns, planID, err)
 			}
+
 			req.RejectUnitConfig = true
 			req.RejectUnrepresentableCurrencies = true
 
@@ -156,7 +173,12 @@ func (h *handler) CreatePlanAddon() CreatePlanAddonHandler {
 					request.Namespace, request.PlanID, request.AddonID, err)
 			}
 
-			return FromPlanAddon(*a)
+			taxCodes, err := h.taxCodesForPlanAddons(ctx, a.Namespace, *a)
+			if err != nil {
+				return CreatePlanAddonResponse{}, err
+			}
+
+			return FromPlanAddon(*a, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[CreatePlanAddonResponse](http.StatusCreated),
 		httptransport.AppendOptions(
@@ -173,14 +195,14 @@ type (
 		PlanID  string
 		AddonID string
 	}
-	UpdatePlanAddonResponse = api.PlanAddon
+	UpdatePlanAddonResponse = apiv1models.PlanAddon
 	UpdatePlanAddonHandler  httptransport.HandlerWithArgs[UpdatePlanAddonRequest, UpdatePlanAddonResponse, UpdatePlanAddonParams]
 )
 
 func (h *handler) UpdatePlanAddon() UpdatePlanAddonHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, params UpdatePlanAddonParams) (UpdatePlanAddonRequest, error) {
-			body := api.PlanAddonReplaceUpdate{}
+			body := apiv1models.PlanAddonReplaceUpdate{}
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return UpdatePlanAddonRequest{}, fmt.Errorf("failed to decode update plan add-on assignment request: %w", err)
 			}
@@ -195,6 +217,7 @@ func (h *handler) UpdatePlanAddon() UpdatePlanAddonHandler {
 				return UpdatePlanAddonRequest{}, fmt.Errorf("failed to parse update plan add-on assignment request [namespace=%s plan.id=%s addon.id=%s]: %w",
 					ns, params.PlanID, params.AddonID, err)
 			}
+
 			req.RejectUnitConfig = true
 			req.RejectUnrepresentableCurrencies = true
 
@@ -207,7 +230,12 @@ func (h *handler) UpdatePlanAddon() UpdatePlanAddonHandler {
 					request.Namespace, request.PlanID, request.AddonID, err)
 			}
 
-			return FromPlanAddon(*a)
+			taxCodes, err := h.taxCodesForPlanAddons(ctx, a.Namespace, *a)
+			if err != nil {
+				return UpdatePlanAddonResponse{}, err
+			}
+
+			return FromPlanAddon(*a, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[UpdatePlanAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -268,7 +296,7 @@ type (
 		PlanIDOrKey  string
 		AddonIDOrKey string
 	}
-	GetPlanAddonResponse = api.PlanAddon
+	GetPlanAddonResponse = apiv1models.PlanAddon
 	GetPlanAddonHandler  httptransport.HandlerWithArgs[GetPlanAddonRequest, GetPlanAddonResponse, GetPlanAddonParams]
 )
 
@@ -298,14 +326,21 @@ func (h *handler) GetPlanAddon() GetPlanAddonHandler {
 			if a.Plan.HasUnitConfig() || a.Addon.AsProductCatalogAddon().HasUnitConfig() {
 				return GetPlanAddonResponse{}, productcatalog.ErrUnitConfigNotRepresentable
 			}
+
 			if a.Plan.Currency.IsCustom() || a.Addon.Currency.IsCustom() {
 				return GetPlanAddonResponse{}, productcatalog.ErrCurrencyNotRepresentable
 			}
+
 			if a.Plan.HasCurrencyOverrides() || a.Addon.AsProductCatalogAddon().HasCurrencyOverrides() {
 				return GetPlanAddonResponse{}, productcatalog.ErrRateCardCurrencyNotRepresentable
 			}
 
-			return FromPlanAddon(*a)
+			taxCodes, err := h.taxCodesForPlanAddons(ctx, a.Namespace, *a)
+			if err != nil {
+				return GetPlanAddonResponse{}, err
+			}
+
+			return FromPlanAddon(*a, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[GetPlanAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(

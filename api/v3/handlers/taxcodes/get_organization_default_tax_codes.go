@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
@@ -13,7 +13,7 @@ import (
 
 type (
 	GetOrganizationDefaultTaxCodesRequest  = taxcode.GetOrganizationDefaultTaxCodesInput
-	GetOrganizationDefaultTaxCodesResponse = api.OrganizationDefaultTaxCodes
+	GetOrganizationDefaultTaxCodesResponse = apiv3models.OrganizationDefaultTaxCodes
 	GetOrganizationDefaultTaxCodesHandler  = httptransport.Handler[GetOrganizationDefaultTaxCodesRequest, GetOrganizationDefaultTaxCodesResponse]
 )
 
@@ -24,6 +24,7 @@ func (h *handler) GetOrganizationDefaultTaxCodes() GetOrganizationDefaultTaxCode
 			if err != nil {
 				return GetOrganizationDefaultTaxCodesRequest{}, err
 			}
+
 			return GetOrganizationDefaultTaxCodesRequest{Namespace: ns}, nil
 		},
 		func(ctx context.Context, request GetOrganizationDefaultTaxCodesRequest) (GetOrganizationDefaultTaxCodesResponse, error) {
@@ -31,6 +32,7 @@ func (h *handler) GetOrganizationDefaultTaxCodes() GetOrganizationDefaultTaxCode
 			if err != nil {
 				return GetOrganizationDefaultTaxCodesResponse{}, err
 			}
+
 			return ToAPIOrganizationDefaultTaxCodes(cfg)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[GetOrganizationDefaultTaxCodesResponse](http.StatusOK),

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	billingcharges "github.com/openmeterio/openmeter/openmeter/billing/charges"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
@@ -18,9 +18,9 @@ import (
 
 type (
 	CreateCustomerChargesRequest  = billingcharges.CreateCustomerChargeInput
-	CreateCustomerChargesResponse = api.BillingCharge
+	CreateCustomerChargesResponse = apiv3models.BillingCharge
 	CreateCustomerChargesParams   struct {
-		CustomerID api.ULID
+		CustomerID apiv3models.ULID
 	}
 	CreateCustomerChargesHandler = httptransport.HandlerWithArgs[CreateCustomerChargesRequest, CreateCustomerChargesResponse, CreateCustomerChargesParams]
 )
@@ -33,7 +33,7 @@ func (h *handler) CreateCustomerCharge() CreateCustomerChargesHandler {
 				return CreateCustomerChargesRequest{}, err
 			}
 
-			body := api.CreateCustomerChargesJSONRequestBody{}
+			body := apiv3models.CreateCustomerChargesJSONRequestBody{}
 			if err := request.ParseBody(r, &body); err != nil {
 				return CreateCustomerChargesRequest{}, err
 			}
@@ -51,7 +51,7 @@ func (h *handler) CreateCustomerCharge() CreateCustomerChargesHandler {
 
 			var input billingcharges.CreateCustomerChargeInput
 			switch discriminator {
-			case string(api.BillingChargeFlatFeeTypeFlatFee):
+			case string(apiv3models.BillingChargeFlatFeeTypeFlatFee):
 				flatFee, err := body.AsCreateChargeFlatFeeRequest()
 				if err != nil {
 					return CreateCustomerChargesRequest{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
@@ -73,7 +73,7 @@ func (h *handler) CreateCustomerCharge() CreateCustomerChargesHandler {
 						},
 					})
 				}
-			case string(api.BillingChargeUsageBasedTypeUsageBased):
+			case string(apiv3models.BillingChargeUsageBasedTypeUsageBased):
 				usageBasedFee, err := body.AsCreateChargeUsageBasedRequest()
 				if err != nil {
 					return CreateCustomerChargesRequest{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
@@ -87,6 +87,7 @@ func (h *handler) CreateCustomerCharge() CreateCustomerChargesHandler {
 
 				if usageBasedFee.UnitConfig != nil && !h.unitConfigEnabled {
 					err := models.NewGenericValidationError(errors.New("unit_config is not enabled on this deployment of OpenMeter"))
+
 					return CreateCustomerChargesRequest{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
 						{
 							Field:  "unit_config",
@@ -108,6 +109,7 @@ func (h *handler) CreateCustomerCharge() CreateCustomerChargesHandler {
 				}
 			default:
 				err := fmt.Errorf("invalid charge type: %s", discriminator)
+
 				return CreateCustomerChargesRequest{}, apierrors.NewBadRequestError(ctx, err, apierrors.InvalidParameters{
 					{
 						Field:  "params",

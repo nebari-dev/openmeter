@@ -33,6 +33,7 @@ func (a *fiatOverageAllocationPolicyAdapter) UpdateRealizationRun(
 	if input.NoFiatTransactionRequired.IsPresent() {
 		a.run.NoFiatTransactionRequired = input.NoFiatTransactionRequired.OrEmpty()
 	}
+
 	if input.FiatOverageCreditAllocationCompleted.IsPresent() {
 		a.run.FiatOverageCreditAllocationCompleted = input.FiatOverageCreditAllocationCompleted.OrEmpty()
 	}
@@ -78,7 +79,7 @@ func TestAllocateFiatOverageCreditsSkipsHandlerWhenDisabled(t *testing.T) {
 		},
 		AccruedUsage: &invoicedusage.AccruedUsage{
 			ServicePeriod: servicePeriod,
-			Totals: totals.Totals{
+			Totals: totals.DeltaTotals{
 				Amount: alpacadecimal.NewFromInt(5),
 				Total:  alpacadecimal.NewFromInt(5),
 			},

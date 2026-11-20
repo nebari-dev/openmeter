@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samber/lo"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
@@ -26,6 +27,9 @@ import (
 type State struct {
 	Items                  []StateItem
 	MaxGenerationTimeLimit time.Time
+	// BillingEndsAt is the subscription end capped by customer deletion, when either is set.
+	// Sync uses the same end as billing generation to record completion and schedule reconciliation.
+	BillingEndsAt *time.Time
 }
 
 type BuildInput struct {
@@ -74,7 +78,7 @@ func (b Builder) Build(ctx context.Context, input BuildInput) (State, error) {
 		}
 
 		if input.SubscriptionView == nil {
-			// If the subscription is deleted, we return an empty state to force reconciliation to delete any depending objects.
+			// Deletion cleanup uses an empty target to remove the subscription's billing artifacts.
 			return State{
 				MaxGenerationTimeLimit: input.AsOf,
 			}, nil
@@ -103,7 +107,12 @@ func (b Builder) Build(ctx context.Context, input BuildInput) (State, error) {
 			return timeutil.Compare(i.SubscriptionPhase.ActiveFrom, j.SubscriptionPhase.ActiveFrom)
 		})
 
-		upcomingLinesResult, err := b.collectUpcomingLines(ctx, subs, input.AsOf)
+		asOf, firstBillingPeriod, err := applyBillingStartToAsOf(subs, input.AsOf)
+		if err != nil {
+			return State{}, err
+		}
+
+		upcomingLinesResult, err := b.collectUpcomingLines(ctx, subs, asOf)
 		if err != nil {
 			return State{}, fmt.Errorf("collecting upcoming lines: %w", err)
 		}
@@ -111,6 +120,12 @@ func (b Builder) Build(ctx context.Context, input BuildInput) (State, error) {
 		inScopeLines, err := b.correctPeriodStartForUpcomingLines(ctx, subs.Subscription.ID, upcomingLinesResult.Lines, input.Persisted)
 		if err != nil {
 			return State{}, fmt.Errorf("correcting period start for upcoming lines: %w", err)
+		}
+
+		if billingStartsAt := subs.Subscription.BillingStartsAt; billingStartsAt != nil {
+			inScopeLines = lo.FilterMap(inScopeLines, func(item SubscriptionItemWithPeriods, _ int) (SubscriptionItemWithPeriods, bool) {
+				return item.startBillingAt(*billingStartsAt, firstBillingPeriod)
+			})
 		}
 
 		items, err := slicesx.MapWithErr(inScopeLines, func(item SubscriptionItemWithPeriods) (StateItem, error) {
@@ -133,8 +148,48 @@ func (b Builder) Build(ctx context.Context, input BuildInput) (State, error) {
 		return State{
 			Items:                  items,
 			MaxGenerationTimeLimit: upcomingLinesResult.SubscriptionMaxGenerationTimeLimit,
+			// ActiveTo already includes the customer deletion cutoff when it ends billing earlier.
+			BillingEndsAt: subs.Spec.ActiveTo,
 		}, nil
 	})
+}
+
+// applyBillingStartToAsOf returns the time to generate upcoming lines for, and the first billing
+// period that is billed: the one the subscription's billing start falls in.
+//
+// Items before the billing start are dropped, so we generate from there on. Otherwise the first
+// billed period would not exist until a sync shortly before it.
+//
+// asOf is returned unchanged with an empty period when there is no billing start, or when the
+// subscription ends by then: nothing is ever billed in that case, so there is no first billing
+// period to provision.
+func applyBillingStartToAsOf(subs subscription.SubscriptionView, asOf time.Time) (time.Time, timeutil.ClosedPeriod, error) {
+	if subs.Subscription.BillingStartsAt == nil {
+		return asOf, timeutil.ClosedPeriod{}, nil
+	}
+
+	// Item periods are at meter resolution, see truncateItemsIfNeeded, so periods are compared there.
+	billingStartsAt := subs.Subscription.BillingStartsAt.Truncate(streaming.MinimumWindowSizeDuration)
+
+	if subs.Spec.ActiveTo != nil && !subs.Spec.ActiveTo.Truncate(streaming.MinimumWindowSizeDuration).After(billingStartsAt) {
+		return asOf, timeutil.ClosedPeriod{}, nil
+	}
+
+	firstBillingPeriod, err := subs.Spec.GetAlignedBillingPeriodAt(*subs.Subscription.BillingStartsAt)
+	if err != nil {
+		return time.Time{}, timeutil.ClosedPeriod{}, fmt.Errorf("getting the billing period at billing start: %w", err)
+	}
+
+	// A billing period that ends within the second of the billing start has nothing left to bill
+	// there. Billing starts with the next one, otherwise items would get an empty billing period.
+	if !firstBillingPeriod.To.Truncate(streaming.MinimumWindowSizeDuration).After(billingStartsAt) {
+		firstBillingPeriod, err = subs.Spec.GetAlignedBillingPeriodAt(firstBillingPeriod.To)
+		if err != nil {
+			return time.Time{}, timeutil.ClosedPeriod{}, fmt.Errorf("getting the billing period after billing start: %w", err)
+		}
+	}
+
+	return lo.Latest(asOf, *subs.Subscription.BillingStartsAt, firstBillingPeriod.From), firstBillingPeriod, nil
 }
 
 func resolveSubscriptionItemCurrency(item SubscriptionItemWithPeriods, invoiceCurrency currencyx.Code) (currencies.Currency, error) {
@@ -194,7 +249,7 @@ func (b Builder) collectUpcomingLines(ctx context.Context, subs subscription.Sub
 				}
 			}
 
-			if !currBillingPeriod.From.IsZero() && !generationLimit.Equal(currBillingPeriod.From) {
+			if !currBillingPeriod.From.IsZero() {
 				generationLimit = currBillingPeriod.To
 			}
 
@@ -205,7 +260,17 @@ func (b Builder) collectUpcomingLines(ctx context.Context, subs subscription.Sub
 				}
 			}
 
-			items, err := iterator.Generate(ctx, generationLimit)
+			// Provision one billing period past the generation limit, so the following
+			// period's lines (usage included) exist before it begins. The limit itself
+			// stays the boundary for legacy scheduling and the next reconciliation period.
+			// A future phase's first billable time is truncated to the second and can fall
+			// just before the phase start, so look up no earlier than that.
+			nextBillingPeriod, err := subs.Spec.GetAlignedBillingPeriodAt(lo.Latest(generationLimit, iterator.PhaseStart()))
+			if err != nil {
+				return collectResult{}, fmt.Errorf("getting next billing period: %w", err)
+			}
+
+			items, err := iterator.Generate(ctx, nextBillingPeriod.To)
 			if err != nil {
 				return collectResult{}, fmt.Errorf("generating items: %w", err)
 			}
@@ -216,7 +281,9 @@ func (b Builder) collectUpcomingLines(ctx context.Context, subs subscription.Sub
 
 			inScopeLines = append(inScopeLines, items...)
 
-			if phaseEnd := iterator.PhaseEnd(); phaseEnd != nil && !phaseEnd.Before(asOf) {
+			// Include the next phase when it starts at the generation limit: its
+			// first billing period is the one provisioned ahead.
+			if phaseEnd := iterator.PhaseEnd(); phaseEnd != nil && phaseEnd.After(generationLimit) {
 				break
 			}
 		}
@@ -231,6 +298,7 @@ func (b Builder) collectUpcomingLines(ctx context.Context, subs subscription.Sub
 func withActiveTo(subs subscription.SubscriptionView, endAt time.Time) subscription.SubscriptionView {
 	subs.Subscription.ActiveTo = &endAt
 	subs.Spec.ActiveTo = &endAt
+
 	return subs
 }
 

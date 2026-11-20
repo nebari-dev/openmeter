@@ -28,6 +28,7 @@ func (s *service) Create(ctx context.Context, request plansubscription.CreateSub
 		if request.SettlementMode != nil {
 			planInput.SettlementMode = *request.SettlementMode
 		}
+
 		// Gate custom currencies behind the credits feature before resolving them, so
 		// a deployment without credits returns a clear "not enabled" error rather than
 		// the downstream "currency does not exist" that resolution would raise for an
@@ -39,6 +40,20 @@ func (s *service) Create(ctx context.Context, request plansubscription.CreateSub
 
 		if err := s.resolveCustomPlanFeatures(ctx, request.WorkflowInput.Namespace, &planInput); err != nil {
 			return def, err
+		}
+
+		// The inline plan's rate cards are authored in this request, so a deleted Tax Code
+		// reference is rejected here rather than at the FK.
+		// Not via ValidateWith: it would turn a failed lookup into a 400.
+		if err := productcatalog.ValidatePlanWithTaxCodes(ctx, s.TaxCodeResolver, request.WorkflowInput.Namespace)(planInput.Plan); err != nil {
+			if !models.IsGenericValidationError(err) {
+				return def, fmt.Errorf("failed to validate tax codes of custom plan: %w", err)
+			}
+
+			return def, models.ErrorWithFieldPrefix(
+				models.NewFieldSelectorGroup(models.NewFieldSelector("plan")),
+				err,
+			)
 		}
 
 		if err := productcatalogcurrencyresolver.ResolveCurrenciesForPlan(ctx, s.CurrencyResolver.WithNamespace(request.WorkflowInput.Namespace), &planInput.Plan); err != nil {

@@ -57,6 +57,7 @@ func (c TaxCodeConfiguration) Validate() error {
 			if _, exists := keys[trimmedKey]; exists {
 				errs = append(errs, fmt.Errorf("seed[%d]: duplicate key %q", i, seed.Key))
 			}
+
 			keys[trimmedKey] = struct{}{}
 		}
 
@@ -103,7 +104,7 @@ func ConfigureTaxCode(v *viper.Viper) {
 			"defaultInvoicing": true,
 		},
 		{
-			"key":                "nontaxable",
+			"key":                taxcode.CreditGrantTaxCodeKey,
 			"name":               "Nontaxable",
 			"defaultCreditGrant": true,
 			"appMappings": []map[string]any{

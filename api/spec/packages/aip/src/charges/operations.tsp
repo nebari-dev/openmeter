@@ -24,9 +24,37 @@ model ListChargesParamsFilter {
    * Filter charges by the ID of their customer.
    */
   customer_id?: Common.ULIDFieldFilter;
+
+  /**
+   * Filter charges by the ID of their subscription. Only charges linked to a
+   * subscription can match, including when using `neq`.
+   */
+  subscription_id?: Common.ULIDFieldFilter;
 }
 
 interface ChargesOperations {
+  /**
+   * Get a flat fee or usage-based charge by ID.
+   *
+   * Deleted charges are returned with their status and realization history.
+   */
+  @extension(Shared.UnstableExtension, true)
+  @get
+  @operationId("get-charge")
+  @summary("Get charge")
+  get(
+    @path chargeId: Shared.ULID,
+
+    /**
+     * Expand related entities, realization details, or real-time usage.
+     */
+    @query(#{ explode: false })
+    expand?: Customers.ChargesExpand[],
+  ):
+    | Shared.GetResponse<Customers.Charge>
+    | Common.NotFound
+    | Common.ErrorResponses;
+
   /**
    * List charges.
    *
@@ -34,8 +62,6 @@ interface ChargesOperations {
    * usage-based charges.
    */
   @extension(Shared.UnstableExtension, true)
-  @extension(Shared.PrivateExtension, true)
-  @extension(Shared.InternalExtension, true)
   @get
   @operationId("list-charges")
   @summary("List charges")
@@ -61,6 +87,9 @@ interface ChargesOperations {
      * To filter charges by customer add the following query param:
      * `filter[customer_id][eq]=<id>` or `filter[customer_id][oeq]=<id>,<id>`.
      *
+     * To filter charges by subscription, use `filter[subscription_id][eq]=<id>` or
+     * `filter[subscription_id][oeq]=<id>,<id>`.
+     *
      * To filter charges by status add the following query param:
      * `filter[status][oeq]=created,active`
      *
@@ -78,8 +107,10 @@ interface ChargesOperations {
      *
      * Supported values are:
      *
-     * - `real_time_usage`: Expand the charge's real-time usage; it sets the `usage`
-     *   and the `totals.realtime` fields.
+     * - `real_time_usage`: Set `usage` and `totals.realtime` for active usage-based
+     *   charges and created usage-based charges whose effective service period
+     *   contains the current time (inclusive start, exclusive end). Deleted charges
+     *   are skipped.
      * - `customer`: Expand the charge's customer to the complete entity.
      * - `feature`: Expand the charge's feature to the complete entity.
      * - `subscription`: Expand the charge's subscription to the complete entity.

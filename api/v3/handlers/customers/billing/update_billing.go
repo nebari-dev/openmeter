@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	"github.com/oapi-codegen/nullable"
+
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/customer"
@@ -19,9 +21,9 @@ type (
 	UpdateCustomerBillingRequest struct {
 		CustomerID customer.CustomerID
 		ProfileID  *billing.ProfileID
-		AppData    *api.BillingAppCustomerData
+		AppData    *apiv3models.BillingAppCustomerData
 	}
-	UpdateCustomerBillingResponse = api.BillingCustomerData
+	UpdateCustomerBillingResponse = apiv3models.BillingCustomerData
 	UpdateCustomerBillingParams   = string
 	UpdateCustomerBillingHandler  httptransport.HandlerWithArgs[UpdateCustomerBillingRequest, UpdateCustomerBillingResponse, UpdateCustomerBillingParams]
 )
@@ -29,7 +31,7 @@ type (
 func (h *handler) UpdateCustomerBilling() UpdateCustomerBillingHandler {
 	return httptransport.NewHandlerWithArgs(
 		func(ctx context.Context, r *http.Request, customerID UpdateCustomerBillingParams) (UpdateCustomerBillingRequest, error) {
-			body := api.UpsertCustomerBillingDataRequest{}
+			body := apiv3models.UpsertCustomerBillingDataRequest{}
 			if err := request.ParseBody(r, &body); err != nil {
 				return UpdateCustomerBillingRequest{}, err
 			}
@@ -59,10 +61,15 @@ func (h *handler) UpdateCustomerBilling() UpdateCustomerBillingHandler {
 			}
 
 			var profileID *billing.ProfileID
-			if body.BillingProfile != nil {
+			if body.BillingProfile.IsSpecified() && !body.BillingProfile.IsNull() {
+				reference, err := body.BillingProfile.Get()
+				if err != nil {
+					return UpdateCustomerBillingRequest{}, fmt.Errorf("read billing profile reference: %w", err)
+				}
+
 				profileID = &billing.ProfileID{
 					Namespace: namespace,
-					ID:        body.BillingProfile.Id,
+					ID:        reference.Id,
 				}
 			}
 
@@ -79,15 +86,21 @@ func (h *handler) UpdateCustomerBilling() UpdateCustomerBillingHandler {
 			resp := UpdateCustomerBillingResponse{}
 
 			var billingProfile *billing.Profile
+			var customerOverride billing.CustomerBillingProfile
 			var err error
-			// If the profile ID is not provided, we use the default profile
+			// App data must be written through the same effective profile used by GET.
 			if request.ProfileID == nil {
-				billingProfile, err = h.billingService.GetDefaultProfile(ctx, billing.GetDefaultProfileInput{
-					Namespace: request.CustomerID.Namespace,
+				customerOverride, err = h.billingService.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
+					Customer: request.CustomerID,
+					Expand: billing.CustomerBillingProfileExpand{
+						Apps: true,
+					},
 				})
 				if err != nil {
-					return resp, err
+					return resp, fmt.Errorf("failed to resolve effective billing profile: %w", err)
 				}
+
+				billingProfile = &customerOverride.EffectiveProfile
 			} else {
 				// Get the billing profile by the provided profile ID
 				billingProfile, err = h.billingService.GetProfile(ctx, billing.GetProfileInput{
@@ -99,10 +112,6 @@ func (h *handler) UpdateCustomerBilling() UpdateCustomerBillingHandler {
 				if err != nil {
 					return resp, err
 				}
-			}
-
-			resp.BillingProfile = &api.BillingProfileReference{
-				Id: billingProfile.ID,
 			}
 
 			if billingProfile.Apps == nil {
@@ -124,14 +133,31 @@ func (h *handler) UpdateCustomerBilling() UpdateCustomerBillingHandler {
 
 			// Override the billing profile if an ID was provided
 			if request.ProfileID != nil {
-				_, err = h.billingService.UpsertCustomerOverride(ctx, billing.UpsertCustomerOverrideInput{
-					Namespace:  request.CustomerID.Namespace,
-					CustomerID: request.CustomerID.ID,
-					ProfileID:  billingProfile.ID,
+				customerOverride, err = h.billingService.SetCustomerBillingProfile(ctx, billing.SetCustomerBillingProfileInput{
+					Customer:  request.CustomerID,
+					ProfileID: billingProfile.ID,
 				})
 				if err != nil {
 					return resp, fmt.Errorf("failed to update billing profile: %w", err)
 				}
+
+				if customerOverride.AssignedProfile == nil {
+					return resp, apierrors.NewInternalError(ctx, errors.New("customer override is not found"))
+				}
+
+				resp.BillingProfile = nullable.NewNullableWithValue(apiv3models.BillingProfileReference{
+					Id: customerOverride.AssignedProfile.ProfileID,
+				})
+			} else {
+				if customerOverride.AssignedProfile != nil {
+					resp.BillingProfile = nullable.NewNullableWithValue(apiv3models.BillingProfileReference{
+						Id: customerOverride.AssignedProfile.ProfileID,
+					})
+				}
+			}
+
+			resp.EffectiveBillingProfile = apiv3models.BillingProfileReference{
+				Id: customerOverride.EffectiveProfile.ID,
 			}
 
 			return resp, nil

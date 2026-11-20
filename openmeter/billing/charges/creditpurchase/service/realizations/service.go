@@ -76,6 +76,7 @@ func (s *Service) GrantPromotionalCredits(ctx context.Context, charge creditpurc
 	if err != nil {
 		return creditpurchase.Charge{}, err
 	}
+
 	ledgerTransactionGroupReference, err := s.handler.OnPromotionalCreditPurchase(ctx, creditpurchase.CreditGrantInput{Charge: charge, AdvanceLineages: advanceLineages})
 	if err != nil {
 		return creditpurchase.Charge{}, err
@@ -135,6 +136,7 @@ func (s *Service) GrantCredits(ctx context.Context, charge creditpurchase.Charge
 	if err != nil {
 		return creditpurchase.Charge{}, err
 	}
+
 	ledgerTransactionGroupReference, err := s.handler.OnCreditPurchaseInitiated(ctx, creditpurchase.CreditGrantInput{Charge: charge, AdvanceLineages: advanceLineages})
 	if err != nil {
 		return creditpurchase.Charge{}, err
@@ -215,7 +217,20 @@ func (s *Service) AuthorizeInvoicedPayment(ctx context.Context, input AuthorizeI
 	charge := input.Charge
 	lineWithHeader := input.LineWithHeader
 
-	if charge.Realizations.InvoiceSettlement != nil {
+	if booked := charge.Realizations.InvoiceSettlement; booked != nil {
+		if err := booked.Validate(); err != nil {
+			return creditpurchase.Charge{}, fmt.Errorf("validating existing invoice payment: %w", err)
+		}
+
+		if booked.IsBookedFor(payment.BookingKey{
+			Namespace:  charge.Namespace,
+			InvoiceID:  lineWithHeader.Invoice.ID,
+			LineID:     lineWithHeader.Line.ID,
+			FiatAmount: lineWithHeader.Line.Totals.Total,
+		}) {
+			return charge, nil
+		}
+
 		return creditpurchase.Charge{}, payment.ErrPaymentAlreadyAuthorized.
 			WithAttrs(charge.ErrorAttributes()).
 			WithAttrs(charge.Realizations.InvoiceSettlement.ErrorAttributes())

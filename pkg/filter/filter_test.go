@@ -2,6 +2,7 @@ package filter_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,9 +32,11 @@ func assertValidationError(t *testing.T, err error, wantErr error) {
 		assert.NoError(t, err)
 		return
 	}
+
 	if !assert.Error(t, err) {
 		return
 	}
+
 	assert.True(t, models.IsGenericValidationError(err), "expected a models.GenericValidationError, got %T: %v", err, err)
 	assert.True(t, errors.Is(err, wantErr), "expected error to wrap %v, got %v", wantErr, err)
 }
@@ -2444,6 +2447,41 @@ func TestFilterTime_IsEmpty(t *testing.T) {
 	}
 }
 
+func TestNewULIDEq(t *testing.T) {
+	first, second := ulid.Make().String(), ulid.Make().String()
+
+	single := filter.NewULIDEq(first)
+	assert.Equal(t, &first, single.Eq)
+	assert.Nil(t, single.In)
+
+	multiple := filter.NewULIDEq(first, second)
+	assert.Nil(t, multiple.Eq)
+	assert.Equal(t, &[]string{first, second}, multiple.In)
+
+	empty := filter.NewULIDEq()
+	assert.False(t, empty.IsEmpty())
+	selector := newSelectBuilder()
+	empty.Select("id")(selector)
+	query, args := selector.Query()
+	assert.Contains(t, query, "WHERE FALSE")
+	assert.Empty(t, args)
+
+	builder := sqlbuilder.Select("*").From("test_table")
+	builder.Where(empty.SelectWhereExpr("id", builder))
+	query, args = builder.Build()
+	assert.Contains(t, query, "WHERE 0 = 1")
+	assert.Empty(t, args)
+}
+
+func TestNewULIDIn(t *testing.T) {
+	first := ulid.Make().String()
+	second := ulid.Make().String()
+
+	assert.Nil(t, filter.NewULIDIn())
+	assert.Equal(t, &filter.FilterULID{FilterString: filter.FilterString{Eq: &first}}, filter.NewULIDIn(first))
+	assert.Equal(t, &filter.FilterULID{FilterString: filter.FilterString{In: &[]string{first, second}}}, filter.NewULIDIn(first, second))
+}
+
 func TestFilterULID_Validate(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2700,6 +2738,7 @@ func TestFilterString_Match(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -2759,6 +2798,7 @@ func TestFilterULID_SelectAndSelectWhereExpr_RecursesIntoAndOr(t *testing.T) {
 			if !assert.NotEmpty(t, expr, "SQL expression should not be empty") {
 				return
 			}
+
 			q.Where(expr)
 			exprSQL, exprArgs := q.Build()
 			assert.Equal(t, tt.wantExprSQL, exprSQL)
@@ -2768,6 +2808,7 @@ func TestFilterULID_SelectAndSelectWhereExpr_RecursesIntoAndOr(t *testing.T) {
 			if !assert.NotNil(t, predicate, "predicate should not be nil") {
 				return
 			}
+
 			s := newSelectBuilder()
 			predicate(s)
 			entSQL, entArgs := s.Query()
@@ -2822,4 +2863,62 @@ func TestFilterULID_IsEmpty(t *testing.T) {
 			assert.Equal(t, tt.want, tt.filter.IsEmpty())
 		})
 	}
+}
+
+func TestFilterStringMap(t *testing.T) {
+	upper := func(v string) (string, error) {
+		if v == "bad" {
+			return "", errors.New("bad value")
+		}
+
+		return strings.ToUpper(v), nil
+	}
+
+	t.Run("nil filter maps to nil", func(t *testing.T) {
+		var in *filter.FilterString
+		got, err := in.Map(upper)
+		assert.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("every operand is mapped, including nested ones", func(t *testing.T) {
+		in := &filter.FilterString{
+			And: &[]filter.FilterString{
+				{Eq: lo.ToPtr("a")},
+				{Ne: lo.ToPtr("b")},
+				{In: &[]string{"c", "d"}},
+				{Or: &[]filter.FilterString{
+					{Nin: &[]string{"e"}},
+					{Like: lo.ToPtr("f%")},
+				}},
+			},
+		}
+
+		got, err := in.Map(upper)
+		assert.NoError(t, err)
+		assert.Equal(t, &filter.FilterString{
+			And: &[]filter.FilterString{
+				{Eq: lo.ToPtr("A")},
+				{Ne: lo.ToPtr("B")},
+				{In: &[]string{"C", "D"}},
+				{Or: &[]filter.FilterString{
+					{Nin: &[]string{"E"}},
+					{Like: lo.ToPtr("F%")},
+				}},
+			},
+		}, got)
+	})
+
+	t.Run("a failing operand fails the whole filter", func(t *testing.T) {
+		_, err := (&filter.FilterString{In: &[]string{"a", "bad"}}).Map(upper)
+		assert.Error(t, err)
+	})
+
+	t.Run("the input filter is not mutated", func(t *testing.T) {
+		in := &filter.FilterString{Eq: lo.ToPtr("a"), In: &[]string{"b"}}
+		_, err := in.Map(upper)
+		assert.NoError(t, err)
+		assert.Equal(t, "a", lo.FromPtr(in.Eq))
+		assert.Equal(t, []string{"b"}, *in.In)
+	})
 }

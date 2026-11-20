@@ -2,6 +2,7 @@ package credits
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,12 +28,13 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ledger"
 	ledgerbreakage "github.com/openmeterio/openmeter/openmeter/ledger/breakage"
 	ledgerchargeadapter "github.com/openmeterio/openmeter/openmeter/ledger/chargeadapter"
-	"github.com/openmeterio/openmeter/openmeter/ledger/creditvoid"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	omtestutils "github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/datetime"
+	"github.com/openmeterio/openmeter/pkg/pagination"
+	"github.com/openmeterio/openmeter/pkg/sortx"
 	billingtest "github.com/openmeterio/openmeter/test/billing"
 )
 
@@ -99,7 +101,7 @@ func (s *CreditGrantTestSuite) SetupSuite() {
 		ChargesService:        s.Charges,
 		BillingService:        s.BillingService,
 		CustomerService:       s.CustomerService,
-		CreditVoidService:     creditvoid.NewNoopService(),
+		CreditVoidService:     s.CreditVoidService,
 		TransactionManager:    enttx.NewCreator(s.DBClient),
 		CurrencyResolver:      s.CurrencyResolver,
 	})
@@ -111,7 +113,7 @@ func (s *CreditGrantTestSuite) SetupSuite() {
 func (s *CreditGrantTestSuite) TestCreateInvoiceFundedCreatesInvoiceArtifacts() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("creditgrant-service-invoice-funded")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -168,7 +170,7 @@ func (s *CreditGrantTestSuite) TestCreateInvoiceFundedCreatesInvoiceArtifacts() 
 func (s *CreditGrantTestSuite) TestCreatePromotionalGrant() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("creditgrant-service-promotional")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -207,7 +209,7 @@ func (s *CreditGrantTestSuite) TestCreatePromotionalGrant() {
 func (s *CreditGrantTestSuite) TestCreatePromotionalGrantUsesEffectiveAtForServicePeriodAndLedgerBookedAt() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("creditgrant-service-promotional-effective-at")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -254,7 +256,7 @@ func (s *CreditGrantTestSuite) TestCreatePromotionalGrantUsesEffectiveAtForServi
 func (s *CreditGrantTestSuite) TestCreateFeatureFilteredGrant() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("creditgrant-service-feature-filters")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 
@@ -281,7 +283,7 @@ func (s *CreditGrantTestSuite) TestCreateFeatureFilteredGrant() {
 func (s *CreditGrantTestSuite) TestCreateExternalGrantAndSettle() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("creditgrant-service-external")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -339,7 +341,7 @@ func (s *CreditGrantTestSuite) TestCreateExternalGrantAndSettle() {
 func (s *CreditGrantTestSuite) TestCreateExternalGrantWithSubCentCostBasisAndSettle() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("creditgrant-service-external-sub-cent-cost-basis")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -432,7 +434,7 @@ func (s *CreditGrantTestSuite) TestCreateExternalGrantWithSubCentCostBasisAndSet
 func (s *CreditGrantTestSuite) TestListCreditGrants() {
 	ctx := context.Background()
 	ns := s.GetUniqueNamespace("creditgrant-service-list")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -458,6 +460,74 @@ func (s *CreditGrantTestSuite) TestListCreditGrants() {
 	s.Contains(ids, secondGrant.ID)
 }
 
+func (s *CreditGrantTestSuite) TestListCreditGrantsSorting() {
+	// given: grants whose names and creation times sort differently, including ties.
+	ctx := s.T().Context()
+	ns := s.GetUniqueNamespace("creditgrant-list-sorting")
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
+	sandboxApp := s.InstallSandboxApp(s.T(), ns)
+	_ = s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID())
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	clock.FreezeTime(now)
+	defer clock.UnFreeze()
+
+	first := s.mustCreatePromotionalCreditGrant(ctx, ns, cust.GetID(), "beta", alpacadecimal.NewFromInt(10))
+	clock.FreezeTime(now.Add(time.Hour))
+	defer clock.UnFreeze()
+	second := s.mustCreatePromotionalCreditGrant(ctx, ns, cust.GetID(), "alpha", alpacadecimal.NewFromInt(10))
+	third := s.mustCreatePromotionalCreditGrant(ctx, ns, cust.GetID(), "alpha", alpacadecimal.NewFromInt(10))
+	s.Require().True(first.CreatedAt.Before(second.CreatedAt))
+	s.Require().Equal(second.CreatedAt, third.CreatedAt)
+
+	// Voiding the oldest grant gives it the newest update time.
+	clock.FreezeTime(now.Add(2 * time.Hour))
+	defer clock.UnFreeze()
+	voided, err := s.CreditGrantService.Void(ctx, creditgrant.VoidInput{Namespace: ns, CustomerID: cust.ID, ChargeID: first.ID})
+	s.Require().NoError(err)
+	s.Require().True(voided.UpdatedAt.After(second.UpdatedAt))
+
+	tiedIDs := []string{second.ID, third.ID}
+	slices.Sort(tiedIDs)
+	allIDs := []string{first.ID, second.ID, third.ID}
+	slices.Sort(allIDs)
+
+	for _, tc := range []struct {
+		name    string
+		orderBy creditpurchase.OrderBy
+		order   sortx.Order
+		want    []string
+	}{
+		{name: "default newest first", want: []string{tiedIDs[1], tiedIDs[0], first.ID}},
+		{name: "created ascending", orderBy: creditpurchase.OrderByCreatedAt, order: sortx.OrderAsc, want: []string{first.ID, tiedIDs[0], tiedIDs[1]}},
+		{name: "created descending", orderBy: creditpurchase.OrderByCreatedAt, order: sortx.OrderDesc, want: []string{tiedIDs[1], tiedIDs[0], first.ID}},
+		{name: "updated ascending", orderBy: creditpurchase.OrderByUpdatedAt, order: sortx.OrderAsc, want: []string{tiedIDs[0], tiedIDs[1], first.ID}},
+		{name: "updated descending", orderBy: creditpurchase.OrderByUpdatedAt, order: sortx.OrderDesc, want: []string{first.ID, tiedIDs[1], tiedIDs[0]}},
+		{name: "name ascending", orderBy: creditpurchase.OrderByName, order: sortx.OrderAsc, want: []string{tiedIDs[0], tiedIDs[1], first.ID}},
+		{name: "name descending", orderBy: creditpurchase.OrderByName, order: sortx.OrderDesc, want: []string{first.ID, tiedIDs[1], tiedIDs[0]}},
+		{name: "id ascending", orderBy: creditpurchase.OrderByID, order: sortx.OrderAsc, want: allIDs},
+		{name: "id descending", orderBy: creditpurchase.OrderByID, order: sortx.OrderDesc, want: []string{allIDs[2], allIDs[1], allIDs[0]}},
+	} {
+		s.Run(tc.name, func() {
+			// when: listing the same sorted grants across one-item pages.
+			var ids []string
+			for page := 1; page <= len(tc.want); page++ {
+				result, err := s.CreditGrantService.List(ctx, creditgrant.ListInput{
+					Namespace: ns, CustomerID: cust.ID, Page: pagination.NewPage(page, 1),
+					OrderBy: tc.orderBy, Order: tc.order,
+				})
+				s.Require().NoError(err)
+				s.Require().Equal(len(tc.want), result.TotalCount)
+				s.Require().Len(result.Items, 1)
+				ids = append(ids, result.Items[0].ID)
+			}
+
+			// then: ordering happens before pagination and tied grants appear once.
+			s.Equal(tc.want, ids)
+		})
+	}
+}
+
 // TestCreateInvoiceFundedGrantPropagatesTaxConfigToInvoiceLine verifies that TaxConfig set on
 // creditgrant.CreateInput is propagated to the standard invoice line. Credit purchases always bypass
 // collection alignment (ServicePeriod = {Now, Now}), so the line is immediately converted from
@@ -465,7 +535,7 @@ func (s *CreditGrantTestSuite) TestListCreditGrants() {
 func (s *CreditGrantTestSuite) TestCreateInvoiceFundedGrantPropagatesTaxConfigToInvoiceLine() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("creditgrant-taxconfig-propagation")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -479,15 +549,13 @@ func (s *CreditGrantTestSuite) TestCreateInvoiceFundedGrantPropagatesTaxConfigTo
 	now := datetime.MustParseTimeInLocation(s.T(), "2026-04-17T11:23:53Z", time.UTC).AsTime()
 	clock.SetTime(now)
 
-	tc, err := s.TaxCodeService.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-		Namespace: ns,
-		Key:       "txcd-40000001",
-		Name:      "Test Tax Code txcd-40000001",
+	tc := s.TaxCodeEnv.CreateTaxCode(s.T(), ns, taxcode.CreateTaxCodeInput{
+		Key:  "txcd-40000001",
+		Name: "Test Tax Code txcd-40000001",
 		AppMappings: taxcode.TaxCodeAppMappings{
 			{AppType: app.AppTypeStripe, TaxCode: "txcd_40000001"},
 		},
 	})
-	s.Require().NoError(err)
 
 	grant, err := s.CreditGrantService.Create(ctx, creditgrant.CreateInput{
 		Namespace:     ns,
@@ -535,7 +603,7 @@ func (s *CreditGrantTestSuite) TestCreateInvoiceFundedGrantPropagatesTaxConfigTo
 func (s *CreditGrantTestSuite) TestCreateInvoiceFundedGrantNilTaxConfigAppliesCreditGrantDefault() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("creditgrant-taxconfig-nil")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	customInvoicing := s.SetupCustomInvoicing(ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
@@ -546,7 +614,7 @@ func (s *CreditGrantTestSuite) TestCreateInvoiceFundedGrantNilTaxConfigAppliesCr
 		billingtest.WithManualApproval(),
 	)
 
-	defaults, err := s.TaxCodeService.GetOrganizationDefaultTaxCodes(ctx, taxcode.GetOrganizationDefaultTaxCodesInput{Namespace: ns})
+	defaults, err := s.TaxCodeEnv.Service.GetOrganizationDefaultTaxCodes(ctx, taxcode.GetOrganizationDefaultTaxCodesInput{Namespace: ns})
 	s.Require().NoError(err)
 
 	now := datetime.MustParseTimeInLocation(s.T(), "2026-04-17T11:23:53Z", time.UTC).AsTime()
@@ -588,7 +656,7 @@ func (s *CreditGrantTestSuite) TestCreateInvoiceFundedGrantNilTaxConfigAppliesCr
 func (s *CreditGrantTestSuite) TestCreateExternalGrantPropagatesTaxConfigToCharge() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("creditgrant-external-taxconfig")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -597,12 +665,10 @@ func (s *CreditGrantTestSuite) TestCreateExternalGrantPropagatesTaxConfigToCharg
 	now := time.Date(2026, 4, 17, 11, 23, 53, 0, time.UTC)
 	clock.SetTime(now)
 
-	tc, err := s.TaxCodeService.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-		Namespace: ns,
-		Key:       "txcd-50000001",
-		Name:      "Test Tax Code txcd-50000001",
+	tc := s.TaxCodeEnv.CreateTaxCode(s.T(), ns, taxcode.CreateTaxCodeInput{
+		Key:  "txcd-50000001",
+		Name: "Test Tax Code txcd-50000001",
 	})
-	s.Require().NoError(err)
 
 	grant, err := s.CreditGrantService.Create(ctx, creditgrant.CreateInput{
 		Namespace:     ns,
@@ -638,7 +704,7 @@ func (s *CreditGrantTestSuite) TestCreateExternalGrantPropagatesTaxConfigToCharg
 func (s *CreditGrantTestSuite) TestCreatePromotionalGrantPropagatesTaxConfigToCharge() {
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("creditgrant-promotional-taxconfig")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	sandboxApp := s.InstallSandboxApp(s.T(), ns)
@@ -647,12 +713,10 @@ func (s *CreditGrantTestSuite) TestCreatePromotionalGrantPropagatesTaxConfigToCh
 	now := time.Date(2026, 4, 17, 11, 23, 53, 0, time.UTC)
 	clock.SetTime(now)
 
-	tc, err := s.TaxCodeService.CreateTaxCode(ctx, taxcode.CreateTaxCodeInput{
-		Namespace: ns,
-		Key:       "txcd-50000002",
-		Name:      "Test Tax Code txcd-50000002",
+	tc := s.TaxCodeEnv.CreateTaxCode(s.T(), ns, taxcode.CreateTaxCodeInput{
+		Key:  "txcd-50000002",
+		Name: "Test Tax Code txcd-50000002",
 	})
-	s.Require().NoError(err)
 
 	grant, err := s.CreditGrantService.Create(ctx, creditgrant.CreateInput{
 		Namespace:     ns,
@@ -699,7 +763,7 @@ func (s *CreditGrantTestSuite) TestCreatePlanFilteredGrant() {
 	// given: a grant matches a feature and two versions of a plan.
 	ctx := s.T().Context()
 	ns := s.GetUniqueNamespace("creditgrant-plan-filters")
-	s.ProvisionDefaultTaxCodes(ctx, ns)
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
 	filters := ledger.CreditFilters{Version: ledger.CreditFiltersVersion2, Features: []string{"api-calls"}, Plans: []ledger.PlanFilter{{Key: "pro", Version: &ledger.VersionFilter{In: []int{3, 2, 3}}}}}
 	// when: creation persists and realizes the grant.
@@ -715,4 +779,72 @@ func (s *CreditGrantTestSuite) TestCreatePlanFilteredGrant() {
 	s.Require().Len(loaded.Intent.Filters.Plans, 1)
 	s.Equal([]int{2, 3}, loaded.Intent.Filters.Plans[0].Version.In)
 	s.NotNil(loaded.Realizations.CreditGrantRealization)
+}
+
+func (s *CreditGrantTestSuite) TestListCreditGrantsSpendabilityFilters() {
+	ctx := s.T().Context()
+	ns := s.GetUniqueNamespace("creditgrant-list-spendability")
+	s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
+	cust := s.CreateLedgerBackedCustomer(ns, "test-subject")
+	sandboxApp := s.InstallSandboxApp(s.T(), ns)
+	_ = s.ProvisionBillingProfile(ctx, ns, sandboxApp.GetID())
+	clock.FreezeTime(time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC))
+	defer clock.UnFreeze()
+
+	// Given grants with feature restrictions, including both stored formats.
+	specs := []struct {
+		name    string
+		filters ledger.CreditFilters
+	}{
+		{name: "unrestricted"},
+		{name: "feature-a", filters: ledger.CreditFilters{Features: []string{"a"}}},
+		{name: "feature-b", filters: ledger.CreditFilters{Features: []string{"b"}}},
+		{name: "feature-ab", filters: ledger.CreditFilters{Features: []string{"a", "b"}}},
+		{name: "plan-only", filters: ledger.CreditFilters{Plans: []ledger.PlanFilter{{Key: "pro"}}}},
+		{name: "mixed", filters: ledger.CreditFilters{Features: []string{"a"}, Plans: []ledger.PlanFilter{{Key: "pro"}}}},
+	}
+	ids := make(map[string]string, len(specs))
+	all := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		grant, err := s.CreditGrantService.Create(ctx, creditgrant.CreateInput{
+			Namespace: ns, CustomerID: cust.ID, Name: spec.name, Currency: USD,
+			Amount: alpacadecimal.NewFromInt(10), FundingMethod: creditgrant.FundingMethodNone,
+			Filters: &spec.filters,
+		})
+		s.Require().NoError(err)
+		ids[spec.name] = grant.ID
+		all = append(all, spec.name)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		features mo.Option[ledger.FeatureFilters]
+		want     []string
+	}{
+		{name: "omitted", want: all},
+		{name: "feature", features: mo.Some(ledger.FeatureFilters{"a"}), want: []string{"unrestricted", "feature-a", "feature-ab", "plan-only", "mixed"}},
+		{name: "multiple features without duplicate grants", features: mo.Some(ledger.FeatureFilters{"a", "b"}), want: all},
+		{name: "unknown feature includes unrestricted", features: mo.Some(ledger.FeatureFilters{"missing"}), want: []string{"unrestricted", "plan-only"}},
+		{name: "no feature restrictions", features: mo.Some[ledger.FeatureFilters](nil), want: []string{"unrestricted", "plan-only"}},
+	} {
+		s.Run(tc.name, func() {
+			// When listing grants for the requested features.
+			input := creditgrant.ListInput{Namespace: ns, CustomerID: cust.ID, FeatureFilters: tc.features, Page: pagination.NewPage(1, 100)}
+			result, err := s.CreditGrantService.List(ctx, input)
+			s.Require().NoError(err)
+			// Then unrestricted grants are retained and restrictions match before pagination.
+			want := lo.Map(tc.want, func(name string, _ int) string { return ids[name] })
+			got := lo.Map(result.Items, func(grant creditpurchase.Charge, _ int) string { return grant.ID })
+			s.ElementsMatch(want, got)
+			s.Equal(len(want), result.TotalCount)
+			input.Page = pagination.NewPage(1, 2)
+			page, err := s.CreditGrantService.List(ctx, input)
+			s.Require().NoError(err)
+			s.Equal(len(want), page.TotalCount)
+			s.Len(page.Items, min(2, len(want)))
+			for _, grant := range page.Items {
+				s.Contains(want, grant.ID)
+			}
+		})
+	}
 }

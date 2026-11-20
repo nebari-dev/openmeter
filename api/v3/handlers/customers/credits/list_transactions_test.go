@@ -7,7 +7,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	"github.com/stretchr/testify/require"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/ledger"
 	"github.com/openmeterio/openmeter/openmeter/ledger/customerbalance"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
@@ -15,7 +15,7 @@ import (
 )
 
 func TestFromAPIBillingCreditTransactionType_Funded(t *testing.T) {
-	filter := api.BillingCreditTransactionTypeFunded
+	filter := apiv3models.BillingCreditTransactionTypeFunded
 
 	txType := fromAPIBillingCreditTransactionType(&filter)
 
@@ -24,12 +24,32 @@ func TestFromAPIBillingCreditTransactionType_Funded(t *testing.T) {
 }
 
 func TestFromAPIBillingCreditTransactionType_Expired(t *testing.T) {
-	filter := api.BillingCreditTransactionTypeExpired
+	filter := apiv3models.BillingCreditTransactionTypeExpired
 
 	txType := fromAPIBillingCreditTransactionType(&filter)
 
 	require.NotNil(t, txType)
 	require.Equal(t, customerbalance.CreditTransactionTypeExpired, *txType)
+}
+
+func TestCreditTransactionCorrectionMapping(t *testing.T) {
+	filter := apiv3models.BillingCreditTransactionTypeCorrection
+	txType := fromAPIBillingCreditTransactionType(&filter)
+	require.NotNil(t, txType)
+	require.Equal(t, customerbalance.CreditTransactionTypeCorrection, *txType)
+
+	createdAt := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	tx := toAPIBillingCreditTransaction(customerbalance.CreditTransaction{
+		ID:   models.NamespacedID{Namespace: "ns", ID: "correction-id"},
+		Type: *txType, Amount: alpacadecimal.NewFromInt(9), Currency: "USD",
+		CreatedAt: createdAt, BookedAt: createdAt.Add(-time.Hour),
+		Annotations: models.Annotations{ledger.AnnotationChargeID: "charge-id", ledger.AnnotationSubscriptionItemID: "item-id"},
+	})
+	require.Equal(t, filter, tx.Type)
+	require.Equal(t, apiv3models.Numeric("9"), tx.Amount)
+	require.Equal(t, createdAt, tx.CreatedAt)
+	require.Equal(t, createdAt.Add(-time.Hour), tx.BookedAt)
+	require.Equal(t, apiv3models.Labels{"charge_id": "charge-id", "subscription_item_id": "item-id"}, *tx.Labels)
 }
 
 func TestToAPIBillingCreditTransaction(t *testing.T) {
@@ -59,12 +79,12 @@ func TestToAPIBillingCreditTransaction(t *testing.T) {
 		},
 	})
 
-	require.Equal(t, api.ULID("tx-1"), tx.Id)
-	require.Equal(t, api.BillingCreditTransactionTypeConsumed, tx.Type)
-	require.Equal(t, api.BillingCurrencyCode("USD"), tx.Currency)
-	require.Equal(t, api.Numeric("-10"), tx.Amount)
-	require.Equal(t, api.Numeric("52"), tx.AvailableBalance.Before)
-	require.Equal(t, api.Numeric("42"), tx.AvailableBalance.After)
+	require.Equal(t, apiv3models.ULID("tx-1"), tx.Id)
+	require.Equal(t, apiv3models.BillingCreditTransactionTypeConsumed, tx.Type)
+	require.Equal(t, apiv3models.BillingCurrencyCode("USD"), tx.Currency)
+	require.Equal(t, apiv3models.Numeric("-10"), tx.Amount)
+	require.Equal(t, apiv3models.Numeric("52"), tx.AvailableBalance.Before)
+	require.Equal(t, apiv3models.Numeric("42"), tx.AvailableBalance.After)
 	require.Nil(t, tx.CustomCurrency)
 	require.NotNil(t, tx.Description)
 	require.Equal(t, description, *tx.Description)
@@ -104,7 +124,7 @@ func TestToAPIBillingCreditTransaction_Expired(t *testing.T) {
 		Amount:    alpacadecimal.NewFromInt(-4),
 	})
 
-	require.Equal(t, api.BillingCreditTransactionTypeExpired, tx.Type)
+	require.Equal(t, apiv3models.BillingCreditTransactionTypeExpired, tx.Type)
 }
 
 func TestToAPIBillingCreditTransactionCustomCurrencyIdentity(t *testing.T) {
@@ -123,8 +143,8 @@ func TestToAPIBillingCreditTransactionCustomCurrencyIdentity(t *testing.T) {
 		Amount:           alpacadecimal.NewFromInt(10),
 	})
 
-	require.Equal(t, api.BillingCurrencyCode("CREDITS"), tx.Currency)
-	require.Equal(t, &api.CurrencyCustomReference{Id: currencyID}, tx.CustomCurrency)
+	require.Equal(t, apiv3models.BillingCurrencyCode("CREDITS"), tx.Currency)
+	require.Equal(t, &apiv3models.CurrencyCustomReference{Id: currencyID}, tx.CustomCurrency)
 }
 
 func TestCreditTransactionCursorConversion(t *testing.T) {

@@ -52,6 +52,9 @@ type AppStripe func(*sql.Selector)
 // AppStripeCustomer is the predicate function for appstripecustomer builders.
 type AppStripeCustomer func(*sql.Selector)
 
+// AppStripeInvoiceGeneration is the predicate function for appstripeinvoicegeneration builders.
+type AppStripeInvoiceGeneration func(*sql.Selector)
+
 // BalanceSnapshot is the predicate function for balancesnapshot builders.
 type BalanceSnapshot func(*sql.Selector)
 
@@ -89,28 +92,11 @@ func BillingGatheringInvoiceLineOrErr(p BillingGatheringInvoiceLine, err error) 
 // BillingInvoice is the predicate function for billinginvoice builders.
 type BillingInvoice func(*sql.Selector)
 
-// BillingInvoiceFlatFeeLineConfig is the predicate function for billinginvoiceflatfeelineconfig builders.
-type BillingInvoiceFlatFeeLineConfig func(*sql.Selector)
-
 // BillingInvoiceLine is the predicate function for billinginvoiceline builders.
 type BillingInvoiceLine func(*sql.Selector)
 
 // BillingInvoiceLineOrErr calls the predicate only if the error is not nit.
 func BillingInvoiceLineOrErr(p BillingInvoiceLine, err error) BillingInvoiceLine {
-	return func(s *sql.Selector) {
-		if err != nil {
-			s.AddError(err)
-			return
-		}
-		p(s)
-	}
-}
-
-// BillingInvoiceLineDiscount is the predicate function for billinginvoicelinediscount builders.
-type BillingInvoiceLineDiscount func(*sql.Selector)
-
-// BillingInvoiceLineDiscountOrErr calls the predicate only if the error is not nit.
-func BillingInvoiceLineDiscountOrErr(p BillingInvoiceLineDiscount, err error) BillingInvoiceLineDiscount {
 	return func(s *sql.Selector) {
 		if err != nil {
 			s.AddError(err)
@@ -459,8 +445,30 @@ func NotificationChannelOrErr(p NotificationChannel, err error) NotificationChan
 // NotificationEvent is the predicate function for notificationevent builders.
 type NotificationEvent func(*sql.Selector)
 
+// NotificationEventOrErr calls the predicate only if the error is not nit.
+func NotificationEventOrErr(p NotificationEvent, err error) NotificationEvent {
+	return func(s *sql.Selector) {
+		if err != nil {
+			s.AddError(err)
+			return
+		}
+		p(s)
+	}
+}
+
 // NotificationEventDeliveryStatus is the predicate function for notificationeventdeliverystatus builders.
 type NotificationEventDeliveryStatus func(*sql.Selector)
+
+// NotificationEventDeliveryStatusOrErr calls the predicate only if the error is not nit.
+func NotificationEventDeliveryStatusOrErr(p NotificationEventDeliveryStatus, err error) NotificationEventDeliveryStatus {
+	return func(s *sql.Selector) {
+		if err != nil {
+			s.AddError(err)
+			return
+		}
+		p(s)
+	}
+}
 
 // NotificationRule is the predicate function for notificationrule builders.
 type NotificationRule func(*sql.Selector)
@@ -536,9 +544,6 @@ type SubscriptionAddon func(*sql.Selector)
 // SubscriptionAddonQuantity is the predicate function for subscriptionaddonquantity builders.
 type SubscriptionAddonQuantity func(*sql.Selector)
 
-// SubscriptionBillingSyncState is the predicate function for subscriptionbillingsyncstate builders.
-type SubscriptionBillingSyncState func(*sql.Selector)
-
 // SubscriptionCostBasisPin is the predicate function for subscriptioncostbasispin builders.
 type SubscriptionCostBasisPin func(*sql.Selector)
 
@@ -558,6 +563,9 @@ func SubscriptionItemOrErr(p SubscriptionItem, err error) SubscriptionItem {
 
 // SubscriptionPhase is the predicate function for subscriptionphase builders.
 type SubscriptionPhase func(*sql.Selector)
+
+// SubscriptionSyncState is the predicate function for subscriptionsyncstate builders.
+type SubscriptionSyncState func(*sql.Selector)
 
 // TaxCode is the predicate function for dbtaxcode builders.
 type TaxCode func(*sql.Selector)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/alpacahq/alpacadecimal"
@@ -99,6 +100,11 @@ func (i bookCustomCurrencyOverageInput) Validate() error {
 
 	if err := i.TaxConfig.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("tax config: %w", err))
+	}
+
+	// The tax config comes from the charge intent, which always has a Tax Code.
+	if i.TaxConfig.TaxCodeID == "" {
+		errs = append(errs, errors.New("tax config: tax code id is required"))
 	}
 
 	return models.NewNillableGenericValidationError(errors.Join(errs...))
@@ -211,8 +217,8 @@ func (h *customCurrencyOverageHandler) book(ctx context.Context, input bookCusto
 	}, nil
 }
 
-// correct reverses a complete custom-currency overage booking in dependency
-// order: currency conversion, immediate consumption, then credit issuance.
+// correct reverses every accounting leg of a custom-currency overage booking
+// in one atomic group.
 func (h *customCurrencyOverageHandler) correct(ctx context.Context, input correctCustomCurrencyOverageInput) error {
 	if err := input.Validate(); err != nil {
 		return err
@@ -233,23 +239,25 @@ func (h *customCurrencyOverageHandler) correct(ctx context.Context, input correc
 		return fmt.Errorf("get original transaction group: %w", err)
 	}
 
-	expectedForwardOrder := []string{
+	expectedTemplateCodes := []string{
 		transactions.TemplateCode(transactions.IssueCustomerReceivableTemplate{}),
 		transactions.TemplateCode(transactions.TransferCustomerFBOAdvanceToAccruedTemplate{}),
 		transactions.TemplateCode(transactions.ConvertCurrencyTemplate{}),
 	}
 	originalTransactions := originalGroup.Transactions()
-	if len(originalTransactions) != len(expectedForwardOrder) {
-		return fmt.Errorf("custom-currency overage group has %d transactions, expected %d", len(originalTransactions), len(expectedForwardOrder))
+	if len(originalTransactions) != len(expectedTemplateCodes) {
+		return fmt.Errorf("custom-currency overage group has %d transactions, expected %d", len(originalTransactions), len(expectedTemplateCodes))
 	}
 
-	// The booking owns this transaction order, and transaction groups reload in
-	// creation order. Validate that contract before unwinding it in reverse.
-	for idx, transaction := range originalTransactions {
+	// Creation timestamps and IDs do not define the accounting legs' order.
+	// Require exactly one of each template before resolving any corrections.
+	seenTemplates := make(map[string]struct{}, len(expectedTemplateCodes))
+	for _, transaction := range originalTransactions {
 		direction, err := ledger.TransactionDirectionFromAnnotations(transaction.Annotations())
 		if err != nil {
 			return fmt.Errorf("get original transaction direction: %w", err)
 		}
+
 		if direction != ledger.TransactionDirectionForward {
 			return fmt.Errorf("original transaction %s is not forward", transaction.ID().ID)
 		}
@@ -258,14 +266,20 @@ func (h *customCurrencyOverageHandler) correct(ctx context.Context, input correc
 		if err != nil {
 			return fmt.Errorf("get original transaction template code: %w", err)
 		}
-		if templateCode != expectedForwardOrder[idx] {
-			return fmt.Errorf("unexpected transaction template %s at index %d in custom-currency overage group, expected %s", templateCode, idx, expectedForwardOrder[idx])
+
+		if !slices.Contains(expectedTemplateCodes, templateCode) {
+			return fmt.Errorf("unexpected transaction template %s in custom-currency overage group", templateCode)
 		}
+
+		if _, seen := seenTemplates[templateCode]; seen {
+			return fmt.Errorf("duplicate transaction template %s in custom-currency overage group", templateCode)
+		}
+
+		seenTemplates[templateCode] = struct{}{}
 	}
 
 	correctionInputs := make([]ledger.TransactionInput, 0, len(originalTransactions))
-	for idx := len(originalTransactions) - 1; idx >= 0; idx-- {
-		originalTransaction := originalTransactions[idx]
+	for _, originalTransaction := range originalTransactions {
 		resolved, err := transactions.CorrectTransaction(ctx, h.deps, transactions.CorrectionInput{
 			At:                  input.BookedAt,
 			Amount:              input.CustomAmount,
@@ -274,7 +288,7 @@ func (h *customCurrencyOverageHandler) correct(ctx context.Context, input correc
 			OriginalGroup:       originalGroup,
 		})
 		if err != nil {
-			return fmt.Errorf("correct transaction template %s: %w", expectedForwardOrder[idx], err)
+			return fmt.Errorf("correct original transaction %s: %w", originalTransaction.ID().ID, err)
 		}
 
 		for _, correctionInput := range resolved {

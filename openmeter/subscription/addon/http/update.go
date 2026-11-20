@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	subscriptionhttp "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription/http"
 	subscriptionaddon "github.com/openmeterio/openmeter/openmeter/subscription/addon"
@@ -24,7 +24,7 @@ type (
 		WorkflowInput  subscriptionworkflow.ChangeAddonQuantityWorkflowInput
 		SubscriptionID models.NamespacedID
 	}
-	UpdateSubscriptionAddonResponse = api.SubscriptionAddon
+	UpdateSubscriptionAddonResponse = apiv1models.SubscriptionAddon
 	UpdateSubscriptionAddonHandler  = httptransport.HandlerWithArgs[UpdateSubscriptionAddonRequest, UpdateSubscriptionAddonResponse, UpdateSubscriptionAddonParams]
 )
 
@@ -36,7 +36,7 @@ func (h *handler) UpdateSubscriptionAddon() UpdateSubscriptionAddonHandler {
 				return UpdateSubscriptionAddonRequest{}, err
 			}
 
-			var body api.UpdateSubscriptionAddonJSONRequestBody
+			var body apiv1models.UpdateSubscriptionAddonJSONRequestBody
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return UpdateSubscriptionAddonRequest{}, err
 			}
@@ -44,6 +44,7 @@ func (h *handler) UpdateSubscriptionAddon() UpdateSubscriptionAddonHandler {
 			if body.Timing == nil {
 				return UpdateSubscriptionAddonRequest{}, errors.New("timing is required")
 			}
+
 			if body.Quantity == nil {
 				return UpdateSubscriptionAddonRequest{}, errors.New("quantity is required")
 			}
@@ -89,7 +90,12 @@ func (h *handler) UpdateSubscriptionAddon() UpdateSubscriptionAddonHandler {
 				return UpdateSubscriptionAddonResponse{}, err
 			}
 
-			return MapSubscriptionAddonToResponse(view, addon)
+			taxCodes, err := h.taxCodesForAddons(ctx, request.SubscriptionID.Namespace, addon)
+			if err != nil {
+				return UpdateSubscriptionAddonResponse{}, err
+			}
+
+			return MapSubscriptionAddonToResponse(view, addon, taxCodes)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[UpdateSubscriptionAddonResponse](http.StatusOK),
 		httptransport.AppendOptions(

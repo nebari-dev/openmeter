@@ -27,6 +27,8 @@ import type {
   GetCustomerBillingResponse,
   UpdateCustomerBillingRequest,
   UpdateCustomerBillingResponse,
+  UpdateCustomerBillingProfileRequest,
+  UpdateCustomerBillingProfileResponse,
   UpdateCustomerBillingAppDataRequest,
   UpdateCustomerBillingAppDataResponse,
   CreateCustomerStripeCheckoutSessionRequest,
@@ -71,6 +73,8 @@ import type {
   ListCustomerChargesResponse,
   CreateCustomerChargesRequest,
   CreateCustomerChargesResponse,
+  InvoiceCustomerChargesRequest,
+  InvoiceCustomerChargesResponse,
 } from '../models/operations/customers.js'
 
 /**
@@ -289,6 +293,10 @@ export function getCustomerBilling(
 /**
  * Update customer billing data
  *
+ * Update billing data while preserving the current profile selection when
+ * billing_profile is omitted or null. Use the dedicated billing profile endpoint
+ * to remove the selection.
+ *
  * PUT /openmeter/customers/{customerId}/billing
  */
 export function updateCustomerBilling(
@@ -324,6 +332,58 @@ export function updateCustomerBilling(
           assertValid(schemas.updateCustomerBillingResponseWire, data)
         }
         return fromWire(data, schemas.updateCustomerBillingResponse)
+      })
+  })
+}
+
+/**
+ * Update customer billing profile
+ *
+ * Set the customer's explicit billing profile selection. Omitting billing_profile
+ * or setting it to null removes the selection and uses the current namespace
+ * default.
+ *
+ * PUT /openmeter/customers/{customerId}/billing/profile
+ */
+export function updateCustomerBillingProfile(
+  client: Client,
+  req: UpdateCustomerBillingProfileRequest,
+  options?: RequestOptions,
+): Promise<Result<UpdateCustomerBillingProfileResponse>> {
+  return request(() => {
+    const pathParamsInput = {
+      customerId: req.customerId,
+    }
+    const pathParams = client._options.validate
+      ? toPathWire(
+          pathParamsInput,
+          schemas.updateCustomerBillingProfilePathParams,
+        )
+      : pathParamsInput
+    if (client._options.validate) {
+      assertValid(
+        schemas.updateCustomerBillingProfilePathParamsWire,
+        pathParams,
+      )
+    }
+    const path = `openmeter/customers/${(() => {
+      if (pathParams.customerId === undefined) {
+        throw new Error('missing path parameter: customerId')
+      }
+      return encodeURIComponent(String(pathParams.customerId))
+    })()}/billing/profile`
+    const body = toWire(req.body, schemas.updateCustomerBillingProfileBody)
+    if (client._options.validate) {
+      assertValid(schemas.updateCustomerBillingProfileBodyWire, body)
+    }
+    return http(client)
+      .put(path, { ...options, json: body })
+      .json()
+      .then((data) => {
+        if (client._options.validate) {
+          assertValid(schemas.updateCustomerBillingProfileResponseWire, data)
+        }
+        return fromWire(data, schemas.updateCustomerBillingProfileResponse)
       })
   })
 }
@@ -835,7 +895,7 @@ export function resetCustomerEntitlementUsage(
       return encodeURIComponent(String(pathParams.entitlementId))
     })()}/reset`
     const body = toWire(req.body, schemas.resetCustomerEntitlementUsageBody)
-    if (client._options.validate) {
+    if (client._options.validate && body !== undefined) {
       assertValid(schemas.resetCustomerEntitlementUsageBodyWire, body)
     }
     await http(client).post(path, { ...options, json: body })
@@ -1139,9 +1199,13 @@ export function listCreditGrants(
       }
       return encodeURIComponent(String(pathParams.customerId))
     })()}/credits/grants`
+    if (client._options.validate && req.sort !== undefined) {
+      assertValid(schemas.listCreditGrantsQueryParams.shape.sort, req.sort)
+    }
     const query = toWire(
       {
         page: req.page,
+        sort: encodeSort(req.sort, toSnakeCase),
         filter: req.filter,
       },
       schemas.listCreditGrantsQueryParams,
@@ -1305,7 +1369,7 @@ export function voidCreditGrant(
       return encodeURIComponent(String(pathParams.creditGrantId))
     })()}/void`
     const body = toWire(req.body, schemas.voidCreditGrantBody)
-    if (client._options.validate) {
+    if (client._options.validate && body !== undefined) {
       assertValid(schemas.voidCreditGrantBodyWire, body)
     }
     return http(client)
@@ -1542,6 +1606,56 @@ export function createCustomerCharges(
           assertValid(schemas.createCustomerChargesResponseWire, data)
         }
         return fromWire(data, schemas.createCustomerChargesResponse)
+      })
+  })
+}
+
+/**
+ * Invoice a customer's charges
+ *
+ * Invoice a customer's charges outside the normal billing cycle. Collection
+ * alignment is bypassed. The customer's progressive billing setting applies unless
+ * explicitly overridden. All eligible pending lines are considered.
+ *
+ * Returns the created standard invoices, one per collected currency. Lines blocked
+ * by their owning engine remain pending. If all eligible lines are blocked or no
+ * lines are eligible, returns a validation error.
+ *
+ * POST /openmeter/customers/{customerId}/charges/invoice
+ */
+export function invoiceCustomerCharges(
+  client: Client,
+  req: InvoiceCustomerChargesRequest,
+  options?: RequestOptions,
+): Promise<Result<InvoiceCustomerChargesResponse>> {
+  return request(() => {
+    const pathParamsInput = {
+      customerId: req.customerId,
+    }
+    const pathParams = client._options.validate
+      ? toPathWire(pathParamsInput, schemas.invoiceCustomerChargesPathParams)
+      : pathParamsInput
+    if (client._options.validate) {
+      assertValid(schemas.invoiceCustomerChargesPathParamsWire, pathParams)
+    }
+    const path = `openmeter/customers/${(() => {
+      if (pathParams.customerId === undefined) {
+        throw new Error('missing path parameter: customerId')
+      }
+      return encodeURIComponent(String(pathParams.customerId))
+    })()}/charges/invoice`
+    const body = toWire(req.body, schemas.invoiceCustomerChargesBody)
+    if (client._options.validate && body !== undefined) {
+      assertValid(schemas.invoiceCustomerChargesBodyWire, body)
+    }
+    return http(client)
+      .post(path, { ...options, json: body })
+      .json()
+      .then((data) => {
+        if (client._options.validate) {
+          assertValid(schemas.invoiceCustomerChargesResponseWire, data)
+        }
+        return fromWire(data, schemas.invoiceCustomerChargesResponse)
       })
   })
 }

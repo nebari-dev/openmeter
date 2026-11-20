@@ -49,6 +49,11 @@ func (Subscription) Fields() []ent.Field {
 			Default("dynamic").
 			Immutable(),
 		field.Time("billing_anchor"),
+		field.Time("billing_starts_at").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Nothing is billed for service before this time. Unset means billing starts with the subscription."),
 		field.String("billing_cadence").
 			GoType(datetime.ISODurationString("")).
 			Comment("The default billing cadence for subscriptions."),
@@ -76,6 +81,13 @@ func (Subscription) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("namespace", "id"),
 		index.Fields("namespace", "customer_id"),
+		// Periodic subscription sync pages through deleted subscriptions in each
+		// namespace without reading live subscriptions or sorting the full history.
+		index.Fields("namespace", "created_at", "id").
+			StorageKey("subscription_deleted_reconciliation_cursor").
+			Annotations(
+				entsql.IndexWhere("deleted_at IS NOT NULL"),
+			),
 	}
 }
 
@@ -97,11 +109,10 @@ func (Subscription) Edges() []ent.Edge {
 			Annotations(entsql.Annotation{
 				OnDelete: entsql.Cascade,
 			}),
-		edge.To("billing_sync_state", SubscriptionBillingSyncState.Type).
+		edge.To("sync_state", SubscriptionSyncState.Type).
 			Unique().
-			Annotations(entsql.Annotation{
-				OnDelete: entsql.Cascade,
-			}),
+			StorageKey(edge.Symbol("subscription_sync_state_v2_subscription_fk")).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("cost_basis_pins", SubscriptionCostBasisPin.Type).
 			Annotations(entsql.Annotation{
 				OnDelete: entsql.Cascade,

@@ -18,6 +18,9 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/usagebased"
 	chargesworkeradvance "github.com/openmeterio/openmeter/openmeter/billing/charges/worker/advance"
 	billingfeaturemeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
+	splitlinegroupadapter "github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup/adapter"
+	splitlinegroupservice "github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup/service"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating"
 	billingratingservice "github.com/openmeterio/openmeter/openmeter/billing/rating/service"
@@ -32,6 +35,7 @@ import (
 	billingworkercollect "github.com/openmeterio/openmeter/openmeter/billing/worker/collect"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
 	subscriptionsyncadapter "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/adapter"
+	subscriptionsynchooks "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/hooks"
 	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/reconciler"
 	subscriptionsyncservice "github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync/service"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
@@ -42,6 +46,7 @@ import (
 	ledgerbreakage "github.com/openmeterio/openmeter/openmeter/ledger/breakage"
 	"github.com/openmeterio/openmeter/openmeter/ledger/recognizer"
 	"github.com/openmeterio/openmeter/openmeter/meter"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
 	"github.com/openmeterio/openmeter/openmeter/streaming"
 	"github.com/openmeterio/openmeter/openmeter/subscription/validators/itemreference"
@@ -55,6 +60,7 @@ import (
 // billing or charges should depend on BillingRegistry rather than individual services.
 type BillingRegistry struct {
 	Billing                 billing.Service
+	SplitLineGroups         splitlinegroup.Service
 	LegacyBillingLineEngine *billinglineengine.Engine
 	Sequence                billingsequence.Service
 	Charges                 *ChargesRegistry
@@ -117,14 +123,14 @@ func NewBillingSequenceService(
 }
 
 func NewLegacyBillingLineEngine(
-	billingAdapter billing.Adapter,
+	splitLineGroupService splitlinegroup.Service,
 	billingRatingService rating.Service,
 	featureMeterResolver *billingfeaturemeterservice.Resolver,
 	streamingConnector streaming.Connector,
 	billingConfig config.BillingConfiguration,
 ) (*billinglineengine.Engine, error) {
 	return billinglineengine.New(billinglineengine.Config{
-		SplitLineGroupAdapter:        billingAdapter,
+		SplitLineGroupService:        splitLineGroupService,
 		RatingService:                billingRatingService,
 		FeatureMeterResolver:         featureMeterResolver,
 		StreamingConnector:           streamingConnector,
@@ -138,7 +144,6 @@ func newBillingService(
 	logger *slog.Logger,
 	appService app.Service,
 	billingAdapter billing.Adapter,
-	billingRatingService rating.Service,
 	legacyBillingLineEngine *billinglineengine.Engine,
 	sequenceService billingsequence.Service,
 	customerService customer.Service,
@@ -150,20 +155,22 @@ func newBillingService(
 	fsConfig config.BillingFeatureSwitchesConfiguration,
 	tracer trace.Tracer,
 	taxCodeService taxcode.Service,
+	taxCodeResolver productcatalog.TaxCodeResolver,
 ) (billing.Service, error) {
 	service, err := billingservice.New(billingservice.Config{
-		Adapter:                 billingAdapter,
-		SequenceService:         sequenceService,
-		RatingService:           billingRatingService,
-		LegacyBillingLineEngine: legacyBillingLineEngine,
-		AppService:              appService,
-		CustomerService:         customerService,
-		TaxCodeService:          taxCodeService,
-		FeatureMeterResolver:    featureMeterResolver,
-		Logger:                  logger,
-		Publisher:               eventPublisher,
-		AdvancementStrategy:     billingConfig.AdvancementStrategy,
-		FSNamespaceLockdown:     fsConfig.NamespaceLockdown,
+		Adapter:                    billingAdapter,
+		SequenceService:            sequenceService,
+		LegacyBillingLineEngine:    legacyBillingLineEngine,
+		AppService:                 appService,
+		CustomerService:            customerService,
+		TaxCodeService:             taxCodeService,
+		TaxCodeResolver:            taxCodeResolver,
+		FeatureMeterResolver:       featureMeterResolver,
+		Logger:                     logger,
+		Publisher:                  eventPublisher,
+		AdvancementStrategy:        billingConfig.AdvancementStrategy,
+		EnforceInvoiceSanityChecks: billingConfig.EnforceInvoiceSanityChecks,
+		FSNamespaceLockdown:        fsConfig.NamespaceLockdown,
 	})
 	if err != nil {
 		return nil, err
@@ -192,6 +199,7 @@ func NewBillingRegistry(
 	creditsConfig config.CreditsConfiguration,
 	tracer trace.Tracer,
 	taxCodeService taxcode.Service,
+	taxCodeResolver productcatalog.TaxCodeResolver,
 	currencyResolver currencies.CurrencyResolver,
 	currenciesService currencies.Service,
 	locker *lockr.Locker,
@@ -216,8 +224,24 @@ func NewBillingRegistry(
 		return BillingRegistry{}, fmt.Errorf("creating feature meter resolver: %w", err)
 	}
 
+	splitLineGroupAdapter, err := splitlinegroupadapter.New(splitlinegroupadapter.Config{
+		Client: db,
+		Logger: logger.With("subsystem", "billing.legacy.splitlinegroup"),
+	})
+	if err != nil {
+		return BillingRegistry{}, fmt.Errorf("creating split line group adapter: %w", err)
+	}
+
+	splitLineGroupService, err := splitlinegroupservice.New(splitlinegroupservice.Config{
+		Adapter: splitLineGroupAdapter,
+		Logger:  logger.With("subsystem", "billing.legacy.splitlinegroup"),
+	})
+	if err != nil {
+		return BillingRegistry{}, fmt.Errorf("creating split line group service: %w", err)
+	}
+
 	legacyBillingLineEngine, err := NewLegacyBillingLineEngine(
-		billingAdapter,
+		splitLineGroupService,
 		billingRatingService,
 		featureMeterResolver,
 		streamingConnector,
@@ -231,7 +255,6 @@ func NewBillingRegistry(
 		logger,
 		appService,
 		billingAdapter,
-		billingRatingService,
 		legacyBillingLineEngine,
 		sequenceService,
 		customerService,
@@ -243,6 +266,7 @@ func NewBillingRegistry(
 		fsConfig,
 		tracer,
 		taxCodeService,
+		taxCodeResolver,
 	)
 	if err != nil {
 		return BillingRegistry{}, err
@@ -252,6 +276,7 @@ func NewBillingRegistry(
 
 	if creditsConfig.Enabled {
 		chargesRegistry, err = newChargesRegistry(
+			metricMeter,
 			db,
 			logger,
 			locker,
@@ -281,6 +306,7 @@ func NewBillingRegistry(
 
 	billingRegistry := BillingRegistry{
 		Billing:                 billingService,
+		SplitLineGroups:         splitLineGroupService,
 		LegacyBillingLineEngine: legacyBillingLineEngine,
 		Sequence:                sequenceService,
 		Charges:                 chargesRegistry,
@@ -302,6 +328,7 @@ func NewBillingRegistry(
 	if err != nil {
 		return BillingRegistry{}, err
 	}
+
 	subscriptionSyncService, err := NewBillingSubscriptionSyncService(logger, subscriptionServices, billingRegistry, subscriptionSyncAdapter, tracer, creditsConfig, fsConfig, featureGate)
 	if err != nil {
 		return BillingRegistry{}, err
@@ -314,7 +341,19 @@ func NewBillingRegistry(
 
 	customerService.RegisterRequestValidator(validator)
 
-	// Subscription validate
+	// Subscription hooks
+
+	syncHook, err := subscriptionsynchooks.New(subscriptionsynchooks.Config{
+		Adapter: subscriptionSyncAdapter,
+		Logger:  logger,
+	})
+	if err != nil {
+		return BillingRegistry{}, err
+	}
+
+	if err := subscriptionServices.Service.RegisterHook(syncHook); err != nil {
+		return BillingRegistry{}, fmt.Errorf("registering subscription sync hook: %w", err)
+	}
 
 	subscriptionValidator, err := billingsubscription.NewValidator(billingRegistry.Billing)
 	if err != nil {
@@ -328,7 +367,7 @@ func NewBillingRegistry(
 	return billingRegistry, nil
 }
 
-func NewBillingCustomerOverrideService(billingRegistry BillingRegistry) billing.CustomerOverrideService {
+func NewBillingCustomerOverrideService(billingRegistry BillingRegistry) billing.CustomerBillingProfileService {
 	return billingRegistry.Billing
 }
 
@@ -367,12 +406,10 @@ func NewBillingCollector(logger *slog.Logger, billingRegistry BillingRegistry, f
 	})
 }
 
-func NewBillingSubscriptionReconciler(logger *slog.Logger, subsServices SubscriptionServiceWithWorkflow, subscriptionSync subscriptionsync.Service, customerService customer.Service) (*reconciler.Reconciler, error) {
+func NewBillingSubscriptionReconciler(logger *slog.Logger, subscriptionSync *subscriptionsyncservice.Service) (*reconciler.Reconciler, error) {
 	return reconciler.NewReconciler(reconciler.ReconcilerConfig{
-		SubscriptionService: subsServices.Service,
-		SubscriptionSync:    subscriptionSync,
-		Logger:              logger,
-		CustomerService:     customerService,
+		SubscriptionSync: subscriptionSync,
+		Logger:           logger,
 	})
 }
 
@@ -382,10 +419,11 @@ func NewBillingSubscriptionSyncAdapter(db *entdb.Client) (subscriptionsync.Adapt
 	})
 }
 
-func NewBillingSubscriptionSyncService(logger *slog.Logger, subsServices SubscriptionServiceWithWorkflow, billingRegistry BillingRegistry, subscriptionSyncAdapter subscriptionsync.Adapter, tracer trace.Tracer, creditsConfig config.CreditsConfiguration, billingFsConfig config.BillingFeatureSwitchesConfiguration, featureGate *featuregate.FeatureGateChecker) (subscriptionsync.Service, error) {
+func NewBillingSubscriptionSyncService(logger *slog.Logger, subsServices SubscriptionServiceWithWorkflow, billingRegistry BillingRegistry, subscriptionSyncAdapter subscriptionsync.Adapter, tracer trace.Tracer, creditsConfig config.CreditsConfiguration, billingFsConfig config.BillingFeatureSwitchesConfiguration, featureGate *featuregate.FeatureGateChecker) (*subscriptionsyncservice.Service, error) {
 	return subscriptionsyncservice.New(subscriptionsyncservice.Config{
 		SubscriptionService:     subsServices.Service,
 		BillingService:          billingRegistry.Billing,
+		SplitLineGroupService:   billingRegistry.SplitLineGroups,
 		LegacyBillingLineEngine: billingRegistry.LegacyBillingLineEngine,
 		ChargesService:          billingRegistry.ChargesServiceOrNil(),
 		SubscriptionSyncAdapter: subscriptionSyncAdapter,

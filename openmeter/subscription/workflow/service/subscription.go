@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"time"
 
 	"github.com/samber/lo"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/subscription/patch"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	"github.com/openmeterio/openmeter/pkg/clock"
+	"github.com/openmeterio/openmeter/pkg/convert"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/featuregate"
 	"github.com/openmeterio/openmeter/pkg/filter"
@@ -28,6 +30,23 @@ import (
 )
 
 func (s *service) CreateFromPlan(ctx context.Context, inp subscriptionworkflow.CreateSubscriptionWorkflowInput, plan subscription.Plan) (subscription.SubscriptionView, error) {
+	if inp.BillingStartsAt != nil {
+		enabled, err := s.FeatureFlags.IsFeatureEnabled(ctx, subscription.BillingStartsAtEnabledFF)
+		if err != nil {
+			return subscription.SubscriptionView{}, fmt.Errorf("failed to check if billing starts at is enabled: %w", err)
+		}
+
+		if !enabled {
+			return subscription.SubscriptionView{}, subscription.ErrSubscriptionBillingStartsAtNotEnabled
+		}
+	}
+
+	return s.createFromPlan(ctx, inp, plan)
+}
+
+// createFromPlan skips the check that the namespace may set BillingStartsAt: a plan change has to keep
+// the value of the subscription it replaces even if the namespace can no longer set new ones.
+func (s *service) createFromPlan(ctx context.Context, inp subscriptionworkflow.CreateSubscriptionWorkflowInput, plan subscription.Plan) (subscription.SubscriptionView, error) {
 	return transaction.Run(ctx, s.TransactionManager, func(ctx context.Context) (subscription.SubscriptionView, error) {
 		var def subscription.SubscriptionView
 
@@ -88,6 +107,7 @@ func (s *service) CreateFromPlan(ctx context.Context, inp subscriptionworkflow.C
 			Name:            lo.CoalesceOrEmpty(inp.Name, plan.GetName()),
 			Description:     inp.Description,
 			BillingAnchor:   billingAnchor,
+			BillingStartsAt: convert.SafeToUTC(inp.BillingStartsAt),
 			Annotations:     inp.Annotations,
 		})
 
@@ -135,7 +155,7 @@ func resolveSubscriptionInvoiceCurrency(cus customer.Customer, plan subscription
 
 // resolveEditPatchRateCardReferences canonicalizes the feature and currency of
 // a newly authored item before the patch is applied to the subscription spec.
-func (s *service) resolveEditPatchRateCardReferences(ctx context.Context, namespace string, invoiceCurrency currencyx.Code, customization subscription.Patch) (subscription.Patch, error) {
+func (s *service) resolveEditPatchRateCardReferences(ctx context.Context, namespace string, defaultCurrency currencies.CurrencyReference, customization subscription.Patch) (subscription.Patch, error) {
 	var addItem *patch.PatchAddItem
 	returnsPointer := false
 
@@ -146,6 +166,7 @@ func (s *service) resolveEditPatchRateCardReferences(ctx context.Context, namesp
 		if value == nil {
 			return nil, errors.New("add-item patch is required")
 		}
+
 		addItem = value
 		returnsPointer = true
 	default:
@@ -162,12 +183,13 @@ func (s *service) resolveEditPatchRateCardReferences(ctx context.Context, namesp
 	if err := featureresolver.ResolveFeaturesForRateCards(ctx, s.FeatureResolver, namespace, &rateCards); err != nil {
 		return nil, fmt.Errorf("resolving add-item feature: %w", err)
 	}
+
 	rateCard = rateCards[0]
 
 	if rateCard.AsMeta().Price != nil {
 		if rateCard.AsMeta().Currency == nil {
 			if err := rateCard.ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
-				meta.Currency = lo.ToPtr(currencies.NewCurrencyReference(invoiceCurrency))
+				meta.Currency = lo.ToPtr(defaultCurrency.Clone())
 				return meta, nil
 			}); err != nil {
 				return nil, fmt.Errorf("defaulting add-item currency: %w", err)
@@ -178,6 +200,7 @@ func (s *service) resolveEditPatchRateCardReferences(ctx context.Context, namesp
 		if err := productcatalogcurrencyresolver.ResolveCurrenciesForRateCards(ctx, s.CurrencyResolver.WithNamespace(namespace), &rateCards); err != nil {
 			return nil, fmt.Errorf("resolving add-item currency: %w", err)
 		}
+
 		rateCard = rateCards[0]
 	}
 
@@ -186,7 +209,79 @@ func (s *service) resolveEditPatchRateCardReferences(ctx context.Context, namesp
 	if returnsPointer {
 		return addItem, nil
 	}
+
 	return *addItem, nil
+}
+
+// withAddItemTaxCodeCheck checks an add-item patch's Tax Code against the spec as the earlier
+// patches of the request left it, right before the patch is applied. Checking against the stored
+// spec would let one patch replace the item and a later one bring back a deleted code.
+func (s *service) withAddItemTaxCodeCheck(ctx context.Context, namespace string, p subscription.Patch) subscription.AppliesToSpec {
+	return subscription.NewAppliesToSpec(func(spec *subscription.SubscriptionSpec, actx subscription.ApplyContext) error {
+		if err := s.validateAddItemTaxCode(ctx, namespace, *spec, actx.CurrentTime, p); err != nil {
+			return err
+		}
+
+		return p.ApplyTo(spec, actx)
+	})
+}
+
+// validateAddItemTaxCode rejects a deleted Tax Code unless the item version the patch
+// replaces already holds it, so a price change that echoes the rate card back passes.
+func (s *service) validateAddItemTaxCode(ctx context.Context, namespace string, spec subscription.SubscriptionSpec, at time.Time, customization subscription.Patch) error {
+	var addItem patch.PatchAddItem
+
+	switch value := customization.(type) {
+	case patch.PatchAddItem:
+		addItem = value
+	case *patch.PatchAddItem:
+		addItem = *value
+	default:
+		return nil
+	}
+
+	rateCard := addItem.CreateInput.RateCard
+	if rateCard == nil {
+		return nil
+	}
+
+	cfg := rateCard.AsMeta().TaxConfig
+	if cfg == nil || cfg.TaxCodeID == "" {
+		return nil
+	}
+
+	inheritedIDs := inheritedTaxCodeIDs(spec, at, addItem.PhaseKey, addItem.ItemKey)
+
+	rateCards := productcatalog.RateCards{rateCard}
+
+	if err := productcatalog.ValidateRateCardTaxCodes(ctx, s.TaxCodeResolver, namespace, rateCards, inheritedIDs...); err != nil {
+		return fmt.Errorf("invalid tax code for item %s: %w", addItem.ItemKey, err)
+	}
+
+	return nil
+}
+
+// inheritedTaxCodeIDs returns the Tax Code ID of the item version the add-item patch
+// would close. Must pick the same version as PatchAddItem.ApplyTo: the last one stored
+// for the key, and only when the patch targets the current phase.
+func inheritedTaxCodeIDs(spec subscription.SubscriptionSpec, at time.Time, phaseKey, itemKey string) []string {
+	// Adding to a past or future phase closes nothing.
+	phase, ok := spec.GetCurrentPhaseAt(at)
+	if !ok || phase.PhaseKey != phaseKey {
+		return nil
+	}
+
+	items := phase.ItemsByKey[itemKey]
+	if len(items) == 0 {
+		return nil
+	}
+
+	cfg := items[len(items)-1].RateCard.AsMeta().TaxConfig
+	if cfg == nil || cfg.TaxCodeID == "" {
+		return nil
+	}
+
+	return []string{cfg.TaxCodeID}
 }
 
 func (s *service) EditRunning(ctx context.Context, subscriptionID models.NamespacedID, customizations []subscription.Patch, timing subscription.Timing) (subscription.SubscriptionView, error) {
@@ -216,6 +311,7 @@ func (s *service) EditRunning(ctx context.Context, subscriptionID models.Namespa
 				if ap.CreateInput.CreateSubscriptionItemInput.Annotations == nil {
 					ap.CreateInput.CreateSubscriptionItemInput.Annotations = models.Annotations{}
 				}
+
 				_, _ = subscription.AnnotationParser.AddOwnerSubSystem(ap.CreateInput.CreateSubscriptionItemInput.Annotations, subscription.OwnerSubscriptionSubSystem)
 
 				subscriptionworkflow.AnnotationParser.SetUniquePatchID(ap.CreateInput.CreateSubscriptionItemInput.Annotations)
@@ -227,6 +323,7 @@ func (s *service) EditRunning(ctx context.Context, subscriptionID models.Namespa
 				if ap.CreateInput.CreateSubscriptionItemInput.Annotations == nil {
 					ap.CreateInput.CreateSubscriptionItemInput.Annotations = models.Annotations{}
 				}
+
 				_, _ = subscription.AnnotationParser.AddOwnerSubSystem(ap.CreateInput.CreateSubscriptionItemInput.Annotations, subscription.OwnerSubscriptionSubSystem)
 
 				subscriptionworkflow.AnnotationParser.SetUniquePatchID(ap.CreateInput.CreateSubscriptionItemInput.Annotations)
@@ -244,11 +341,14 @@ func (s *service) EditRunning(ctx context.Context, subscriptionID models.Namespa
 			}
 		}
 
+		defaultCurrency := curr.Subscription.DefaultCurrency()
+
 		for i, customization := range customizations {
-			resolved, err := s.resolveEditPatchRateCardReferences(ctx, subscriptionID.Namespace, curr.Spec.InvoiceCurrency, customization)
+			resolved, err := s.resolveEditPatchRateCardReferences(ctx, subscriptionID.Namespace, defaultCurrency, customization)
 			if err != nil {
 				return subscription.SubscriptionView{}, models.ErrorWithComponent(models.ComponentName(fmt.Sprintf("patch[%d]", i)), err)
 			}
+
 			customizations[i] = resolved
 		}
 
@@ -265,7 +365,11 @@ func (s *service) EditRunning(ctx context.Context, subscriptionID models.Namespa
 		// Let's apply the customizations
 		spec := curr.AsSpec()
 
-		err = spec.ApplyMany(lo.Map(customizations, subscription.ToApplies), subscription.ApplyContext{
+		applies := lo.Map(customizations, func(p subscription.Patch, _ int) subscription.AppliesToSpec {
+			return s.withAddItemTaxCodeCheck(ctx, subscriptionID.Namespace, p)
+		})
+
+		err = spec.ApplyMany(applies, subscription.ApplyContext{
 			CurrentTime: editTime,
 		})
 		if err := subscriptionworkflow.MapSubscriptionErrors(err); err != nil {
@@ -319,12 +423,20 @@ func (s *service) ChangeToPlan(ctx context.Context, subscriptionID models.Namesp
 			return res{}, fmt.Errorf("failed to set previous subscription ID: %w", err)
 		}
 
+		// Billing has to start at the same time as on the replaced subscription. Once that time has passed
+		// there is nothing left to skip, and the new subscription could not hold a value before its own start.
+		billingStartsAt := curr.BillingStartsAt
+		if billingStartsAt != nil && curr.ActiveTo != nil && billingStartsAt.Before(*curr.ActiveTo) {
+			billingStartsAt = nil
+		}
+
 		// Third, let's create a new subscription with the new plan
-		new, err := s.CreateFromPlan(ctx, subscriptionworkflow.CreateSubscriptionWorkflowInput{
+		new, err := s.createFromPlan(ctx, subscriptionworkflow.CreateSubscriptionWorkflowInput{
 			ChangeSubscriptionWorkflowInput: inp,
 			Namespace:                       curr.Namespace,
 			CustomerID:                      curr.CustomerId,
 			BillingAnchor:                   lo.ToPtr(lo.FromPtrOr(inp.BillingAnchor, curr.BillingAnchor)), // We default to the current anchor
+			BillingStartsAt:                 billingStartsAt,
 			Annotations:                     createInputAnnotations,
 		}, plan)
 		if err != nil {
@@ -338,14 +450,17 @@ func (s *service) ChangeToPlan(ctx context.Context, subscriptionID models.Namesp
 		} else {
 			currAnnotations = maps.Clone(currAnnotations)
 		}
+
 		currAnnotations, err = subscription.AnnotationParser.SetSupersedingSubscriptionID(currAnnotations, new.Subscription.ID)
 		if err != nil {
 			return res{}, fmt.Errorf("failed to set superseding subscription ID: %w", err)
 		}
+
 		updatedCurr, err := s.Service.UpdateAnnotations(ctx, curr.NamespacedID, currAnnotations)
 		if err != nil {
 			return res{}, fmt.Errorf("failed to update current subscription annotations: %w", err)
 		}
+
 		curr = *updatedCurr
 
 		// Let's just return after a great success

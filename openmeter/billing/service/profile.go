@@ -11,7 +11,6 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/app"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/customer"
-	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/framework/transaction"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -21,6 +20,12 @@ import (
 var _ billing.ProfileService = (*Service)(nil)
 
 func (s *Service) CreateProfile(ctx context.Context, input billing.CreateProfileInput) (*billing.Profile, error) {
+	// Clients that predate the field (the whole v1 API) never send it, so an
+	// unset value falls back to the default instead of failing validation.
+	if input.WorkflowConfig.Invoicing.EmptyInvoiceMode == "" {
+		input.WorkflowConfig.Invoicing.EmptyInvoiceMode = billing.DefaultWorkflowConfig.Invoicing.EmptyInvoiceMode
+	}
+
 	if err := input.Validate(); err != nil {
 		return nil, billing.ValidationError{
 			Err: err,
@@ -83,11 +88,9 @@ func (s *Service) CreateProfile(ctx context.Context, input billing.CreateProfile
 		}
 
 		// billing.InvoicingConfig{} is the zero-value stored state for creates (no prior tax-code to compare against).
-		normalizedInvoicing, err := input.WorkflowConfig.Invoicing.WithDeprecatedTaxCodeEnforced(billing.InvoicingConfig{})
-		if err != nil {
+		if err := input.WorkflowConfig.Invoicing.ValidateDefaultTaxCodeUnchanged(billing.InvoicingConfig{}); err != nil {
 			return nil, err
 		}
-		input.WorkflowConfig.Invoicing = normalizedInvoicing
 
 		profile, err := s.adapter.CreateProfile(ctx, input)
 		if err != nil {
@@ -189,7 +192,7 @@ func (s *Service) DeleteProfile(ctx context.Context, input billing.DeleteProfile
 			}
 		}
 
-		referringCustomerIDs, err := s.adapter.GetCustomerOverrideReferencingProfile(ctx, input)
+		referringCustomerIDs, err := s.adapter.GetCustomersReferencingProfile(ctx, input)
 		if err != nil {
 			return err
 		}
@@ -241,8 +244,10 @@ func (s *Service) ListProfiles(ctx context.Context, input billing.ListProfilesIn
 			if err != nil {
 				return billing.ListProfilesResult{}, fmt.Errorf("error resolving profile: %w", err)
 			}
+
 			finalProfile = *resolvedProfile
 		}
+
 		response.Items = append(response.Items, finalProfile)
 	}
 
@@ -291,22 +296,20 @@ func (s *Service) UpdateProfile(ctx context.Context, input billing.UpdateProfile
 		if targetState.WorkflowConfig.Invoicing.SubscriptionEndProrationMode == "" {
 			targetState.WorkflowConfig.Invoicing.SubscriptionEndProrationMode = profile.WorkflowConfig.Invoicing.SubscriptionEndProrationMode
 		}
+
+		// Clients that predate the field (the whole v1 API) never send it, so an
+		// unset value keeps what is stored instead of resetting it.
+		if targetState.WorkflowConfig.Invoicing.EmptyInvoiceMode == "" {
+			targetState.WorkflowConfig.Invoicing.EmptyInvoiceMode = profile.WorkflowConfig.Invoicing.EmptyInvoiceMode
+		}
+
 		if err := targetState.Validate(); err != nil {
 			return nil, billing.ValidationError{
 				Err: err,
 			}
 		}
 
-		normalizedInvoicing, err := targetState.WorkflowConfig.Invoicing.WithDeprecatedTaxCodeEnforced(profile.WorkflowConfig.Invoicing)
-		if err != nil {
-			return nil, err
-		}
-		targetState.WorkflowConfig.Invoicing = normalizedInvoicing
-
-		// Resolution must run after the deprecation gate and cannot be removed: legacy clients
-		// that predate taxCodeId echo only stripe.code on no-op updates, and resolution is what
-		// re-stamps TaxCodeID from that echoed code.
-		if err := productcatalog.ResolveTaxConfig(ctx, s.taxCodeService, input.Namespace, targetState.WorkflowConfig.Invoicing.DefaultTaxConfig); err != nil {
+		if err := targetState.WorkflowConfig.Invoicing.ValidateDefaultTaxCodeUnchanged(profile.WorkflowConfig.Invoicing); err != nil {
 			return nil, err
 		}
 
@@ -402,6 +405,7 @@ func (s *Service) ProvisionDefaultBillingProfile(ctx context.Context, namespace 
 	if err != nil {
 		return fmt.Errorf("error creating default profile: %w", err)
 	}
+
 	return nil
 }
 
@@ -429,6 +433,7 @@ func (s *Service) resolveProfileApps(ctx context.Context, input *billing.BasePro
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve tax app: %w", err)
 	}
+
 	out.Apps.Tax = taxApp
 
 	invoiceApp, err := s.appService.GetApp(ctx, app.GetAppInput{
@@ -438,6 +443,7 @@ func (s *Service) resolveProfileApps(ctx context.Context, input *billing.BasePro
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve invoicing app: %w", err)
 	}
+
 	out.Apps.Invoicing = invoiceApp
 
 	paymentApp, err := s.appService.GetApp(ctx, app.GetAppInput{
@@ -447,6 +453,7 @@ func (s *Service) resolveProfileApps(ctx context.Context, input *billing.BasePro
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve payments app: %w", err)
 	}
+
 	out.Apps.Payment = paymentApp
 
 	return &out, nil
@@ -539,6 +546,7 @@ func (s *Service) handleDefaultProfileChange(ctx context.Context, input defaultP
 			"namespace", oldProfile.Namespace,
 			"invoicing_app_type", oldProfile.Apps.Invoicing.GetType(),
 		)
+
 		return nil
 	}
 
@@ -578,9 +586,9 @@ func (s *Service) ResolveStripeAppIDFromBillingProfile(ctx context.Context, name
 
 	// If the customer ID is provided, resolve billing profile based on the customer
 	if customerId != nil {
-		billingProfile, err := s.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+		billingProfile, err := s.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 			Customer: *customerId,
-			Expand: billing.CustomerOverrideExpand{
+			Expand: billing.CustomerBillingProfileExpand{
 				Apps: true,
 			},
 		})
@@ -588,17 +596,17 @@ func (s *Service) ResolveStripeAppIDFromBillingProfile(ctx context.Context, name
 			return appID, fmt.Errorf("failed to get billing profile: %w", err)
 		}
 
-		if billingProfile.MergedProfile.Apps == nil {
+		if billingProfile.EffectiveProfile.Apps == nil {
 			return appID, fmt.Errorf("apps are not expanded in merged billing profile")
 		}
 
-		if billingProfile.MergedProfile.Apps.Payment.GetType() != app.AppTypeStripe {
+		if billingProfile.EffectiveProfile.Apps.Payment.GetType() != app.AppTypeStripe {
 			return appID, models.NewGenericNotFoundError(
 				fmt.Errorf("customer has a billing profile, but the payment app is not a stripe app"),
 			)
 		}
 
-		return billingProfile.MergedProfile.Apps.Payment.GetID(), nil
+		return billingProfile.EffectiveProfile.Apps.Payment.GetID(), nil
 	}
 
 	// If the customer ID is not provided, resolve billing profile from namespace

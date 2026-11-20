@@ -24,10 +24,10 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	subscriptiontestutils "github.com/openmeterio/openmeter/openmeter/subscription/testutils"
-	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
@@ -35,8 +35,9 @@ import (
 
 func TestSubscriptionCustomCurrencyGatheringInvoiceLivePreviewOmitsUsageBasedLines(t *testing.T) {
 	// given:
-	// - a not-yet-advanced usage-based charge with a dynamic custom-currency cost basis
-	// - usage inside the charge's service period
+	// - not-yet-advanced usage-based charges with a dynamic custom-currency cost basis:
+	//   the first period plus the two periods the sync provisions after it
+	// - usage inside the first charge's service period
 	// when:
 	// - billing lists its gathering invoice with live calculation enabled
 	// then:
@@ -53,9 +54,9 @@ func TestSubscriptionCustomCurrencyGatheringInvoiceLivePreviewOmitsUsageBasedLin
 
 	deps := setup(t, setupConfig{enableCharges: true, enableCreditThenInvoice: true})
 	defer deps.cleanup(t)
-	provisionSubscriptionDefaultTaxCodes(t, deps, namespace)
+	deps.TaxCodeEnv.ProvisionDefaultTaxCodes(t, namespace)
 
-	profileInput := minimalCreateProfileInputTemplate(deps.sandboxApp.GetID())
+	profileInput := MinimalCreateProfileInputTemplate(deps.sandboxApp.GetID())
 	profileInput.WorkflowConfig.Collection.Interval = datetime.MustParseDuration(t, "P1D")
 	profileInput.WorkflowConfig.Invoicing.AutoAdvance = false
 	_, err := deps.billingService.CreateProfile(t.Context(), profileInput)
@@ -96,20 +97,22 @@ func TestSubscriptionCustomCurrencyGatheringInvoiceLivePreviewOmitsUsageBasedLin
 
 	view, err := deps.subscriptionService.GetView(t.Context(), createdSubscription.NamespacedID)
 	require.NoError(t, err)
-	require.NoError(t, deps.subscriptionSyncService.SyncByView(t.Context(), view, invoiceAt))
+	require.NoError(t, deps.subscriptionSyncService.SyncByID(t.Context(), view.Subscription.NamespacedID, invoiceAt))
 
 	chargeListInput := charges.ListChargesInput{
-		Page:            pagination.Page{PageNumber: 1, PageSize: 100},
-		Namespace:       namespace,
-		SubscriptionIDs: []string{createdSubscription.ID},
-		ChargeTypes:     []chargesmeta.ChargeType{chargesmeta.ChargeTypeUsageBased},
+		Page:           pagination.Page{PageNumber: 1, PageSize: 100},
+		Namespace:      namespace,
+		SubscriptionID: filter.NewULIDIn(createdSubscription.ID),
+		ChargeTypes:    []chargesmeta.ChargeType{chargesmeta.ChargeTypeUsageBased},
 	}
 	chargePage, err := deps.chargesService.ListCharges(t.Context(), chargeListInput)
 	require.NoError(t, err)
-	require.Len(t, chargePage.Items, 1)
-	charge, err := chargePage.Items[0].AsUsageBasedCharge()
-	require.NoError(t, err)
-	require.Nil(t, charge.State.ResolvedCostBasis)
+	require.Len(t, chargePage.Items, 3)
+	for _, item := range chargePage.Items {
+		charge, err := item.AsUsageBasedCharge()
+		require.NoError(t, err)
+		require.Nil(t, charge.State.ResolvedCostBasis)
+	}
 
 	deps.MockStreamingConnector.AddSimpleEvent(
 		subscriptiontestutils.ExampleFeatureMeterSlug,
@@ -136,10 +139,12 @@ func TestSubscriptionCustomCurrencyGatheringInvoiceLivePreviewOmitsUsageBasedLin
 
 	chargePage, err = deps.chargesService.ListCharges(t.Context(), chargeListInput)
 	require.NoError(t, err)
-	require.Len(t, chargePage.Items, 1)
-	charge, err = chargePage.Items[0].AsUsageBasedCharge()
-	require.NoError(t, err)
-	require.Nil(t, charge.State.ResolvedCostBasis)
+	require.Len(t, chargePage.Items, 3)
+	for _, item := range chargePage.Items {
+		charge, err := item.AsUsageBasedCharge()
+		require.NoError(t, err)
+		require.Nil(t, charge.State.ResolvedCostBasis)
+	}
 }
 
 func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
@@ -249,9 +254,9 @@ func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
 				enableCreditThenInvoice: true,
 			})
 			defer deps.cleanup(t)
-			provisionSubscriptionDefaultTaxCodes(t, deps, namespace)
+			deps.TaxCodeEnv.ProvisionDefaultTaxCodes(t, namespace)
 
-			profileInput := minimalCreateProfileInputTemplate(deps.sandboxApp.GetID())
+			profileInput := MinimalCreateProfileInputTemplate(deps.sandboxApp.GetID())
 			profileInput.WorkflowConfig.Collection.Interval = datetime.MustParseDuration(t, "P1D")
 			profileInput.WorkflowConfig.Invoicing.AutoAdvance = false
 			_, err := deps.billingService.CreateProfile(t.Context(), profileInput)
@@ -364,11 +369,11 @@ func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
 			// when:
 			// - the serialized subscription event is synchronized through the charge backend twice
 			// - usage is realized at the end of the billing period
-			require.NoError(t, deps.subscriptionSyncService.SyncByView(t.Context(), eventView, invoiceAt))
+			require.NoError(t, deps.subscriptionSyncService.SyncByID(t.Context(), eventView.Subscription.NamespacedID, invoiceAt))
 
 			chargeIDsBeforeRetry := listSubscriptionChargeIDs(t, deps, createdSubscription.ID)
 			require.NotEmpty(t, chargeIDsBeforeRetry)
-			require.NoError(t, deps.subscriptionSyncService.SyncByView(t.Context(), eventView, invoiceAt))
+			require.NoError(t, deps.subscriptionSyncService.SyncByID(t.Context(), eventView.Subscription.NamespacedID, invoiceAt))
 			require.Equal(t, chargeIDsBeforeRetry, listSubscriptionChargeIDs(t, deps, createdSubscription.ID))
 
 			assertSubscriptionChargeCurrenciesAndCostBasis(
@@ -411,6 +416,7 @@ func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
 				expectedAllocated = 10
 				assertNoSubscriptionInvoices(t, deps, customer.ID)
 			}
+
 			balance, err := deps.ledgerDeps.HistoricalLedger.GetAccountBalance(t.Context(), accounts.FBOAccount, ledger.RouteFilter{Currency: customCurrency.Reference()}, ledger.BalanceQuery{})
 			require.NoError(t, err)
 			require.Equal(t, float64(0), balance.InexactFloat64())
@@ -450,13 +456,14 @@ func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
 				collectionOrigins[lo.FromPtr(bucket.GroupByValues[ledger.BalanceBucketGroupByCollectionOriginID])] = true
 				allocated = allocated.Add(bucket.SettledAmount)
 			}
+
 			require.Equal(t, expectedAllocated, allocated.InexactFloat64())
 
 			// Retrying synchronization and advancement must preserve the journal,
 			// not just stable charge identifiers.
 			beforeEntries, err := deps.DBDeps.DBClient.LedgerEntry.Query().Count(t.Context())
 			require.NoError(t, err)
-			require.NoError(t, deps.subscriptionSyncService.SyncByView(t.Context(), eventView, invoiceAt))
+			require.NoError(t, deps.subscriptionSyncService.SyncByID(t.Context(), eventView.Subscription.NamespacedID, invoiceAt))
 
 			_, err = deps.chargesService.AdvanceCharges(t.Context(), charges.AdvanceChargesInput{Customer: customer.GetID()})
 			require.NoError(t, err)
@@ -515,6 +522,7 @@ func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
 					})
 					require.NoError(t, err)
 				}
+
 				advance, err := deps.ledgerDeps.HistoricalLedger.GetAccountBalance(t.Context(), accounts.ReceivableAccount, ledger.RouteFilter{Currency: customCurrency.Reference()}, ledger.BalanceQuery{})
 				require.NoError(t, err)
 				require.Equal(t, float64(0), advance.InexactFloat64())
@@ -571,6 +579,7 @@ func TestSubscriptionSyncCustomCurrencyBilling(t *testing.T) {
 
 					require.Equal(t, map[string]float64{expected.sourceID: expected.amount}, bySource)
 				}
+
 				beforeEntries, err = deps.DBDeps.DBClient.LedgerEntry.Query().Count(t.Context())
 				require.NoError(t, err)
 
@@ -618,6 +627,7 @@ func createUsageSubscriptionPlan(t *testing.T, deps testDeps, input usageSubscri
 	if input.CustomItem && input.PlanCurrency != input.CustomCurrency.GetCode() {
 		customRateCard.RateCardMeta.Currency = lo.ToPtr(input.CustomCurrency.Reference())
 	}
+
 	require.True(t, customItem)
 
 	rateCards := productcatalog.RateCards{customRateCard}
@@ -694,10 +704,10 @@ func listSubscriptionChargeIDs(t *testing.T, deps testDeps, subscriptionID strin
 	t.Helper()
 
 	result, err := deps.chargesService.ListCharges(t.Context(), charges.ListChargesInput{
-		Page:            pagination.Page{PageNumber: 1, PageSize: 100},
-		Namespace:       "test-namespace",
-		SubscriptionIDs: []string{subscriptionID},
-		OrderBy:         "id",
+		Page:           pagination.Page{PageNumber: 1, PageSize: 100},
+		Namespace:      "test-namespace",
+		SubscriptionID: filter.NewULIDIn(subscriptionID),
+		OrderBy:        "id",
 	})
 	require.NoError(t, err)
 
@@ -722,10 +732,10 @@ func assertSubscriptionChargeCurrenciesAndCostBasis(
 	t.Helper()
 
 	result, err := deps.chargesService.ListCharges(t.Context(), charges.ListChargesInput{
-		Page:            pagination.Page{PageNumber: 1, PageSize: 100},
-		Namespace:       "test-namespace",
-		SubscriptionIDs: []string{subscriptionID},
-		ChargeTypes:     []chargesmeta.ChargeType{chargesmeta.ChargeTypeUsageBased},
+		Page:           pagination.Page{PageNumber: 1, PageSize: 100},
+		Namespace:      "test-namespace",
+		SubscriptionID: filter.NewULIDIn(subscriptionID),
+		ChargeTypes:    []chargesmeta.ChargeType{chargesmeta.ChargeTypeUsageBased},
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Items)
@@ -738,6 +748,7 @@ func assertSubscriptionChargeCurrenciesAndCostBasis(
 		if charge.Intent.GetCurrency().IsFiat() {
 			fiatCharges++
 			require.Nil(t, charge.Intent.GetCostBasisIntent())
+
 			continue
 		}
 
@@ -757,6 +768,7 @@ func assertSubscriptionChargeCurrenciesAndCostBasis(
 			require.Equal(t, expectPinnedCostBasisID, pinned.CurrencyCostBasisID)
 		}
 	}
+
 	require.Positive(t, customCharges)
 	if fiatCharges > 0 {
 		require.Equal(t, costbasis.ModePinned, expectKind)
@@ -774,6 +786,7 @@ func assertCustomCurrencyInvoice(t *testing.T, invoice billing.StandardInvoice, 
 	if expectedFiatTotal > 0 {
 		expectedLineCount++
 	}
+
 	require.Len(t, lines, expectedLineCount)
 
 	customLine, found := lo.Find(lines, func(line *billing.StandardLine) bool {
@@ -815,28 +828,4 @@ func assertNoSubscriptionInvoices(t *testing.T, deps testDeps, customerID string
 	})
 	require.NoError(t, err)
 	require.Empty(t, gatheringInvoices.Items)
-}
-
-func provisionSubscriptionDefaultTaxCodes(t *testing.T, deps testDeps, namespace string) {
-	t.Helper()
-
-	invoicing, err := deps.TaxCodeService.CreateTaxCode(t.Context(), taxcode.CreateTaxCodeInput{
-		Namespace: namespace,
-		Key:       taxcode.ProviderDefaultTaxCodeKey,
-		Name:      "Provider Default",
-	})
-	require.NoError(t, err)
-	creditGrant, err := deps.TaxCodeService.CreateTaxCode(t.Context(), taxcode.CreateTaxCodeInput{
-		Namespace: namespace,
-		Key:       "default-credit-grant",
-		Name:      "Default Credit Grant",
-	})
-	require.NoError(t, err)
-
-	_, err = deps.TaxCodeService.UpsertOrganizationDefaultTaxCodes(t.Context(), taxcode.UpsertOrganizationDefaultTaxCodesInput{
-		Namespace:            namespace,
-		InvoicingTaxCodeID:   invoicing.ID,
-		CreditGrantTaxCodeID: creditGrant.ID,
-	})
-	require.NoError(t, err)
 }

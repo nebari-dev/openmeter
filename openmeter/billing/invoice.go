@@ -9,7 +9,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/samber/mo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/expand"
@@ -18,6 +18,10 @@ import (
 	"github.com/openmeterio/openmeter/pkg/pagination"
 	"github.com/openmeterio/openmeter/pkg/sortx"
 )
+
+// CurrentInvoiceSchemaLevel identifies the supported invoice storage representation.
+// TODO: Remove the invoice storage schema-level checks once all invoice migrations are complete.
+const CurrentInvoiceSchemaLevel = 2
 
 type InvoiceType string
 
@@ -318,7 +322,7 @@ type ListInvoicesInput struct {
 
 	Expand InvoiceExpands
 
-	OrderBy api.InvoiceOrderBy
+	OrderBy apiv1models.InvoiceOrderBy
 	Order   sortx.Order
 }
 
@@ -391,7 +395,7 @@ type ListInvoicesAdapterInput struct {
 
 	Expand InvoiceExpands
 
-	OrderBy api.InvoiceOrderBy
+	OrderBy apiv1models.InvoiceOrderBy
 	Order   sortx.Order
 
 	// OnlyStandard is used to filter for only standard invoices

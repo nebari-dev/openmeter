@@ -2285,29 +2285,6 @@ func HasSplitLineGroupWith(preds ...predicate.BillingInvoiceSplitLineGroup) pred
 	})
 }
 
-// HasFlatFeeLine applies the HasEdge predicate on the "flat_fee_line" edge.
-func HasFlatFeeLine() predicate.BillingInvoiceLine {
-	return predicate.BillingInvoiceLine(func(s *sql.Selector) {
-		step := sqlgraph.NewStep(
-			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.M2O, false, FlatFeeLineTable, FlatFeeLineColumn),
-		)
-		sqlgraph.HasNeighbors(s, step)
-	})
-}
-
-// HasFlatFeeLineWith applies the HasEdge predicate on the "flat_fee_line" edge with a given conditions (other predicates).
-func HasFlatFeeLineWith(preds ...predicate.BillingInvoiceFlatFeeLineConfig) predicate.BillingInvoiceLine {
-	return predicate.BillingInvoiceLine(func(s *sql.Selector) {
-		step := newFlatFeeLineStep()
-		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
-			for _, p := range preds {
-				p(s)
-			}
-		})
-	})
-}
-
 // HasUsageBasedLine applies the HasEdge predicate on the "usage_based_line" edge.
 func HasUsageBasedLine() predicate.BillingInvoiceLine {
 	return predicate.BillingInvoiceLine(func(s *sql.Selector) {
@@ -2415,29 +2392,6 @@ func HasLineUsageDiscounts() predicate.BillingInvoiceLine {
 func HasLineUsageDiscountsWith(preds ...predicate.BillingInvoiceLineUsageDiscount) predicate.BillingInvoiceLine {
 	return predicate.BillingInvoiceLine(func(s *sql.Selector) {
 		step := newLineUsageDiscountsStep()
-		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
-			for _, p := range preds {
-				p(s)
-			}
-		})
-	})
-}
-
-// HasLineAmountDiscounts applies the HasEdge predicate on the "line_amount_discounts" edge.
-func HasLineAmountDiscounts() predicate.BillingInvoiceLine {
-	return predicate.BillingInvoiceLine(func(s *sql.Selector) {
-		step := sqlgraph.NewStep(
-			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.O2M, false, LineAmountDiscountsTable, LineAmountDiscountsColumn),
-		)
-		sqlgraph.HasNeighbors(s, step)
-	})
-}
-
-// HasLineAmountDiscountsWith applies the HasEdge predicate on the "line_amount_discounts" edge with a given conditions (other predicates).
-func HasLineAmountDiscountsWith(preds ...predicate.BillingInvoiceLineDiscount) predicate.BillingInvoiceLine {
-	return predicate.BillingInvoiceLine(func(s *sql.Selector) {
-		step := newLineAmountDiscountsStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

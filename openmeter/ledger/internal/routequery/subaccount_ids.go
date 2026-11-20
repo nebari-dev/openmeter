@@ -9,6 +9,7 @@ import (
 	ledgersubaccountdb "github.com/openmeterio/openmeter/openmeter/ent/db/ledgersubaccount"
 	ledgersubaccountroutedb "github.com/openmeterio/openmeter/openmeter/ent/db/ledgersubaccountroute"
 	"github.com/openmeterio/openmeter/openmeter/ledger"
+	"github.com/openmeterio/openmeter/openmeter/ledger/creditfilterquery"
 )
 
 // SubAccountIDsByRoute selects ledger subaccount IDs whose persisted route matches a filter.
@@ -33,6 +34,7 @@ func NewSubAccountIDsByRoute(route ledger.RouteFilter) (SubAccountIDsByRoute, er
 	} else {
 		serialized, err = route.Currency.MarshalText()
 	}
+
 	if err != nil {
 		return SubAccountIDsByRoute{}, fmt.Errorf("serialize route currency filter: %w", err)
 	}
@@ -88,13 +90,16 @@ func (q SubAccountIDsByRoute) selectorPredicates(routeColumn func(string) string
 	}
 
 	if exact, ok := q.route.CreditFilters.Get(); ok {
-		predicates = append(predicates, ExactFiltersPredicate(routeColumn, exact))
+		predicates = append(predicates, creditfilterquery.ExactFiltersPredicate(routeColumn, exact))
 	}
+
 	if features, ok := q.route.Features.Get(); ok {
-		predicates = append(predicates, ExactFeaturesPredicate(routeColumn, features))
+		predicates = append(predicates, creditfilterquery.ExactFeaturesPredicate(routeColumn, features))
 	}
+
 	if q.route.MatchFeature != "" {
-		predicates = append(predicates, MatchFeaturePredicate(routeColumn, q.route.MatchFeature))
+		predicates = append(predicates, creditfilterquery.MatchFeaturePredicate(routeColumn, q.route.MatchFeature))
 	}
+
 	return predicates
 }

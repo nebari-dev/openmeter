@@ -120,6 +120,7 @@ func TestInvoiceEditFlatFeeManualOverrides(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(false)
 
 			sendInvoice := lo.Must(v3sdk.WorkflowPaymentSettingsFromWorkflowPaymentSendInvoiceSettings(v3sdk.WorkflowPaymentSendInvoiceSettings{
@@ -128,7 +129,7 @@ func TestInvoiceEditFlatFeeManualOverrides(t *testing.T) {
 			profile.Workflow.Payment = &sendInvoice
 		})
 		_, err = c.Customers.Billing.Update(t.Context(), customer.ID, v3sdk.UpsertCustomerBillingDataRequest{
-			BillingProfile: &v3sdk.ProfileReference{ID: profile.ID},
+			BillingProfile: v3sdk.NullableValue(v3sdk.ProfileReference{ID: profile.ID}),
 		})
 		c.requireStatus(http.StatusOK, err)
 
@@ -213,6 +214,7 @@ func TestInvoiceEditFlatFeeManualOverrides(t *testing.T) {
 
 			replacementLines = append(replacementLines, lineUpdate)
 		}
+
 		replacementLines = append(replacementLines, api.InvoiceLineReplaceUpdate{
 			Name:        createdFlatFeeName,
 			Description: lo.ToPtr("Invoice Override Created Flat Fee " + prefix),
@@ -486,6 +488,7 @@ func waitForManualApprovalInvoice(t *testing.T, client *api.ClientWithResponses,
 	}, 2*time.Minute, time.Second)
 
 	require.NotEmpty(t, invoice.Id)
+
 	return getInvoiceWithDeletedLines(t, client, invoice.Id)
 }
 
@@ -595,6 +598,7 @@ func flatInvoiceLineRateCard(t *testing.T, amount string, source *api.InvoiceUsa
 		if featureKey == nil {
 			rateCard.FeatureKey = source.FeatureKey
 		}
+
 		rateCard.TaxConfig = source.TaxConfig
 	}
 
@@ -631,7 +635,12 @@ type invoiceOverrideCharge struct {
 // listChargesByName groups customer charges by display name while keeping the
 // concrete charge shape available. The override assertions need lifecycle
 // controller ownership from both flat-fee and usage-based charge variants.
+//
+// Subscription sync also provisions the next billing period's charges ahead, under
+// the same names. This test only follows the current period, so charges whose
+// service has not started yet are left out.
 func listChargesByName(t require.TestingT, c *v3Client, customerID string, statuses []v3sdk.ChargeStatus) map[string]invoiceOverrideCharge {
+	now := time.Now()
 	statusValues := lo.Map(statuses, func(status v3sdk.ChargeStatus, _ int) string {
 		return string(status)
 	})
@@ -650,11 +659,21 @@ func listChargesByName(t require.TestingT, c *v3Client, customerID string, statu
 		case string(v3sdk.ChargeTypeFlatFee):
 			flatFee, err := charge.AsChargeFlatFee()
 			require.NoError(t, err)
+
+			if flatFee.ServicePeriod.From.After(now) {
+				continue
+			}
+
 			require.NotContains(t, out, flatFee.Name, "duplicate charge name %q", flatFee.Name)
 			out[flatFee.Name] = invoiceOverrideCharge{flatFee: flatFee}
 		case string(v3sdk.ChargeTypeUsageBased):
 			usageBased, err := charge.AsChargeUsageBased()
 			require.NoError(t, err)
+
+			if usageBased.ServicePeriod.From.After(now) {
+				continue
+			}
+
 			require.NotContains(t, out, usageBased.Name, "duplicate charge name %q", usageBased.Name)
 			out[usageBased.Name] = invoiceOverrideCharge{usageBased: usageBased}
 		}
@@ -694,6 +713,7 @@ func requireFlatFeeChargeIntentMatchesLine(t *testing.T, charges map[string]invo
 		require.NoError(t, err)
 		assert.Equal(t, lo.FromPtr(line.FeatureKey), feature.Key)
 	}
+
 	assert.Equal(t, line.InvoiceAt, charge.InvoiceAt)
 	assert.Equal(t, line.Period.From, charge.ServicePeriod.From, "service period from")
 	assert.Equal(t, line.Period.To, charge.ServicePeriod.To, "service period to")
@@ -820,6 +840,7 @@ func requireCustomerCreditBalance(t *testing.T, balance *v3sdk.CreditBalances, c
 func numericToFloat(t require.TestingT, value string) float64 {
 	out, err := strconv.ParseFloat(value, 64)
 	require.NoError(t, err)
+
 	return out
 }
 

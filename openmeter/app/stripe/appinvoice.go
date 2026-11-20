@@ -2,6 +2,7 @@ package appstripe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -71,8 +72,19 @@ func (a appOperations) UpsertStandardInvoice(ctx context.Context, invoice billin
 	return a.updateInvoice(ctx, invoice)
 }
 
+// WouldStandardInvoiceBeEmpty reports invoices that would reach Stripe without line items or with
+// nothing to pay.
+func (a appOperations) WouldStandardInvoiceBeEmpty(invoice billing.StandardInvoice) (bool, error) {
+	return len(invoice.GetLeafLinesWithResolvedTaxConfig()) == 0 || invoice.Totals.Total.IsZero(), nil
+}
+
 // DeleteStandardInvoice deletes the invoice for the app
 func (a appOperations) DeleteStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) error {
+	// If the invoice has not been synced to Stripe yet, there is no Stripe invoice to delete.
+	if invoice.ExternalIDs.Invoicing == "" {
+		return nil
+	}
+
 	// Get the Stripe client
 	_, stripeClient, err := a.getStripeClient(ctx, "deleteInvoice", "invoice_id", invoice.ID, "stripe_invoice_id", invoice.ExternalIDs.GetInvoicingOrEmpty())
 	if err != nil {
@@ -80,9 +92,15 @@ func (a appOperations) DeleteStandardInvoice(ctx context.Context, invoice billin
 	}
 
 	// Delete the invoice in Stripe
-	return stripeClient.DeleteInvoice(ctx, stripeclient.DeleteInvoiceInput{
+	err = stripeClient.DeleteInvoice(ctx, stripeclient.DeleteInvoiceInput{
 		StripeInvoiceID: invoice.ExternalIDs.Invoicing,
 	})
+	if err != nil {
+		// The Stripe invoice is in an unknown state, so a later create must not get it back.
+		return errors.Join(err, a.StripeAppService.IncrementInvoiceGeneration(ctx, invoice.GetInvoiceID()))
+	}
+
+	return nil
 }
 
 // FinalizeStandardInvoice finalizes the invoice for the app
@@ -202,9 +220,9 @@ func (a appOperations) createInvoice(ctx context.Context, invoice billing.Standa
 		createInvoiceParams.DaysUntilDue = lo.ToPtr(daysUntilDue)
 	}
 
-	stripeInvoice, err := stripeClient.CreateInvoice(ctx, createInvoiceParams)
+	stripeInvoice, err := a.createStripeInvoice(ctx, stripeClient, invoice.GetInvoiceID(), createInvoiceParams)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create invoice in stripe: %w", err)
+		return nil, err
 	}
 
 	// Return the result
@@ -266,6 +284,69 @@ func (a appOperations) createInvoice(ctx context.Context, invoice billing.Standa
 	}
 
 	return result, nil
+}
+
+// createStripeInvoice creates the invoice in Stripe and reads it back. Stripe answers a create request
+// with the response it stored for the idempotency key, which can be an earlier failure or an invoice
+// that was deleted since. When that happens the generation is incremented, so the next create
+// request uses a new key.
+func (a appOperations) createStripeInvoice(
+	ctx context.Context,
+	stripeClient stripeclient.StripeAppClient,
+	invoiceID billing.InvoiceID,
+	input stripeclient.CreateInvoiceInput,
+) (*stripe.Invoice, error) {
+	// A stored response that points at a missing invoice is replaced by one create with the new key.
+	const maxAttempts = 2
+
+	var getErr error
+
+	for range maxAttempts {
+		generation, err := a.StripeAppService.GetLatestInvoiceGeneration(ctx, invoiceID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get stripe invoice generation: %w", err)
+		}
+
+		input.Generation = generation
+
+		stripeInvoice, err := stripeClient.CreateInvoice(ctx, input)
+		if err != nil {
+			err = fmt.Errorf("failed to create invoice in stripe: %w", err)
+
+			// An error Stripe answered with is replayed for the key, so the key is given up. Without
+			// an answer the invoice may exist in Stripe, and only the same key gives it back.
+			if stripeclient.IsStripeInvoiceCreateRejectedError(err) {
+				err = errors.Join(err, a.StripeAppService.IncrementInvoiceGeneration(ctx, invoiceID))
+			}
+
+			return nil, err
+		}
+
+		_, getErr = stripeClient.GetInvoice(ctx, stripeclient.GetInvoiceInput{
+			StripeInvoiceID: stripeInvoice.ID,
+		})
+		if getErr == nil {
+			return stripeInvoice, nil
+		}
+
+		if !givesUpCreatedStripeInvoice(getErr) {
+			break
+		}
+
+		if err := a.StripeAppService.IncrementInvoiceGeneration(ctx, invoiceID); err != nil {
+			return nil, errors.Join(getErr, err)
+		}
+	}
+
+	return nil, fmt.Errorf("failed to get created invoice from stripe: %w", getErr)
+}
+
+// givesUpCreatedStripeInvoice decides whether a failed read of a just created Stripe invoice means
+// the invoice is gone, so the create has to be repeated with a new idempotency key.
+// Any other failure says nothing about the invoice: the key is kept, and the next sync gets the
+// same Stripe invoice back instead of leaving it behind for a second one.
+func givesUpCreatedStripeInvoice(err error) bool {
+	return stripeclient.IsStripeInvoiceNotFoundError(err)
 }
 
 // updateInvoice update the invoice for the app
@@ -530,6 +611,7 @@ func getDiscountStripeAddInvoiceItemParams(calculator StripeCalculator, line bil
 	params := getDiscountStripeInvoiceItemParams(calculator, line, discount)
 	// Customer is required for adds
 	params.Customer = stripe.String(stripeCustomerID)
+
 	return params
 }
 
@@ -568,6 +650,7 @@ func getCreditStripeAddInvoiceItemParams(calculator StripeCalculator, line billi
 	params := getCreditStripeInvoiceItemParams(calculator, line, credit)
 	// Customer is required for adds
 	params.Customer = stripe.String(stripeCustomerID)
+
 	return params
 }
 
@@ -638,6 +721,7 @@ func getStripeInvoiceItemParams(line billing.DetailedLineWithResolvedTaxConfig, 
 func getStripeAddInvoiceItemParams(line billing.DetailedLineWithResolvedTaxConfig, calculator StripeCalculator, stripeCustomerID string) *stripe.InvoiceItemParams {
 	params := getStripeInvoiceItemParams(line, calculator)
 	params.Customer = stripe.String(stripeCustomerID)
+
 	return params
 }
 
@@ -701,7 +785,6 @@ func addResultExternalIDs(
 	result *billing.UpsertStandardInvoiceResult,
 ) error {
 	// Check if we have the same number of params and new lines
-
 	for idx, stripeLine := range newLines {
 		// Get the line ID from the param metadata
 		// We always read it from params as it's our source of truth

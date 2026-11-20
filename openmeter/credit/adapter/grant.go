@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"github.com/samber/lo"
 
 	"github.com/openmeterio/openmeter/openmeter/credit"
 	"github.com/openmeterio/openmeter/openmeter/credit/grant"
@@ -85,11 +86,12 @@ func (g *grantDBADapter) VoidGrant(ctx context.Context, grantID models.Namespace
 	command := g.db.Grant.Update().
 		SetVoidedAt(at).
 		Where(db_grant.ID(grantID.ID), db_grant.Namespace(grantID.Namespace))
+
 	return command.Exec(ctx)
 }
 
 func (g *grantDBADapter) ListGrants(ctx context.Context, params grant.ListParams) (pagination.Result[grant.Grant], error) {
-	query := g.db.Grant.Query().Where(db_grant.Namespace(params.Namespace))
+	query := g.db.Grant.Query().WithEntitlement().Where(db_grant.Namespace(params.Namespace))
 
 	now := clock.Now()
 
@@ -161,8 +163,10 @@ func (g *grantDBADapter) ListGrants(ctx context.Context, params grant.ListParams
 				ep = p
 				continue
 			}
+
 			ep = db_entitlement.Or(ep, p)
 		}
+
 		query = query.Where(db_grant.HasEntitlementWith(ep))
 	}
 
@@ -171,6 +175,7 @@ func (g *grantDBADapter) ListGrants(ctx context.Context, params grant.ListParams
 		if !params.Order.IsDefaultValue() {
 			order = entutils.GetOrdering(params.Order)
 		}
+
 		switch params.OrderBy {
 		case grant.OrderByID:
 			query = query.Order(db_grant.ByID(order...))
@@ -185,6 +190,7 @@ func (g *grantDBADapter) ListGrants(ctx context.Context, params grant.ListParams
 		case grant.OrderByOwner:
 			query = query.Order(db_grant.ByOwnerID(order...))
 		}
+
 		// Offset pagination needs a total order; the other sort columns can tie.
 		if params.OrderBy != grant.OrderByID {
 			query = query.Order(db_grant.ByID(order...))
@@ -207,6 +213,7 @@ func (g *grantDBADapter) ListGrants(ctx context.Context, params grant.ListParams
 		if params.Limit > 0 {
 			query = query.Limit(params.Limit)
 		}
+
 		if params.Offset > 0 {
 			query = query.Offset(params.Offset)
 		}
@@ -278,6 +285,7 @@ func (g *grantDBADapter) GetGrant(ctx context.Context, grantID models.Namespaced
 		if db.IsNotFound(err) {
 			return grant.Grant{}, &credit.GrantNotFoundError{GrantID: grantID.ID}
 		}
+
 		return grant.Grant{}, err
 	}
 
@@ -285,6 +293,11 @@ func (g *grantDBADapter) GetGrant(ctx context.Context, grantID models.Namespaced
 }
 
 func mapGrantEntity(entity *db.Grant) grant.Grant {
+	var customerID *string
+	if entity.Edges.Entitlement != nil {
+		customerID = lo.ToPtr(entity.Edges.Entitlement.CustomerID)
+	}
+
 	g := grant.Grant{
 		ManagedModel: models.ManagedModel{
 			CreatedAt: entity.CreatedAt.In(time.UTC),
@@ -294,10 +307,11 @@ func mapGrantEntity(entity *db.Grant) grant.Grant {
 		NamespacedModel: models.NamespacedModel{
 			Namespace: entity.Namespace,
 		},
-		ID:       entity.ID,
-		OwnerID:  entity.OwnerID,
-		Amount:   entity.Amount,
-		Priority: entity.Priority,
+		ID:         entity.ID,
+		OwnerID:    entity.OwnerID,
+		CustomerID: customerID,
+		Amount:     entity.Amount,
+		Priority:   entity.Priority,
 		VoidedAt: convert.SafeDeRef(entity.VoidedAt, func(t time.Time) *time.Time {
 			return convert.ToPointer(t.In(time.UTC).Truncate(time.Minute)) // To avoid consistency errors for previous versions of the database where this value wasn't store truncated
 		}),

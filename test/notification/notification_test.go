@@ -13,7 +13,7 @@ func TestNotification(t *testing.T) {
 
 	namespace := NewTestNamespace(t)
 
-	env, err := NewTestEnv(t, ctx, namespace)
+	env, err := NewTestEnv(t, namespace)
 	require.NoError(t, err, "NotificationTestEnv() failed")
 	t.Cleanup(func() {
 		if env != nil {
@@ -110,6 +110,10 @@ func TestNotification(t *testing.T) {
 		t.Run("Get", func(t *testing.T) {
 			testSuite.TestGet(ctx, t)
 		})
+
+		t.Run("CreateView", func(t *testing.T) {
+			testSuite.TestCreateView(ctx, t)
+		})
 	})
 
 	// Test suite covering notification events
@@ -138,6 +142,23 @@ func TestNotification(t *testing.T) {
 
 		t.Run("TestUpdateDeliveryStatus", func(t *testing.T) {
 			testSuite.TestUpdateDeliveryStatus(ctx, t)
+		})
+	})
+
+	// Test suite covering how the legacy event payloads read through the v3 API
+	t.Run("LegacyEventV3", func(t *testing.T) {
+		testSuite := LegacyEventV3TestSuite{
+			Env: env,
+		}
+
+		testSuite.Setup(ctx, t)
+
+		t.Run("TestBalanceThresholdAndReset", func(t *testing.T) {
+			testSuite.TestBalanceThresholdAndReset(ctx, t)
+		})
+
+		t.Run("TestInvoiceCreated", func(t *testing.T) {
+			testSuite.TestInvoiceCreated(ctx, t)
 		})
 	})
 

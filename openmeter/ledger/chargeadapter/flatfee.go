@@ -48,6 +48,7 @@ func (h *flatFeeHandler) OnAllocateCredits(ctx context.Context, input flatfee.On
 	if err := input.Validate(); err != nil {
 		return nil, err
 	}
+
 	if input.PreTaxAmountToAllocate.IsZero() {
 		return nil, nil
 	}
@@ -64,23 +65,23 @@ func (h *flatFeeHandler) OnAllocateCredits(ctx context.Context, input flatfee.On
 	}
 
 	realizations, err := h.collector.CollectToAccrued(ctx, collector.CollectToAccruedInput{
-		Namespace:         input.Charge.Namespace,
-		ChargeID:          input.Charge.ID,
-		CustomerID:        intent.GetCustomerID(),
-		Annotations:       chargeAnnotationsForFlatFeeCharge(input.Charge),
-		BookedAt:          input.BookedAt,
-		SourceBalanceAsOf: intent.GetEffectiveInvoiceAt(),
-		Currency:          intent.GetCurrency().Reference(),
-		TaxCode:           lo.ToPtr(taxConfig.TaxCodeID),
-		TaxBehavior:       (*ledger.TaxBehavior)(taxConfig.Behavior),
-		SettlementMode:    intent.GetSettlementMode(),
-		ServicePeriod:     input.ServicePeriod,
-		Filters:           intent.GetCreditFilters(),
-		Amount:            input.PreTaxAmountToAllocate,
+		Namespace:      input.Charge.Namespace,
+		ChargeID:       input.Charge.ID,
+		CustomerID:     intent.GetCustomerID(),
+		Annotations:    chargeAnnotationsForFlatFeeCharge(input.Charge),
+		BookedAt:       input.BookedAt,
+		Currency:       intent.GetCurrency().Reference(),
+		TaxCode:        lo.ToPtr(taxConfig.TaxCodeID),
+		TaxBehavior:    (*ledger.TaxBehavior)(taxConfig.Behavior),
+		SettlementMode: intent.GetSettlementMode(),
+		ServicePeriod:  input.ServicePeriod,
+		Filters:        intent.GetCreditFilters(),
+		Amount:         input.PreTaxAmountToAllocate,
 	})
 	if err != nil {
 		return nil, err
 	}
+
 	if len(realizations) == 0 {
 		return nil, nil
 	}
@@ -202,6 +203,7 @@ func (h *flatFeeHandler) OnCustomCurrencyOverageAccruedCorrection(ctx context.Co
 	if err := input.Validate(); err != nil {
 		return err
 	}
+
 	if input.Run.AccruedUsage == nil || input.Run.AccruedUsage.LedgerTransaction == nil {
 		return nil
 	}
@@ -232,17 +234,17 @@ func (h *flatFeeHandler) OnAllocateFiatOverageCredits(ctx context.Context, input
 	}
 
 	intent := input.Charge.Intent
+
 	return h.collector.CollectToReceivable(ctx, collector.CollectToReceivableInput{
-		Namespace:         input.Charge.Namespace,
-		ChargeID:          input.Charge.ID,
-		CustomerID:        intent.GetCustomerID(),
-		Annotations:       chargeAnnotationsForFlatFeeCharge(input.Charge),
-		BookedAt:          input.BookedAt,
-		SourceBalanceAsOf: input.BookedAt,
-		Currency:          currencies.NewCurrencyReference(currencyx.Code(fiatCurrency.GetFiatCode())),
-		Filters:           intent.GetCreditFilters(),
-		ServicePeriod:     input.Run.ServicePeriod,
-		Amount:            input.AmountToAllocate,
+		Namespace:     input.Charge.Namespace,
+		ChargeID:      input.Charge.ID,
+		CustomerID:    intent.GetCustomerID(),
+		Annotations:   chargeAnnotationsForFlatFeeCharge(input.Charge),
+		BookedAt:      input.BookedAt,
+		Currency:      currencies.NewCurrencyReference(currencyx.Code(fiatCurrency.GetFiatCode())),
+		Filters:       intent.GetCreditFilters(),
+		ServicePeriod: input.Run.ServicePeriod,
+		Amount:        input.AmountToAllocate,
 	})
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	billingadapter "github.com/openmeterio/openmeter/openmeter/billing/adapter"
 	featuremeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	splitlinegrouptestutils "github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup/testutils"
 	billinglineengine "github.com/openmeterio/openmeter/openmeter/billing/lineengine"
 	billingratingservice "github.com/openmeterio/openmeter/openmeter/billing/rating/service"
 	billingsequenceadapter "github.com/openmeterio/openmeter/openmeter/billing/sequence/adapter"
@@ -44,6 +45,7 @@ import (
 	planservice "github.com/openmeterio/openmeter/openmeter/productcatalog/plan/service"
 	planaddonrepo "github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon/adapter"
 	planaddonservice "github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon/service"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	registrybuilder "github.com/openmeterio/openmeter/openmeter/registry/builder"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
 	"github.com/openmeterio/openmeter/openmeter/subject"
@@ -61,8 +63,7 @@ import (
 	subscriptioncustomer "github.com/openmeterio/openmeter/openmeter/subscription/validators/customer"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	subscriptionworkflowservice "github.com/openmeterio/openmeter/openmeter/subscription/workflow/service"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
-	taxcodeservice "github.com/openmeterio/openmeter/openmeter/taxcode/service"
+	taxcodetestutils "github.com/openmeterio/openmeter/openmeter/taxcode/testutils"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/ffx"
@@ -233,10 +234,10 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 	}
 
 	subjectCustomerHook, err := customerhooks.NewSubjectCustomerHook(customerhooks.SubjectCustomerHookConfig{
-		Customer:         customerService,
-		CustomerOverride: noopCustomerOverrideService{},
-		Logger:           logger,
-		Tracer:           noop.NewTracerProvider().Tracer("test_env"),
+		Customer:               customerService,
+		CustomerBillingProfile: noopCustomerOverrideService{},
+		Logger:                 logger,
+		Tracer:                 noop.NewTracerProvider().Tracer("test_env"),
 	})
 	if err != nil {
 		return nil, err
@@ -264,21 +265,7 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 		return nil, fmt.Errorf("failed to create plan adapter: %w", err)
 	}
 
-	taxCodeAdapter, err := taxcodeadapter.New(taxcodeadapter.Config{
-		Client: dbDeps.DBClient,
-		Logger: logger.WithGroup("taxcode"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tax code adapter: %w", err)
-	}
-
-	taxCodeService, err := taxcodeservice.New(taxcodeservice.Config{
-		Adapter: taxCodeAdapter,
-		Logger:  logger.WithGroup("taxcode"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tax code service: %w", err)
-	}
+	taxCodeEnv := taxcodetestutils.NewTestEnvFromClient(t, dbDeps.DBClient, logger.WithGroup("taxcode"))
 
 	featureResolver, err := featureresolver.New(entitlementRegistry.Feature)
 	require.NoErrorf(t, err, "failed to create feature resolver: %v", err)
@@ -298,11 +285,16 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 		return nil, fmt.Errorf("failed to create currency resolver: %w", err)
 	}
 
+	taxCodeResolver, err := taxcoderesolver.New(taxCodeEnv.Service)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tax code resolver: %w", err)
+	}
+
 	planService, err := planservice.New(planservice.Config{
 		Adapter:          planAdapter,
 		FeatureResolver:  featureResolver,
 		CurrencyResolver: currencyResolver,
-		TaxCode:          taxCodeService,
+		TaxCodeResolver:  taxCodeResolver,
 		Logger:           logger.WithGroup("plan"),
 		Publisher:        publisher,
 	})
@@ -369,7 +361,7 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 		Publisher:        publisher,
 		FeatureResolver:  featureResolver,
 		CurrencyResolver: currencyResolver,
-		TaxCode:          taxCodeService,
+		TaxCodeResolver:  taxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -417,6 +409,7 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 		Logger:             logger.With("subsystem", "subscription.workflow.service"),
 		Lockr:              locker,
 		FeatureFlags:       ffService,
+		TaxCodeResolver:    taxCodeResolver,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subscription workflow service: %w", err)
@@ -465,7 +458,7 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 	}
 
 	legacyBillingLineEngine, err := billinglineengine.New(billinglineengine.Config{
-		SplitLineGroupAdapter:        billingAdapter,
+		SplitLineGroupService:        splitlinegrouptestutils.NewTestEnv(t, dbDeps.DBClient, logger),
 		RatingService:                billingRatingService,
 		FeatureMeterResolver:         featureMeterResolver,
 		StreamingConnector:           streamingConnector,
@@ -478,7 +471,6 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 	billingService, err := billingservice.New(billingservice.Config{
 		Adapter:                 billingAdapter,
 		SequenceService:         billingSequenceService,
-		RatingService:           billingRatingService,
 		LegacyBillingLineEngine: legacyBillingLineEngine,
 		CustomerService:         customerService,
 		AppService:              appService,
@@ -486,7 +478,8 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 		FeatureMeterResolver:    featureMeterResolver,
 		Publisher:               publisher,
 		AdvancementStrategy:     billing.ForegroundAdvancementStrategy,
-		TaxCodeService:          taxCodeService,
+		TaxCodeService:          taxCodeEnv.Service,
+		TaxCodeResolver:         taxCodeResolver,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create billing service: %w", err)
@@ -520,10 +513,10 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 }
 
 type noopCustomerOverrideService struct {
-	billing.CustomerOverrideService
+	billing.CustomerBillingProfileService
 }
 
-func minimalCreateProfileInputTemplate(appID app.AppID) billing.CreateProfileInput {
+func MinimalCreateProfileInputTemplate(appID app.AppID) billing.CreateProfileInput {
 	return billing.CreateProfileInput{
 		Name:      "Awesome Profile",
 		Default:   true,
@@ -587,7 +580,7 @@ func (s *CustomerHandlerTestSuite) installSandboxApp(t *testing.T, ns string) ap
 }
 
 func (s *CustomerHandlerTestSuite) createDefaultProfile(t *testing.T, app app.App, ns string) *billing.Profile {
-	clonedCreateProfileInput := minimalCreateProfileInputTemplate(app.GetID())
+	clonedCreateProfileInput := MinimalCreateProfileInputTemplate(app.GetID())
 	clonedCreateProfileInput.Namespace = ns
 
 	profile, err := s.Env.Billing().CreateProfile(t.Context(), clonedCreateProfileInput)

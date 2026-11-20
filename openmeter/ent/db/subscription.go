@@ -13,7 +13,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/customer"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/plan"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscription"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionbillingsyncstate"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
@@ -55,6 +55,8 @@ type Subscription struct {
 	CostBasisMode subscription.CostBasisMode `json:"cost_basis_mode,omitempty"`
 	// BillingAnchor holds the value of the "billing_anchor" field.
 	BillingAnchor time.Time `json:"billing_anchor,omitempty"`
+	// Nothing is billed for service before this time. Unset means billing starts with the subscription.
+	BillingStartsAt *time.Time `json:"billing_starts_at,omitempty"`
 	// The default billing cadence for subscriptions.
 	BillingCadence datetime.ISODurationString `json:"billing_cadence,omitempty"`
 	// Default pro-rating configuration for subscriptions.
@@ -89,8 +91,8 @@ type SubscriptionEdges struct {
 	ChargesFlatFee []*ChargeFlatFee `json:"charges_flat_fee,omitempty"`
 	// Addons holds the value of the addons edge.
 	Addons []*SubscriptionAddon `json:"addons,omitempty"`
-	// BillingSyncState holds the value of the billing_sync_state edge.
-	BillingSyncState *SubscriptionBillingSyncState `json:"billing_sync_state,omitempty"`
+	// SyncState holds the value of the sync_state edge.
+	SyncState *SubscriptionSyncState `json:"sync_state,omitempty"`
 	// CostBasisPins holds the value of the cost_basis_pins edge.
 	CostBasisPins []*SubscriptionCostBasisPin `json:"cost_basis_pins,omitempty"`
 	// loadedTypes holds the information for reporting if a
@@ -192,15 +194,15 @@ func (e SubscriptionEdges) AddonsOrErr() ([]*SubscriptionAddon, error) {
 	return nil, &NotLoadedError{edge: "addons"}
 }
 
-// BillingSyncStateOrErr returns the BillingSyncState value or an error if the edge
+// SyncStateOrErr returns the SyncState value or an error if the edge
 // was not loaded in eager-loading, or loaded but was not found.
-func (e SubscriptionEdges) BillingSyncStateOrErr() (*SubscriptionBillingSyncState, error) {
-	if e.BillingSyncState != nil {
-		return e.BillingSyncState, nil
+func (e SubscriptionEdges) SyncStateOrErr() (*SubscriptionSyncState, error) {
+	if e.SyncState != nil {
+		return e.SyncState, nil
 	} else if e.loadedTypes[10] {
-		return nil, &NotFoundError{label: subscriptionbillingsyncstate.Label}
+		return nil, &NotFoundError{label: subscriptionsyncstate.Label}
 	}
-	return nil, &NotLoadedError{edge: "billing_sync_state"}
+	return nil, &NotLoadedError{edge: "sync_state"}
 }
 
 // CostBasisPinsOrErr returns the CostBasisPins value or an error if the edge
@@ -221,7 +223,7 @@ func (*Subscription) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case subscription.FieldID, subscription.FieldNamespace, subscription.FieldName, subscription.FieldDescription, subscription.FieldPlanID, subscription.FieldCustomerID, subscription.FieldInvoiceCurrency, subscription.FieldCostBasisMode, subscription.FieldBillingCadence, subscription.FieldSettlementMode:
 			values[i] = new(sql.NullString)
-		case subscription.FieldCreatedAt, subscription.FieldUpdatedAt, subscription.FieldDeletedAt, subscription.FieldActiveFrom, subscription.FieldActiveTo, subscription.FieldBillingAnchor:
+		case subscription.FieldCreatedAt, subscription.FieldUpdatedAt, subscription.FieldDeletedAt, subscription.FieldActiveFrom, subscription.FieldActiveTo, subscription.FieldBillingAnchor, subscription.FieldBillingStartsAt:
 			values[i] = new(sql.NullTime)
 		case subscription.FieldProRatingConfig:
 			values[i] = subscription.ValueScanner.ProRatingConfig.ScanValue()
@@ -344,6 +346,13 @@ func (_m *Subscription) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.BillingAnchor = value.Time
 			}
+		case subscription.FieldBillingStartsAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field billing_starts_at", values[i])
+			} else if value.Valid {
+				_m.BillingStartsAt = new(time.Time)
+				*_m.BillingStartsAt = value.Time
+			}
 		case subscription.FieldBillingCadence:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field billing_cadence", values[i])
@@ -425,9 +434,9 @@ func (_m *Subscription) QueryAddons() *SubscriptionAddonQuery {
 	return NewSubscriptionClient(_m.config).QueryAddons(_m)
 }
 
-// QueryBillingSyncState queries the "billing_sync_state" edge of the Subscription entity.
-func (_m *Subscription) QueryBillingSyncState() *SubscriptionBillingSyncStateQuery {
-	return NewSubscriptionClient(_m.config).QueryBillingSyncState(_m)
+// QuerySyncState queries the "sync_state" edge of the Subscription entity.
+func (_m *Subscription) QuerySyncState() *SubscriptionSyncStateQuery {
+	return NewSubscriptionClient(_m.config).QuerySyncState(_m)
 }
 
 // QueryCostBasisPins queries the "cost_basis_pins" edge of the Subscription entity.
@@ -510,6 +519,11 @@ func (_m *Subscription) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("billing_anchor=")
 	builder.WriteString(_m.BillingAnchor.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.BillingStartsAt; v != nil {
+		builder.WriteString("billing_starts_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("billing_cadence=")
 	builder.WriteString(fmt.Sprintf("%v", _m.BillingCadence))

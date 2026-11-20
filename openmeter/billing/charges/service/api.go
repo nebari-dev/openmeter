@@ -17,6 +17,7 @@ import (
 	billingfeaturemeter "github.com/openmeterio/openmeter/openmeter/billing/featuremeter"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -28,6 +29,10 @@ func (s *service) CreateCustomerCharge(ctx context.Context, input charges.Create
 		return charges.CustomerCharge{}, err
 	}
 
+	if err := s.validateNamespaceLockdown(input.Namespace); err != nil {
+		return charges.CustomerCharge{}, err
+	}
+
 	currency, err := s.currencyResolver.ResolveCurrency(ctx, input.Namespace, currencies.CurrencyRef{
 		Code: input.CurrencyCode,
 	})
@@ -35,11 +40,16 @@ func (s *service) CreateCustomerCharge(ctx context.Context, input charges.Create
 		return charges.CustomerCharge{}, fmt.Errorf("resolving currency: %w", err)
 	}
 
+	taxConfig := input.TaxConfig.Clone()
+	if err := productcatalog.ResolveTaxConfig(ctx, s.taxCodeService, input.Namespace, &taxConfig); err != nil {
+		return charges.CustomerCharge{}, fmt.Errorf("resolving charge tax config: %w", err)
+	}
+
 	intent := meta.Intent{
 		ManagedBy:         billing.ManuallyManagedLine,
 		CustomerID:        input.CustomerID,
 		Currency:          *currency,
-		TaxConfig:         input.TaxConfig,
+		TaxConfig:         productcatalog.TaxCodeConfigFrom(&taxConfig),
 		UniqueReferenceID: input.UniqueReferenceID,
 	}
 
@@ -179,6 +189,7 @@ func (s *service) SetCustomerChargeOverride(ctx context.Context, input charges.S
 	default:
 		return charges.Charge{}, fmt.Errorf("unsupported charge type: %s", existing.Type())
 	}
+
 	if err != nil {
 		return charges.Charge{}, fmt.Errorf("creating charge override patch: %w", err)
 	}
@@ -250,18 +261,39 @@ func (s *service) ClearCustomerChargeOverride(ctx context.Context, input charges
 	return s.GetByID(ctx, charges.GetByIDInput{ChargeID: chargeID})
 }
 
+func (s *service) GetCustomerCharge(ctx context.Context, input charges.GetByIDInput) (charges.CustomerCharge, error) {
+	input.Expands = withCustomerChargeRealizations(input.Expands)
+	charge, err := s.GetByID(ctx, input)
+	if err != nil {
+		return charges.CustomerCharge{}, err
+	}
+
+	switch charge.Type() {
+	case meta.ChargeTypeFlatFee, meta.ChargeTypeUsageBased:
+	default:
+		return charges.CustomerCharge{}, charges.NewChargeNotFoundError(input.ChargeID.Namespace, input.ChargeID.ID)
+	}
+
+	refs, err := collectCustomerChargeReferences(charges.Charges{charge})
+	if err != nil {
+		return charges.CustomerCharge{}, err
+	}
+
+	entities, err := s.loadCustomerChargeEntities(ctx, input.ChargeID.Namespace, refs, input.Expands)
+	if err != nil {
+		return charges.CustomerCharge{}, err
+	}
+
+	return s.buildCustomerCharge(ctx, charge, entities, input.Expands)
+}
+
 func (s *service) ListCustomerCharges(ctx context.Context, input charges.ListCustomerChargesInput) (charges.ListCustomerChargesResult, error) {
 	if err := input.Validate(); err != nil {
 		return charges.ListCustomerChargesResult{}, err
 	}
 
 	listInput := input.ListChargesInput
-	// Realization runs always load: booked totals and the resolved realization
-	// view depend on them. Deleted runs load too, so voided history surfaces
-	// as audit entries.
-	listInput.Expands = listInput.Expands.
-		With(meta.ExpandRealizations).
-		With(meta.ExpandDeletedRealizations)
+	listInput.Expands = withCustomerChargeRealizations(listInput.Expands)
 
 	listed, err := s.ListCharges(ctx, listInput)
 	if err != nil {
@@ -293,6 +325,12 @@ func (s *service) ListCustomerCharges(ctx context.Context, input charges.ListCus
 		},
 		Expands: listInput.Expands,
 	}, nil
+}
+
+// Booked totals and the realization view depend on persisted runs. Load deleted
+// runs as well so voided history is visible in the API.
+func withCustomerChargeRealizations(expands meta.Expands) meta.Expands {
+	return expands.With(meta.ExpandRealizations, meta.ExpandDeletedRealizations)
 }
 
 // buildCustomerCharge assembles the API-facing CustomerCharge from the
@@ -442,6 +480,7 @@ func collectCustomerChargeReferences(items charges.Charges) (customerChargeRefer
 			if ff.Realizations.CurrentRun != nil {
 				runs = append(slices.Clone(runs), *ff.Realizations.CurrentRun)
 			}
+
 			for _, run := range runs {
 				if run.InvoiceID != nil {
 					out.invoiceIDs = append(out.invoiceIDs, *run.InvoiceID)
@@ -537,8 +576,8 @@ func (s *service) listCustomerChargeSubscriptions(ctx context.Context, namespace
 		Namespaces:     []string{namespace},
 		Page:           pagination.NewPage(1, len(ids)),
 		IncludeDeleted: true,
-		ID:             &filter.FilterULID{FilterString: filter.FilterString{In: &ids}},
-		CustomerID:     &filter.FilterULID{FilterString: filter.FilterString{In: &customerIDs}},
+		ID:             filter.NewULIDEq(ids...),
+		CustomerID:     filter.NewULIDEq(customerIDs...),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing subscriptions: %w", err)
@@ -568,7 +607,7 @@ func (s *service) listRealizationInvoiceLines(ctx context.Context, namespace str
 		Page:           pagination.NewPage(1, len(ids)),
 		IncludeDeleted: true,
 		IDs:            ids,
-		CustomerID:     &filter.FilterULID{FilterString: filter.FilterString{In: &customerIDs}},
+		CustomerID:     filter.NewULIDEq(customerIDs...),
 		Expand:         billing.InvoiceExpandAll,
 	})
 	if err != nil {

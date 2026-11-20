@@ -164,7 +164,8 @@ The full call path, HTTP route, and a short description are listed below.
 | `om.Customers.Upsert` | `PUT /openmeter/customers/{customerId}` |  |
 | `om.Customers.Delete` | `DELETE /openmeter/customers/{customerId}` |  |
 | `om.Customers.Billing.Get` | `GET /openmeter/customers/{customerId}/billing` |  |
-| `om.Customers.Billing.Update` | `PUT /openmeter/customers/{customerId}/billing` |  |
+| `om.Customers.Billing.Update` | `PUT /openmeter/customers/{customerId}/billing` | Update billing data while preserving the current profile selection when billing_profile is omitted or null. Use the dedicated billing profile endpoint to remove the selection. |
+| `om.Customers.Billing.UpdateProfile` | `PUT /openmeter/customers/{customerId}/billing/profile` | Set the customer's explicit billing profile selection. Omitting billing_profile or setting it to null removes the selection and uses the current namespace default. |
 | `om.Customers.Billing.UpdateAppData` | `PUT /openmeter/customers/{customerId}/billing/app-data` |  |
 | `om.Customers.Billing.CreateStripeCheckoutSession` | `POST /openmeter/customers/{customerId}/billing/stripe/checkout-sessions` | Create a [Stripe Checkout Session](https://docs.stripe.com/payments/checkout) for the customer. Creates a Checkout Session for collecting payment method information from customers. The session operates in "setup" mode, which collects payment details without charging the customer immediately. The collected payment method can be used for future subscription billing. For hosted checkout sessions, redirect customers to the returned URL. For embedded sessions, use the client_secret to initialize Stripe.js in your application. |
 | `om.Customers.Billing.CreateStripePortalSession` | `POST /openmeter/customers/{customerId}/billing/stripe/portal-sessions` | Create Stripe Customer Portal Session. Useful to redirect the customer to the Stripe Customer Portal to manage their payment methods, change their billing address and access their invoice history. Only returns URL if the customer billing profile is linked to a stripe app and customer. |
@@ -187,6 +188,7 @@ The full call path, HTTP route, and a short description are listed below.
 | `om.Customers.Credits.Transactions.List` | `GET /openmeter/customers/{customerId}/credits/transactions` | List credit transactions for a customer. Returns an immutable, chronological record of credit movements: funded credits and consumed credits. Transactions are returned in reverse chronological order by default. |
 | `om.Customers.Charges.List` | `GET /openmeter/customers/{customerId}/charges` | List customer charges. Returns the customer's charges that are represented as either flat fee or usage-based charges. |
 | `om.Customers.Charges.Create` | `POST /openmeter/customers/{customerId}/charges` | Create customer charge. |
+| `om.Customers.Charges.Invoice` | `POST /openmeter/customers/{customerId}/charges/invoice` | Invoice a customer's charges outside the normal billing cycle. Collection alignment is bypassed. The customer's progressive billing setting applies unless explicitly overridden. All eligible pending lines are considered. Returns the created standard invoices, one per collected currency. Lines blocked by their owning engine remain pending. If all eligible lines are blocked or no lines are eligible, returns a validation error. |
 
 ### Entitlements
 
@@ -233,6 +235,7 @@ The full call path, HTTP route, and a short description are listed below.
 | `om.Apps.Get` | `GET /openmeter/apps/{appId}` | Get an installed app. |
 | `om.Apps.Uninstall` | `DELETE /openmeter/apps/{appId}` | Uninstall an app by ID. |
 | `om.Apps.Update` | `PUT /openmeter/apps/{appId}` | Update an installed app. |
+| `om.Apps.ExecuteAction` | `POST /openmeter/apps/{appId}/action` | Execute an operator action on an installed app. The action must be listed in the app's `actions`; otherwise the request is rejected. |
 | `om.Apps.ListCatalog` | `GET /openmeter/app-catalog` | List available apps. |
 | `om.Apps.GetCatalogItem` | `GET /openmeter/app-catalog/{appType}` | Get an app catalog item by type. |
 | `om.Apps.Install` | `POST /openmeter/app-catalog/install` | Install an app from the catalog. |
@@ -264,6 +267,7 @@ The full call path, HTTP route, and a short description are listed below.
 
 | Method | HTTP | Description |
 | --- | --- | --- |
+| `om.Charges.Get` | `GET /openmeter/charges/{chargeId}` | Get a flat fee or usage-based charge by ID. Deleted charges are returned with their status and realization history. |
 | `om.Charges.List` | `GET /openmeter/charges` | List charges. Returns the charges of every customer that are represented as either flat fee or usage-based charges. |
 
 ### Tax
@@ -358,11 +362,20 @@ The full call path, HTTP route, and a short description are listed below.
 
 | Method | HTTP | Description |
 | --- | --- | --- |
-| `om.Notifications.ListChannels` | `GET /openmeter/notification/channels` | List all notification channels. |
-| `om.Notifications.CreateChannel` | `POST /openmeter/notification/channels` | Create a notification channel. |
-| `om.Notifications.GetChannel` | `GET /openmeter/notification/channels/{notificationChannelId}` | Get a notification channel by id. |
-| `om.Notifications.UpdateChannel` | `PUT /openmeter/notification/channels/{notificationChannelId}` | Update a notification channel by id. |
-| `om.Notifications.DeleteChannel` | `DELETE /openmeter/notification/channels/{notificationChannelId}` | Delete a notification channel by id. |
+| `om.Notifications.ListBillingChannels` | `GET /openmeter/notification/channels` | List all notification channels. |
+| `om.Notifications.CreateBillingChannel` | `POST /openmeter/notification/channels` | Create a notification channel. |
+| `om.Notifications.GetBillingChannel` | `GET /openmeter/notification/channels/{notificationChannelId}` | Get a notification channel by id. |
+| `om.Notifications.UpdateBillingChannel` | `PUT /openmeter/notification/channels/{notificationChannelId}` | Update a notification channel by id. |
+| `om.Notifications.DeleteBillingChannel` | `DELETE /openmeter/notification/channels/{notificationChannelId}` | Delete a notification channel by id. |
+| `om.Notifications.ListBillingRules` | `GET /openmeter/notification/rules` | List all notification rules. |
+| `om.Notifications.CreateBillingRule` | `POST /openmeter/notification/rules` | Create a notification rule. |
+| `om.Notifications.GetBillingRule` | `GET /openmeter/notification/rules/{notificationRuleId}` | Get a notification rule by id. |
+| `om.Notifications.UpdateBillingRule` | `PUT /openmeter/notification/rules/{notificationRuleId}` | Update a notification rule by id. |
+| `om.Notifications.DeleteBillingRule` | `DELETE /openmeter/notification/rules/{notificationRuleId}` | Delete a notification rule by id. |
+| `om.Notifications.TestBillingRule` | `POST /openmeter/notification/rules/{notificationRuleId}/test` | Test a notification rule by generating an event with sample data and delivering it to the rule's channels. The test event is persisted and listed like any other event. |
+| `om.Notifications.ListBillingEvents` | `GET /openmeter/notification/events` | List all notification events. |
+| `om.Notifications.GetBillingEvent` | `GET /openmeter/notification/events/{notificationEventId}` | Get a notification event by id. |
+| `om.Notifications.ResendBillingEvent` | `POST /openmeter/notification/events/{notificationEventId}/resend` | Resend a notification event to the channels of the rule that generated it. Delivery is asynchronous: the request marks the selected channels for redelivery and returns immediately. Channels whose delivery is still pending or already being resent are left untouched. |
 
 ## Error Handling
 

@@ -39,6 +39,7 @@ func (s SubscriptionView) GetPhaseByKey(key string) (*SubscriptionPhaseView, boo
 			return &phase, true
 		}
 	}
+
 	return nil, false
 }
 
@@ -52,6 +53,7 @@ func (s *SubscriptionView) Validate(includePhases bool) error {
 	if spec.ActiveFrom.Compare(s.Subscription.ActiveFrom) != 0 {
 		return fmt.Errorf("subscription active from %v does not match spec active from %v", s.Subscription.ActiveFrom, spec.ActiveFrom)
 	}
+
 	if (spec.ActiveTo == nil && s.Subscription.ActiveTo != nil) ||
 		(spec.ActiveTo != nil && s.Subscription.ActiveTo == nil) || (spec.ActiveTo != nil && s.Subscription.ActiveTo != nil && spec.ActiveTo.Compare(*s.Subscription.ActiveTo) != 0) {
 		return fmt.Errorf("subscription active to %v does not match spec active to %v", s.Subscription.ActiveTo, spec.ActiveTo)
@@ -77,6 +79,7 @@ func (s *SubscriptionView) Validate(includePhases bool) error {
 		if err := pin.Validate(); err != nil {
 			return fmt.Errorf("subscription cost basis pin is invalid: %w", err)
 		}
+
 		if pin.Namespace != s.Subscription.Namespace || pin.InvoiceCurrency != s.Subscription.InvoiceCurrency {
 			return fmt.Errorf("subscription cost basis pin does not belong to subscription invoice currency")
 		}
@@ -121,6 +124,7 @@ func (s *SubscriptionPhaseView) Validate(includeItems bool) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -297,6 +301,7 @@ func NewSubscriptionView(
 			Name:            sub.Name,
 			Description:     sub.Description,
 			BillingAnchor:   sub.BillingAnchor,
+			BillingStartsAt: sub.BillingStartsAt,
 		},
 		Phases: make(map[string]*SubscriptionPhaseSpec),
 	}
@@ -389,18 +394,39 @@ func NewSubscriptionView(
 			return item.Key
 		})
 
-		// Let's sort the items by start time
+		// Intended starts preserve revision identity when cancellation clips future items.
 		for key := range phaseItemsByKey {
-			// Any arbitrary time works as long as its consistent for the comparisons
 			slices.SortStableFunc(phaseItemsByKey[key], func(i, j SubscriptionItem) int {
 				iT, jT := phase.ActiveFrom, phase.ActiveFrom
 				if i.ActiveFromOverrideRelativeToPhaseStart != nil {
 					iT, _ = i.ActiveFromOverrideRelativeToPhaseStart.AddTo(phase.ActiveFrom)
 				}
+
 				if j.ActiveFromOverrideRelativeToPhaseStart != nil {
 					jT, _ = j.ActiveFromOverrideRelativeToPhaseStart.AddTo(phase.ActiveFrom)
 				}
-				return int(iT.Sub(jT))
+
+				if diff := iT.Compare(jT); diff != 0 {
+					return diff
+				}
+
+				iEmpty := i.AsPeriod().IsEmpty()
+				jEmpty := j.AsPeriod().IsEmpty()
+				switch {
+				case iEmpty && !jEmpty:
+					return -1
+				case !iEmpty && jEmpty:
+					return 1
+				case iEmpty && jEmpty:
+					// Patch IDs survive recreation; row IDs and CreatedAt do not.
+					// An unmarked plan-origin revision precedes edits at the same start.
+					iPatchID, _ := i.Annotations[AnnotationEditUniqueKey].(string)
+					jPatchID, _ := j.Annotations[AnnotationEditUniqueKey].(string)
+
+					return strings.Compare(iPatchID, jPatchID)
+				default:
+					return 0
+				}
 			})
 		}
 
@@ -461,9 +487,10 @@ func NewSubscriptionView(
 				}
 
 				if itemFeat != nil {
+					// Resolving a persisted feature must preserve legacy short-cadence reads.
 					if err := item.RateCard.ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
 						return withResolvedFeatureReference(meta, itemFeat)
-					}); err != nil {
+					}); err != nil && !errorsx.IsOnly(err, productcatalog.ErrRateCardBillingCadenceTooShort) {
 						return nil, fmt.Errorf("failed to resolve feature reference for item %s: %w", item.ID, err)
 					}
 				}

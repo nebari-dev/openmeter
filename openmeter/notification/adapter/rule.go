@@ -1,15 +1,20 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	entdb "github.com/openmeterio/openmeter/openmeter/ent/db"
 	channeldb "github.com/openmeterio/openmeter/openmeter/ent/db/notificationchannel"
 	ruledb "github.com/openmeterio/openmeter/openmeter/ent/db/notificationrule"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/predicate"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/clock"
+	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/framework/entutils"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
@@ -39,30 +44,38 @@ func (a *adapter) ListRules(ctx context.Context, params notification.ListRulesIn
 			)).                                        // Do not return deleted Rules
 			WithChannels(EagerLoadActiveChannels(now)) // Eager load active Channels
 
-		if len(params.Namespaces) > 0 {
-			query = query.Where(ruledb.NamespaceIn(params.Namespaces...))
-		}
-
-		if len(params.Rules) > 0 {
-			query = query.Where(ruledb.IDIn(params.Rules...))
-		}
+		query = query.Where(ruledb.Namespace(params.Namespace))
 
 		if !params.IncludeDisabled {
 			query = query.Where(ruledb.Disabled(false))
-		}
-
-		if len(params.Types) > 0 {
-			query = query.Where(ruledb.TypeIn(params.Types...))
 		}
 
 		if len(params.Channels) > 0 {
 			query = query.Where(ruledb.HasChannelsWith(channeldb.IDIn(params.Channels...)))
 		}
 
-		order := entutils.GetOrdering(sortx.OrderDefault)
-		if !params.Order.IsDefaultValue() {
-			order = entutils.GetOrdering(params.Order)
+		query = filter.ApplyToQuery(query, params.ID, ruledb.FieldID)
+		query = filter.ApplyToQuery(query, params.Name, ruledb.FieldName)
+		if params.Type != nil && !params.Type.IsEmpty() {
+			query = query.Where(eventTypePredicate(ruledb.FieldType, params.Type))
 		}
+
+		query = filter.ApplyToQuery(query, params.Disabled, ruledb.FieldDisabled)
+		query = filter.ApplyToQuery(query, params.CreatedAt, ruledb.FieldCreatedAt)
+		query = filter.ApplyToQuery(query, params.UpdatedAt, ruledb.FieldUpdatedAt)
+
+		var channelPreds []predicate.NotificationChannel
+		channelPreds = filter.ApplyToPredicate(channelPreds, params.ChannelID, channeldb.FieldID)
+		if len(channelPreds) > 0 {
+			query = query.Where(ruledb.HasChannelsWith(channelPreds...))
+		}
+
+		sortOrder := sortx.OrderDefault
+		if !params.Order.IsDefaultValue() {
+			sortOrder = params.Order
+		}
+
+		order := entutils.GetOrdering(sortOrder)
 
 		switch params.OrderBy {
 		case notification.OrderByCreatedAt:
@@ -70,7 +83,7 @@ func (a *adapter) ListRules(ctx context.Context, params notification.ListRulesIn
 		case notification.OrderByUpdatedAt:
 			query = query.Order(ruledb.ByUpdatedAt(order...))
 		case notification.OrderByType:
-			query = query.Order(ruledb.ByType(order...))
+			query = query.Order(byLegacyEventType(ruledb.FieldType, sortOrder), ruledb.ByID(order...))
 		case notification.OrderByID:
 			fallthrough
 		default:
@@ -93,7 +106,12 @@ func (a *adapter) ListRules(ctx context.Context, params notification.ListRulesIn
 				continue
 			}
 
-			result = append(result, *RuleFromDBEntity(*ruleRow))
+			rule, err := RuleFromDBEntity(*ruleRow)
+			if err != nil {
+				return response, err
+			}
+
+			result = append(result, *rule)
 		}
 
 		response.TotalCount = paged.TotalCount
@@ -107,12 +125,17 @@ func (a *adapter) ListRules(ctx context.Context, params notification.ListRulesIn
 
 func (a *adapter) CreateRule(ctx context.Context, params notification.CreateRuleInput) (*notification.Rule, error) {
 	fn := func(ctx context.Context, a *adapter) (*notification.Rule, error) {
+		config, err := toDBRuleConfig(params.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode notification rule config: %w", err)
+		}
+
 		query := a.db.NotificationRule.Create().
-			SetType(params.Type).
+			SetType(toDBEventType(params.Type)).
 			SetName(params.Name).
 			SetNamespace(params.Namespace).
 			SetDisabled(params.Disabled).
-			SetConfig(params.Config).
+			SetConfig(config).
 			SetAnnotations(params.Annotations).
 			SetMetadata(params.Metadata).
 			AddChannelIDs(params.Channels...)
@@ -137,7 +160,7 @@ func (a *adapter) CreateRule(ctx context.Context, params notification.CreateRule
 
 		queryRow.Edges.Channels = channelRows
 
-		return RuleFromDBEntity(*queryRow), nil
+		return RuleFromDBEntity(*queryRow)
 	}
 
 	return entutils.TransactingRepo(ctx, a, fn)
@@ -195,7 +218,7 @@ func (a *adapter) GetRule(ctx context.Context, params notification.GetRuleInput)
 			return nil, fmt.Errorf("invalid query result: nil notification rule received")
 		}
 
-		return RuleFromDBEntity(*ruleRow), nil
+		return RuleFromDBEntity(*ruleRow)
 	}
 
 	return entutils.TransactingRepo(ctx, a, fn)
@@ -203,10 +226,15 @@ func (a *adapter) GetRule(ctx context.Context, params notification.GetRuleInput)
 
 func (a *adapter) UpdateRule(ctx context.Context, params notification.UpdateRuleInput) (*notification.Rule, error) {
 	fn := func(ctx context.Context, a *adapter) (*notification.Rule, error) {
+		config, err := toDBRuleConfig(params.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode notification rule config: %w", err)
+		}
+
 		query := a.db.NotificationRule.UpdateOneID(params.ID).
 			Where(ruledb.Namespace(params.Namespace)).
 			SetDisabled(params.Disabled).
-			SetConfig(params.Config).
+			SetConfig(config).
 			SetName(params.Name).
 			SetAnnotations(params.Annotations).
 			SetMetadata(params.Metadata).
@@ -242,8 +270,103 @@ func (a *adapter) UpdateRule(ctx context.Context, params notification.UpdateRule
 
 		queryRow.Edges.Channels = channelRows
 
-		return RuleFromDBEntity(*queryRow), nil
+		return RuleFromDBEntity(*queryRow)
 	}
 
 	return entutils.TransactingRepo(ctx, a, fn)
+}
+
+// fromDBRuleConfig uses the row's type for unwrapped configs. Decoding does not
+// revalidate historical rule conditions; validation belongs to the write path.
+func fromDBRuleConfig(eventType notification.EventType, data json.RawMessage) (notification.RuleConfig, error) {
+	config := notification.RuleConfig{
+		RuleConfigMeta: notification.RuleConfigMeta{Type: eventType},
+	}
+
+	var err error
+
+	switch eventType {
+	case notification.EventTypeBalanceThreshold:
+		config.BalanceThreshold, err = fromDBRuleConfigPayload[notification.BalanceThresholdRuleConfig](eventType, data)
+	case notification.EventTypeEntitlementReset:
+		config.EntitlementReset, err = fromDBRuleConfigPayload[notification.EntitlementResetRuleConfig](eventType, data)
+	case notification.EventTypeInvoiceCreated, notification.EventTypeInvoiceUpdated:
+		config.Invoice, err = fromDBRuleConfigPayload[notification.InvoiceRuleConfig](eventType, data)
+	default:
+		return notification.RuleConfig{}, fmt.Errorf("invalid rule type: %s", eventType)
+	}
+
+	if err != nil {
+		return notification.RuleConfig{}, err
+	}
+
+	return config, nil
+}
+
+// fromDBRuleConfigPayload tries the legacy envelope before the flat contract.
+// Strict flat decoding prevents malformed envelopes from becoming empty invoice
+// configs, since InvoiceRuleConfig has no fields.
+func fromDBRuleConfigPayload[T any](eventType notification.EventType, data json.RawMessage) (*T, error) {
+	// TODO(notification-v4): remove envelope decoding after all writers and
+	// stored configs use the final representation.
+	var legacy struct {
+		Type notification.EventType `json:"type"`
+		Data *T                     `json:"data"`
+	}
+
+	legacyErr := json.Unmarshal(data, &legacy)
+	if legacyErr == nil {
+		switch {
+		case legacy.Type != eventType:
+			legacyErr = fmt.Errorf("invalid rule config discriminator")
+		case legacy.Data == nil:
+			legacyErr = fmt.Errorf("invalid rule config envelope: missing data")
+		default:
+			return legacy.Data, nil
+		}
+	}
+
+	var flat *T
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+
+	flatErr := decoder.Decode(&flat)
+	if flatErr == nil {
+		switch flat {
+		case nil:
+			flatErr = fmt.Errorf("invalid flat rule config: expected an object")
+		default:
+			if err := decoder.Decode(new(any)); err != io.EOF {
+				flatErr = fmt.Errorf("invalid flat rule config: expected a single JSON object")
+			}
+		}
+	}
+
+	if flatErr != nil {
+		return nil, fmt.Errorf("invalid rule config: envelope: %w; flat: %w", legacyErr, flatErr)
+	}
+
+	return flat, nil
+}
+
+func toDBRuleConfig(config notification.RuleConfig) (json.RawMessage, error) {
+	var data any
+
+	switch config.Type {
+	case notification.EventTypeBalanceThreshold:
+		data = config.BalanceThreshold
+	case notification.EventTypeEntitlementReset:
+		data = config.EntitlementReset
+	case notification.EventTypeInvoiceCreated, notification.EventTypeInvoiceUpdated:
+		data = config.Invoice
+	default:
+		return nil, fmt.Errorf("invalid rule type: %s", config.Type)
+	}
+
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode rule config: %w", err)
+	}
+
+	return encoded, nil
 }

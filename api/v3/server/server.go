@@ -13,7 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3 "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	addonshandler "github.com/openmeterio/openmeter/api/v3/handlers/addons"
 	appshandler "github.com/openmeterio/openmeter/api/v3/handlers/apps"
@@ -35,6 +35,8 @@ import (
 	llmcosthandler "github.com/openmeterio/openmeter/api/v3/handlers/llmcost"
 	metershandler "github.com/openmeterio/openmeter/api/v3/handlers/meters"
 	notificationchannelshandler "github.com/openmeterio/openmeter/api/v3/handlers/notification/channels"
+	notificationeventshandler "github.com/openmeterio/openmeter/api/v3/handlers/notification/events"
+	notificationruleshandler "github.com/openmeterio/openmeter/api/v3/handlers/notification/rules"
 	planshandler "github.com/openmeterio/openmeter/api/v3/handlers/plans"
 	planaddonshandler "github.com/openmeterio/openmeter/api/v3/handlers/plans/planaddons"
 	subscriptionshandler "github.com/openmeterio/openmeter/api/v3/handlers/subscriptions"
@@ -62,6 +64,7 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/meterevent"
 	"github.com/openmeterio/openmeter/openmeter/namespace/namespacedriver"
 	"github.com/openmeterio/openmeter/openmeter/notification"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
@@ -112,6 +115,7 @@ type Config struct {
 	SubscriptionAddonService    subscriptionaddon.Service
 	SubscriptionWorkflowService subscriptionworkflow.Service
 	TaxCodeService              taxcode.Service
+	TaxCodeResolver             productcatalog.TransactionalTaxCodeResolver
 	CurrencyService             currencies.Service
 	ChargeService               billingcharges.Service
 	CostService                 cost.Service
@@ -196,6 +200,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("subscription service is required"))
 	}
 
+	if c.TaxCodeResolver == nil {
+		errs = append(errs, errors.New("tax code resolver is required"))
+	}
+
 	if c.SubscriptionAddonService == nil {
 		errs = append(errs, errors.New("subscription addon service is required"))
 	}
@@ -272,6 +280,8 @@ type Server struct {
 	entitlementAccessHandler     entitlementaccesshandler.Handler
 	entitlementsHandler          entitlementshandler.Handler
 	notificationChannelsHandler  notificationchannelshandler.Handler
+	notificationEventsHandler    notificationeventshandler.Handler
+	notificationRulesHandler     notificationruleshandler.Handler
 	metersHandler                metershandler.Handler
 	subscriptionsHandler         subscriptionshandler.Handler
 	subscriptionAddonsHandler    subscriptionaddonshandler.Handler
@@ -287,7 +297,7 @@ type Server struct {
 }
 
 // Make sure we conform to ServerInterface
-var _ api.ServerInterface = (*Server)(nil)
+var _ apiv3.ServerInterface = (*Server)(nil)
 
 func NewServer(config *Config) (*Server, error) {
 	if err := config.Validate(); err != nil {
@@ -295,7 +305,7 @@ func NewServer(config *Config) (*Server, error) {
 	}
 
 	// Get the OpenAPI spec
-	swagger, err := api.GetSpec()
+	swagger, err := apiv3.GetSpec()
 	if err != nil {
 		slog.Error("failed to get swagger", "error", err)
 		return nil, err
@@ -336,6 +346,7 @@ func NewServer(config *Config) (*Server, error) {
 		ledgerService = ledgernoop.Ledger{}
 		accountResolver = ledgernoop.AccountResolver{}
 	}
+
 	customersCreditsHandler := customerscreditshandler.New(resolveNamespace, config.CustomerService, customerBalanceFacade, creditGrantService, ledgerService, accountResolver, httptransport.WithErrorHandler(config.ErrorHandler))
 	customersEntitlementHandler := customersentitlementhandler.New(resolveNamespace, config.EntitlementService, httptransport.WithErrorHandler(config.ErrorHandler))
 	customersEntitlementsHandler := customersentitlementshandler.New(resolveNamespace, config.EntitlementService, httptransport.WithErrorHandler(config.ErrorHandler))
@@ -343,7 +354,7 @@ func NewServer(config *Config) (*Server, error) {
 	metersHandler := metershandler.New(resolveNamespace, config.MeterService, config.StreamingConnector, config.CustomerService, httptransport.WithErrorHandler(config.ErrorHandler))
 	subscriptionsHandler := subscriptionshandler.New(resolveNamespace, config.CustomerService, config.PlanService, config.PlanSubscriptionService, config.SubscriptionService, config.SubscriptionWorkflowService, httptransport.WithErrorHandler(config.ErrorHandler))
 	subscriptionAddonsHandler := subscriptionaddonshandler.New(resolveNamespace, config.SubscriptionAddonService, config.SubscriptionService, config.SubscriptionWorkflowService, httptransport.WithErrorHandler(config.ErrorHandler))
-	billingProfilesHandler := billingprofileshandler.New(resolveNamespace, config.BillingService, httptransport.WithErrorHandler(config.ErrorHandler))
+	billingProfilesHandler := billingprofileshandler.New(resolveNamespace, config.BillingService, config.TaxCodeResolver, httptransport.WithErrorHandler(config.ErrorHandler))
 	billingInvoicesHandler := billinginvoiceshandler.New(resolveNamespace, config.BillingService, httptransport.WithErrorHandler(config.ErrorHandler))
 	plansHandler := planshandler.New(resolveNamespace, config.PlanService, config.UnitConfig.Enabled, httptransport.WithErrorHandler(config.ErrorHandler))
 	planAddonsHandler := planaddonshandler.New(resolveNamespace, config.PlanService, config.PlanAddonService, httptransport.WithErrorHandler(config.ErrorHandler))
@@ -359,6 +370,8 @@ func NewServer(config *Config) (*Server, error) {
 	entitlementAccessHandler := entitlementaccesshandler.New(resolveNamespace, config.EntitlementAccessService, httptransport.WithErrorHandler(config.ErrorHandler))
 	entitlementsHandler := entitlementshandler.New(resolveNamespace, config.EntitlementService, httptransport.WithErrorHandler(config.ErrorHandler))
 	notificationChannelsHandler := notificationchannelshandler.New(resolveNamespace, config.NotificationService, httptransport.WithErrorHandler(config.ErrorHandler))
+	notificationEventsHandler := notificationeventshandler.New(resolveNamespace, config.NotificationService, httptransport.WithErrorHandler(config.ErrorHandler))
+	notificationRulesHandler := notificationruleshandler.New(resolveNamespace, config.NotificationService, config.BillingService, config.TaxCodeResolver, httptransport.WithErrorHandler(config.ErrorHandler))
 
 	var llmcostH llmcosthandler.Handler
 	if config.LLMCostService != nil {
@@ -398,6 +411,8 @@ func NewServer(config *Config) (*Server, error) {
 		entitlementAccessHandler:     entitlementAccessHandler,
 		entitlementsHandler:          entitlementsHandler,
 		notificationChannelsHandler:  notificationChannelsHandler,
+		notificationEventsHandler:    notificationEventsHandler,
+		notificationRulesHandler:     notificationRulesHandler,
 	}, nil
 }
 
@@ -430,6 +445,7 @@ func (s *Server) RegisterRoutes(r chi.Router) error {
 		for _, mw := range s.Middlewares {
 			r.Use(mw)
 		}
+
 		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 			apierrors.
 				NewNotFoundError(r.Context(), errors.New("route not found"), "route").
@@ -450,7 +466,7 @@ func (s *Server) RegisterRoutes(r chi.Router) error {
 			_ = render.RenderYAML(w, s.swagger)
 		})
 
-		middlewares := []api.MiddlewareFunc{
+		middlewares := []apiv3.MiddlewareFunc{
 			validationMiddleware,
 		}
 
@@ -476,13 +492,13 @@ func (s *Server) RegisterRoutes(r chi.Router) error {
 			}))
 		}
 
-		postAuthMiddlewares := lo.Map(s.PostAuthMiddlewares, func(mwf server.MiddlewareFunc, _ int) api.MiddlewareFunc {
-			return api.MiddlewareFunc(mwf)
+		postAuthMiddlewares := lo.Map(s.PostAuthMiddlewares, func(mwf server.MiddlewareFunc, _ int) apiv3.MiddlewareFunc {
+			return apiv3.MiddlewareFunc(mwf)
 		})
 
 		middlewares = append(middlewares, postAuthMiddlewares...)
 
-		_ = api.HandlerWithOptions(s, api.ChiServerOptions{
+		_ = apiv3.HandlerWithOptions(s, apiv3.ChiServerOptions{
 			BaseRouter:       r,
 			Middlewares:      middlewares,
 			ErrorHandlerFunc: apierrors.NewV3ErrorHandlerFunc(s.ErrorHandler),
@@ -499,13 +515,16 @@ func buildResponseValidationRouteFilter(cfg config.ResponseValidationConfig) fun
 	if cfg.Mode != config.ResponseValidationModeUnstable {
 		return nil
 	}
+
 	return func(route *routers.Route) bool {
 		if route.Operation == nil {
 			return false
 		}
+
 		// kin-openapi unmarshals JSON booleans directly into map[string]any,
 		// so the extension value is a plain bool here.
 		v, _ := route.Operation.Extensions["x-unstable"].(bool)
+
 		return v
 	}
 }

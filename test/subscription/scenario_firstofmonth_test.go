@@ -12,12 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
+	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
 	pcsubscription "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription"
 	subscription "github.com/openmeterio/openmeter/openmeter/subscription"
+	subscriptiontestutils "github.com/openmeterio/openmeter/openmeter/subscription/testutils"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	"github.com/openmeterio/openmeter/openmeter/testutils"
 	"github.com/openmeterio/openmeter/pkg/clock"
@@ -45,6 +47,9 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 	// 1st, let's create the features
 	feats := tDeps.FeatureConnector.CreateExampleFeatures(t, tDeps.ExampleMeterID)
 	require.Len(t, feats, 3)
+
+	taxCode := tDeps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
 
 	// 2nd, let's create the plan
 	p, err := tDeps.PlanService.CreatePlan(ctx, plan.CreatePlanInput{
@@ -79,11 +84,7 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 								Price: productcatalog.NewPriceFrom(productcatalog.UnitPrice{
 									Amount: alpacadecimal.NewFromInt(100),
 								}),
-								TaxConfig: &productcatalog.TaxConfig{
-									Stripe: &productcatalog.StripeTaxConfig{
-										Code: "txcd_10000000",
-									},
-								},
+								TaxConfig: lo.ToPtr(taxConfig.Clone()),
 								EntitlementTemplate: productcatalog.NewEntitlementTemplateFrom(productcatalog.MeteredEntitlementTemplate{
 									UsagePeriod:     datetime.MustParseDuration(t, "P1M"), // compatible with the billing cadence
 									IssueAfterReset: lo.ToPtr(10.0),
@@ -101,11 +102,7 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 									Amount:      alpacadecimal.NewFromInt(10),
 									PaymentTerm: productcatalog.InAdvancePaymentTerm,
 								}),
-								TaxConfig: &productcatalog.TaxConfig{
-									Stripe: &productcatalog.StripeTaxConfig{
-										Code: "txcd_10000000",
-									},
-								},
+								TaxConfig: lo.ToPtr(taxConfig.Clone()),
 							},
 							BillingCadence: lo.ToPtr(datetime.MustParseDuration(t, "P1M")),
 						},
@@ -118,11 +115,7 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 								Price: productcatalog.NewPriceFrom(productcatalog.UnitPrice{
 									Amount: alpacadecimal.NewFromInt(1),
 								}),
-								TaxConfig: &productcatalog.TaxConfig{
-									Stripe: &productcatalog.StripeTaxConfig{
-										Code: "txcd_10000000",
-									},
-								},
+								TaxConfig: lo.ToPtr(taxConfig.Clone()),
 								EntitlementTemplate: productcatalog.NewEntitlementTemplateFrom(productcatalog.MeteredEntitlementTemplate{
 									UsagePeriod:     datetime.MustParseDuration(t, "P1D"), // compatible with the billing cadence
 									IssueAfterReset: lo.ToPtr(10.0),
@@ -146,7 +139,7 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 	require.NoError(t, err)
 
 	// 3rd, let's create the billing profile
-	_, err = tDeps.billingService.CreateProfile(ctx, minimalCreateProfileInputTemplate(tDeps.sandboxApp.GetID()))
+	_, err = tDeps.billingService.CreateProfile(ctx, MinimalCreateProfileInputTemplate(tDeps.sandboxApp.GetID()))
 	require.NoError(t, err)
 
 	// Then create the customer
@@ -212,7 +205,7 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 	clock.SetTime(currentTime.Add(time.Minute))
 
 	// 5th, let's synchronize the invoice
-	require.NoError(t, tDeps.subscriptionSyncService.SyncByView(ctx, view, firstOfMonth.AddDate(0, 1, 0)))
+	require.NoError(t, tDeps.subscriptionSyncService.SyncByID(ctx, view.Subscription.NamespacedID, firstOfMonth.AddDate(0, 1, 0)))
 
 	// 6th, let's check the invoice
 	invoices, err := tDeps.billingService.ListGatheringInvoices(ctx, billing.ListGatheringInvoicesInput{
@@ -247,14 +240,26 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 		lines, ok := linesByFeature[feats[0].Key]
 		require.True(t, ok)
 
-		// We expect a single in arrears line
-		require.Len(t, lines, 1)
+		// We expect three in arrears lines: the sync runs as of the start of July, so it covers
+		// the partial first month, July and the month after it
+		require.Len(t, lines, 3)
+
+		// Let's sort the lines by the period start ascending
+		slices.SortFunc(lines, func(i, j billing.GatheringLine) int {
+			return i.ServicePeriod.From.Compare(j.ServicePeriod.From)
+		})
 
 		line := lines[0]
 
 		require.Equal(t, startOfSub, line.ServicePeriod.From)
 		require.Equal(t, endOfMonth, line.ServicePeriod.To)
 		require.Equal(t, endOfMonth, line.InvoiceAt)
+
+		for idx, line := range lines[1:] {
+			require.Equal(t, endOfMonth.AddDate(0, idx, 0), line.ServicePeriod.From)
+			require.Equal(t, endOfMonth.AddDate(0, idx+1, 0), line.ServicePeriod.To)
+			require.Equal(t, endOfMonth.AddDate(0, idx+1, 0), line.InvoiceAt)
+		}
 	})
 
 	t.Run("lines for test-feature-2", func(t *testing.T) {
@@ -267,8 +272,8 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 			}
 		}
 
-		// We should have two lines, 1 for the current month and 1 for the next
-		require.Len(t, lines, 2)
+		// We should have three lines, 1 for the partial first month and 1 for each of the next two
+		require.Len(t, lines, 3)
 
 		// Let's sort by line.ChildUniqueReferenceID
 		slices.SortFunc(lines, func(i, j billing.GatheringLine) int {
@@ -284,14 +289,19 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 		require.Equal(t, endOfMonth, line2.ServicePeriod.From)
 		require.Equal(t, endOfMonth.AddDate(0, 1, 0), line2.ServicePeriod.To)
 		require.Equal(t, endOfMonth, line2.InvoiceAt)
+
+		line3 := lines[2]
+		require.Equal(t, endOfMonth.AddDate(0, 1, 0), line3.ServicePeriod.From)
+		require.Equal(t, endOfMonth.AddDate(0, 2, 0), line3.ServicePeriod.To)
+		require.Equal(t, endOfMonth.AddDate(0, 1, 0), line3.InvoiceAt)
 	})
 
 	t.Run("lines for test-feature-3", func(t *testing.T) {
 		lines, ok := linesByFeature[feats[2].Key]
 		require.True(t, ok)
 
-		// We expect 16 lines (15 to 30)
-		require.Len(t, lines, 16)
+		// We expect 78 lines: 16 for June (15 to 30), 31 for July and 31 for August
+		require.Len(t, lines, 78)
 
 		// Let's sort the lines by the period start ascending
 		slices.SortFunc(lines, func(i, j billing.GatheringLine) int {
@@ -305,9 +315,12 @@ func TestBillingOnFirstOfMonth(t *testing.T) {
 		require.Equal(t, endOfMonth, line1.InvoiceAt)
 
 		for idx, line := range lines[1:] {
-			require.Equal(t, startOfDay.AddDate(0, 0, idx+1), line.ServicePeriod.From)
+			from := startOfDay.AddDate(0, 0, idx+1)
+
+			require.Equal(t, from, line.ServicePeriod.From)
 			require.Equal(t, startOfDay.AddDate(0, 0, idx+2), line.ServicePeriod.To)
-			require.Equal(t, endOfMonth, line.InvoiceAt)
+			// Each daily line is invoiced at the end of the month it falls in
+			require.Equal(t, time.Date(from.Year(), from.Month()+1, 1, 0, 0, 0, 0, from.Location()), line.InvoiceAt)
 		}
 	})
 }
@@ -361,7 +374,7 @@ func TestAnchoredAlignment_MidMonthStart_EarlyCancel_IssueNextAnchor(t *testing.
 	require.NoError(t, err)
 
 	// Create billing profile with anchored alignment: first day of month
-	profInput := minimalCreateProfileInputTemplate(tDeps.sandboxApp.GetID())
+	profInput := MinimalCreateProfileInputTemplate(tDeps.sandboxApp.GetID())
 	profInput.Namespace = namespace
 	profInput.WorkflowConfig.Collection.Alignment = billing.AlignmentKindAnchored
 	anchor := time.Date(currentTime.Year(), currentTime.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -413,7 +426,7 @@ func TestAnchoredAlignment_MidMonthStart_EarlyCancel_IssueNextAnchor(t *testing.
 	clock.SetTime(cancelAt.Add(time.Hour * 1))
 
 	// Sync up to the next anchor (July 1st). Lines should remain on gathering invoice until then.
-	require.NoError(t, tDeps.subscriptionSyncService.SyncByViewAndInvoiceCustomer(ctx, view, firstOfNextMonth))
+	require.NoError(t, tDeps.subscriptionSyncService.SyncByID(ctx, view.Subscription.NamespacedID, firstOfNextMonth, subscriptionsync.WithInvoicePendingLines()))
 
 	invoices, err := tDeps.billingService.ListInvoices(ctx, billing.ListInvoicesInput{
 		Namespace:  namespace,

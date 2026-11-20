@@ -12,7 +12,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1 "github.com/openmeterio/openmeter/api"
 	v3apierrors "github.com/openmeterio/openmeter/api/v3/apierrors"
 	currencyhandler "github.com/openmeterio/openmeter/api/v3/handlers/currencies"
 	"github.com/openmeterio/openmeter/app/config"
@@ -55,6 +55,7 @@ import (
 	notificationhttpdriver "github.com/openmeterio/openmeter/openmeter/notification/httpdriver"
 	"github.com/openmeterio/openmeter/openmeter/portal"
 	portalhttphandler "github.com/openmeterio/openmeter/openmeter/portal/httphandler"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	addonhttpdriver "github.com/openmeterio/openmeter/openmeter/productcatalog/addon/httpdriver"
 	productcatalog_httpdriver "github.com/openmeterio/openmeter/openmeter/productcatalog/driver"
@@ -91,6 +92,7 @@ func jsonBodyDecoder(body io.Reader, header http.Header, schema *openapi3.Schema
 	if err := json.NewDecoder(body).Decode(&value); err != nil {
 		return nil, &openapi3filter.ParseError{Kind: openapi3filter.KindInvalidFormat, Cause: err}
 	}
+
 	return value, nil
 }
 
@@ -142,6 +144,7 @@ type Config struct {
 	SubscriptionWorkflowService subscriptionworkflow.Service
 	SubjectService              subject.Service
 	TaxCodeService              taxcode.Service
+	TaxCodeResolver             productcatalog.TransactionalTaxCodeResolver
 	FeatureGate                 *featuregate.FeatureGateChecker
 }
 
@@ -251,6 +254,10 @@ func (c Config) Validate() error {
 		return errors.New("tax code service is required")
 	}
 
+	if c.TaxCodeResolver == nil {
+		return errors.New("tax code resolver is required")
+	}
+
 	if err := c.FeatureGate.Validate(); err != nil {
 		return err
 	}
@@ -293,7 +300,7 @@ type Router struct {
 }
 
 // Make sure we conform to ServerInterface
-var _ api.ServerInterface = (*Router)(nil)
+var _ apiv1.ServerInterface = (*Router)(nil)
 
 func NewRouter(config Config) (*Router, error) {
 	if err := config.Validate(); err != nil {
@@ -377,6 +384,7 @@ func NewRouter(config Config) (*Router, error) {
 		config.NamespaceDecoder,
 		config.Notification,
 		config.Billing,
+		config.TaxCodeResolver,
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
 
@@ -423,6 +431,7 @@ func NewRouter(config Config) (*Router, error) {
 	router.appCustomInvoicingHandler = appcustominvoicinghttpdriver.New(
 		config.AppCustomInvoicing,
 		config.NamespaceDecoder,
+		config.TaxCodeResolver,
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
 
@@ -437,6 +446,7 @@ func NewRouter(config Config) (*Router, error) {
 		config.ChargeService,
 		config.Credits,
 		config.FeatureGate,
+		config.TaxCodeResolver,
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
 
@@ -448,18 +458,21 @@ func NewRouter(config Config) (*Router, error) {
 	router.planHandler = planhttpdriver.New(
 		config.NamespaceDecoder,
 		config.Plan,
+		config.TaxCodeResolver,
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
 
 	router.addonHandler = addonhttpdriver.New(
 		config.NamespaceDecoder,
 		config.Addon,
+		config.TaxCodeResolver,
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
 
 	router.planAddonHandler = planaddonhttpdriver.New(
 		config.NamespaceDecoder,
 		config.PlanAddon,
+		config.TaxCodeResolver,
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
 
@@ -489,6 +502,7 @@ func NewRouter(config Config) (*Router, error) {
 			CustomerService:             config.Customer,
 			Logger:                      config.Logger,
 			Credits:                     config.Credits,
+			TaxCodeResolver:             config.TaxCodeResolver,
 		},
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)
@@ -501,6 +515,7 @@ func NewRouter(config Config) (*Router, error) {
 			AddonService:                config.Addon,
 			NamespaceDecoder:            config.NamespaceDecoder,
 			Logger:                      config.Logger,
+			TaxCodeResolver:             config.TaxCodeResolver,
 		},
 		httptransport.WithErrorHandler(config.ErrorHandler),
 	)

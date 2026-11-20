@@ -1,0 +1,55 @@
+package events
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+
+	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
+	"github.com/openmeterio/openmeter/openmeter/notification"
+	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
+	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
+)
+
+type (
+	GetNotificationEventRequest  = notification.GetEventInput
+	GetNotificationEventResponse = apiv3models.BillingNotificationEvent
+	GetNotificationEventParams   = string
+	GetNotificationEventHandler  = httptransport.HandlerWithArgs[GetNotificationEventRequest, GetNotificationEventResponse, GetNotificationEventParams]
+)
+
+func (h *handler) GetNotificationEvent() GetNotificationEventHandler {
+	return httptransport.NewHandlerWithArgs(
+		func(ctx context.Context, r *http.Request, eventID GetNotificationEventParams) (GetNotificationEventRequest, error) {
+			ns, err := h.resolveNamespace(ctx)
+			if err != nil {
+				return GetNotificationEventRequest{}, err
+			}
+
+			return GetNotificationEventRequest{
+				Expand:    &notification.EventExpand{DeliveryStatus: true},
+				Namespace: ns,
+				ID:        eventID,
+			}, nil
+		},
+		func(ctx context.Context, req GetNotificationEventRequest) (GetNotificationEventResponse, error) {
+			event, err := h.service.GetEvent(ctx, req)
+			if err != nil {
+				return GetNotificationEventResponse{}, err
+			}
+
+			if event == nil {
+				return GetNotificationEventResponse{}, fmt.Errorf("failed to get notification event: nil event returned")
+			}
+
+			return ToAPIBillingNotificationEvent(*event)
+		},
+		commonhttp.JSONResponseEncoderWithStatus[GetNotificationEventResponse](http.StatusOK),
+		httptransport.AppendOptions(
+			h.options,
+			httptransport.WithOperationName("get-billing-notification-event"),
+			httptransport.WithErrorEncoder(apierrors.GenericErrorEncoder()),
+		)...,
+	)
+}

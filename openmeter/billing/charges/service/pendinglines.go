@@ -27,6 +27,7 @@ func (s *service) CreatePendingInvoiceLines(ctx context.Context, input charges.C
 	for i := range input.Lines {
 		input.Lines[i].Namespace = input.Customer.Namespace
 		input.Lines[i].Currency = input.Currency
+		input.Lines[i].RateCardDiscounts = input.Lines[i].RateCardDiscounts.UpsertCorrelationIDs()
 		if input.Lines[i].Engine == billing.LineEngineTypeInvoice {
 			input.Lines[i].Engine = ""
 		}
@@ -55,6 +56,7 @@ func (s *service) CreatePendingInvoiceLines(ctx context.Context, input charges.C
 		if err != nil {
 			return nil, err
 		}
+
 		if result == nil {
 			return nil, fmt.Errorf("create charges for pending invoice lines: result is nil")
 		}
@@ -66,6 +68,7 @@ func (s *service) CreatePendingInvoiceLines(ctx context.Context, input charges.C
 		if len(result.pendingLineResults) == 0 {
 			return nil, fmt.Errorf("create charges for pending invoice lines: no gathering lines were created")
 		}
+
 		if len(result.pendingLineResults) > 1 {
 			return nil, fmt.Errorf("create charges for pending invoice lines: expected one pending-line result, got %d", len(result.pendingLineResults))
 		}
@@ -78,6 +81,7 @@ func (s *service) CreatePendingInvoiceLines(ctx context.Context, input charges.C
 		if err != nil {
 			return nil, fmt.Errorf("validating pending line results: %w", err)
 		}
+
 		pendingLineResult.Lines = orderedLines
 
 		return pendingLineResult, nil
@@ -121,6 +125,7 @@ func mapPendingInvoiceLinesToChargeIntents(input charges.CreatePendingInvoiceLin
 	if err != nil {
 		return nil, fmt.Errorf("resolving fiat currency %q: %w", input.Currency, err)
 	}
+
 	resolvedCurrency := currencies.Currency{Currency: currency}
 
 	intents := make(charges.ChargeIntents, 0, len(input.Lines))
@@ -180,6 +185,11 @@ func mapPendingInvoiceLineToChargeIntent(customerID string, currency currencies.
 			SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
 		}), nil
 	default:
+		var unitConfig *productcatalog.UnitConfig
+		if line.UnitConfig != nil {
+			unitConfig = lo.ToPtr(line.UnitConfig.Clone())
+		}
+
 		return charges.NewChargeIntent(usagebased.Intent{
 			Intent:     baseIntent,
 			FeatureKey: line.FeatureKey,
@@ -188,6 +198,7 @@ func mapPendingInvoiceLineToChargeIntent(customerID string, currency currencies.
 				InvoiceAt:           line.InvoiceAt,
 				Price:               line.Price,
 				Discounts:           line.RateCardDiscounts.Clone(),
+				UnitConfig:          unitConfig,
 			},
 			SettlementMode: productcatalog.CreditThenInvoiceSettlementMode,
 		}), nil

@@ -212,6 +212,8 @@ func (s *service) List(ctx context.Context, input creditgrant.ListInput) (pagina
 		Page:        input.Page,
 		Namespace:   input.Namespace,
 		CustomerIDs: []string{input.CustomerID},
+		OrderBy:     input.OrderBy,
+		Order:       input.Order,
 		Expands:     meta.Expands{meta.ExpandRealizations},
 	}
 
@@ -246,6 +248,7 @@ func (s *service) List(ctx context.Context, input creditgrant.ListInput) (pagina
 	}
 
 	listInput.Key = input.Key
+	listInput.FeatureFilters = input.FeatureFilters
 
 	return s.creditPurchaseService.List(ctx, listInput)
 }
@@ -453,6 +456,7 @@ func toSettlement(input creditgrant.CreateInput) creditpurchase.Settlement {
 		settlement := creditpurchase.ExternalSettlement{
 			InitialStatus: initialStatus,
 		}
+
 		return creditpurchase.NewSettlement(settlement)
 
 	default: // FundingMethodNone → promotional

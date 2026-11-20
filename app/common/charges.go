@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/openmeterio/openmeter/app/config"
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges"
@@ -64,6 +66,7 @@ func NewChargesMetaAdapter(
 }
 
 func NewChargesCollectorService(
+	metricMeter metric.Meter,
 	logger *slog.Logger,
 	db *entdb.Client,
 	ledgerService ledger.Ledger,
@@ -74,6 +77,7 @@ func NewChargesCollectorService(
 	breakageService ledgerbreakage.Service,
 ) (ledgercollector.Service, error) {
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:   metricMeter,
 		Logger:  logger,
 		Advance: advanceService,
 		Ledger:  ledgerService,
@@ -435,6 +439,7 @@ func NewRecognizerService(
 // newChargesRegistry constructs the full charges stack.
 // Private: must be initialized via NewBillingRegistry.
 func newChargesRegistry(
+	metricMeter metric.Meter,
 	db *entdb.Client,
 	logger *slog.Logger,
 	locker *lockr.Locker,
@@ -479,6 +484,7 @@ func newChargesRegistry(
 
 	transactionManager := enttx.NewCreator(db)
 	collectorService, err := ledgercollector.NewService(ledgercollector.Config{
+		Meter:   metricMeter,
 		Logger:  logger,
 		Advance: advanceService,
 		Ledger:  ledgerService,
@@ -574,6 +580,7 @@ func newChargesRegistry(
 	if err := billingService.RegisterLineEngine(creditPurchaseSvc.GetLineEngine()); err != nil {
 		return nil, fmt.Errorf("failed to register charges credit purchase line engine: %w", err)
 	}
+
 	createLineRouter, err := chargeslinerouter.New(chargeslinerouter.Config{
 		CreditsEnabled:           creditsConfig.Enabled,
 		CreditThenInvoiceEnabled: creditsConfig.EnableCreditThenInvoice,

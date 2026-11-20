@@ -7,9 +7,9 @@ import (
 
 	"github.com/samber/lo"
 
-	apiv3 "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/filters"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/api/v3/response"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
@@ -21,8 +21,8 @@ import (
 
 type (
 	ListAddonsRequest  = addon.ListAddonsInput
-	ListAddonsResponse = response.PagePaginationResponse[apiv3.Addon]
-	ListAddonsParams   = apiv3.ListAddonsParams
+	ListAddonsResponse = response.PagePaginationResponse[apiv3models.Addon]
+	ListAddonsParams   = apiv3models.ListAddonsParams
 	ListAddonsHandler  httptransport.HandlerWithArgs[ListAddonsRequest, ListAddonsResponse, ListAddonsParams]
 )
 
@@ -60,6 +60,7 @@ func (h *handler) ListAddons() ListAddonsHandler {
 						{Field: "filter[id]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.ID = id
 
 				key, err := filters.FromAPIFilterString(params.Filter.Key)
@@ -68,6 +69,7 @@ func (h *handler) ListAddons() ListAddonsHandler {
 						{Field: "filter[key]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Key = key
 
 				name, err := filters.FromAPIFilterString(params.Filter.Name)
@@ -76,6 +78,7 @@ func (h *handler) ListAddons() ListAddonsHandler {
 						{Field: "filter[name]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Name = name
 
 				currency, err := filters.FromAPIFilterStringExact(params.Filter.Currency)
@@ -84,6 +87,7 @@ func (h *handler) ListAddons() ListAddonsHandler {
 						{Field: "filter[currency]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Currency = currency
 
 				status, err := filters.FromAPIStatusFilter[productcatalog.AddonStatus](ctx, params.Filter.Status)
@@ -92,6 +96,7 @@ func (h *handler) ListAddons() ListAddonsHandler {
 						{Field: "filter[status]", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				req.Status = status
 			}
 
@@ -102,10 +107,12 @@ func (h *handler) ListAddons() ListAddonsHandler {
 						{Field: "sort", Reason: err.Error(), Source: apierrors.InvalidParamSourceQuery},
 					})
 				}
+
 				orderBy, err := FromAPIAddonSortField(ctx, sort.Field)
 				if err != nil {
 					return ListAddonsRequest{}, err
 				}
+
 				req.OrderBy = orderBy
 				req.Order = sort.Order.ToSortxOrder()
 			}
@@ -118,12 +125,13 @@ func (h *handler) ListAddons() ListAddonsHandler {
 				return ListAddonsResponse{}, fmt.Errorf("failed to list add-ons: %w", err)
 			}
 
-			items := make([]apiv3.Addon, 0, len(resp.Items))
+			items := make([]apiv3models.Addon, 0, len(resp.Items))
 			for _, a := range resp.Items {
 				apiAddon, err := ToAPIAddon(a)
 				if err != nil {
 					return ListAddonsResponse{}, fmt.Errorf("failed to convert add-on: %w", err)
 				}
+
 				items = append(items, apiAddon)
 			}
 

@@ -2,32 +2,24 @@
 
 This package turns selected customer FBO credit into accrued value and, for
 custom-currency `credit_then_invoice` overage, fiat receivable coverage.
-Credit-only accrual asks [advance](../advance/README.md) to create an advance for
-an uncovered amount. Source order is preserved so correction and breakage can
-undo the same collected amounts.
+The [FBO service](../fbo/README.md) owns source selection, consumption, expiry
+release, and credit-only advance for an uncovered amount. The collector commits
+the complete group and maps each consumption's transactions to billing
+allocations. Source order is preserved so correction and breakage can undo the
+same collected amounts.
 
 ## Vocab
 
 - `BookedAt`: timestamp used for the ledger transactions being written.
-- `SourceBalanceAsOf`: timestamp used to decide which FBO sources are available.
-- `source`: one spendable FBO slice selected by the collector.
+- `source`: one eligible FBO slice selected by the FBO service.
 - `source entry`: the concrete negative FBO ledger entry created by collection.
 - `allocation`: billing's collapsed record of collected credit.
 - `advance`: value moved through FBO/accrued before real credit exists to cover it.
 
-`BookedAt` and `SourceBalanceAsOf` are intentionally separate.
-
-Example:
-
-```text
-charge allocates at T1
-source balance is checked at T5
-
-BookedAt = T1
-SourceBalanceAsOf = T5
-```
-
-The transaction is booked at `T1`, but source selection can see credit and expiry state visible as of `T5`.
+Credit eligibility and consumption use the same `BookedAt`. Invoice scheduling
+and the time collection runs do not change which credits can fund that posting.
+Spendable balances also preserve credit already allocated to later postings, so
+backdating collection cannot spend it again.
 
 ## Collection Order
 
@@ -42,7 +34,8 @@ stable cursor asc
 
 Non-expiring credit sorts after expiring credit with the same priority.
 
-This order must match breakage release order. If the collector consumes an expiring source, it also asks breakage to release the matching planned breakage for that same source.
+This order must match breakage release order. Consuming an expiring source also
+releases the matching planned breakage for that source.
 
 ## Forward Collection Example
 

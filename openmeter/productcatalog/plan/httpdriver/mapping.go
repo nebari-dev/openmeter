@@ -1,24 +1,28 @@
 package httpdriver
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/http"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
+	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
-func FromPlan(p plan.Plan) (api.Plan, error) {
+// FromPlan maps a plan to its v1 shape. taxCodes must hold every Tax Code the plan's rate cards
+// reference: a missing entry is an error.
+func FromPlan(p plan.Plan, taxCodes map[string]*taxcode.TaxCode) (apiv1models.Plan, error) {
 	validationIssues, _ := p.AsProductCatalogPlan().ValidationErrors()
 
-	resp := api.Plan{
+	resp := apiv1models.Plan{
 		CreatedAt:        p.CreatedAt,
 		Currency:         p.Currency.GetCode().String(),
 		DeletedAt:        p.DeletedAt,
@@ -27,19 +31,19 @@ func FromPlan(p plan.Plan) (api.Plan, error) {
 		EffectiveTo:      p.EffectiveTo,
 		Id:               p.ID,
 		Key:              p.Key,
-		Metadata:         lo.EmptyableToPtr(api.Metadata(p.Metadata)),
+		Metadata:         lo.EmptyableToPtr(apiv1models.Metadata(p.Metadata)),
 		Name:             p.Name,
 		UpdatedAt:        p.UpdatedAt,
 		Version:          p.Version,
 		BillingCadence:   p.BillingCadence.String(),
 		ProRatingConfig:  fromProRatingConfig(p.ProRatingConfig),
-		SettlementMode:   lo.ToPtr(api.BillingSettlementMode(p.SettlementMode)),
+		SettlementMode:   lo.ToPtr(apiv1models.BillingSettlementMode(p.SettlementMode)),
 		ValidationErrors: http.FromValidationErrors(validationIssues),
 	}
 
-	resp.Phases = make([]api.PlanPhase, 0, len(p.Phases))
+	resp.Phases = make([]apiv1models.PlanPhase, 0, len(p.Phases))
 	for _, phase := range p.Phases {
-		planPhase, err := FromPlanPhase(phase)
+		planPhase, err := FromPlanPhase(phase, taxCodes)
 		if err != nil {
 			return resp, fmt.Errorf("failed to cast Plan: %w", err)
 		}
@@ -47,16 +51,16 @@ func FromPlan(p plan.Plan) (api.Plan, error) {
 		resp.Phases = append(resp.Phases, planPhase)
 	}
 
-	var status api.PlanStatus
+	var status apiv1models.PlanStatus
 	switch p.Status() {
 	case productcatalog.PlanStatusDraft:
-		status = api.PlanStatusDraft
+		status = apiv1models.PlanStatusDraft
 	case productcatalog.PlanStatusActive:
-		status = api.PlanStatusActive
+		status = apiv1models.PlanStatusActive
 	case productcatalog.PlanStatusArchived:
-		status = api.PlanStatusArchived
+		status = apiv1models.PlanStatusArchived
 	case productcatalog.PlanStatusScheduled:
-		status = api.PlanStatusScheduled
+		status = apiv1models.PlanStatusScheduled
 	default:
 		return resp, fmt.Errorf("invalid PlanStatus: %s", p.Status())
 	}
@@ -66,8 +70,8 @@ func FromPlan(p plan.Plan) (api.Plan, error) {
 	return resp, nil
 }
 
-func FromPlanPhase(p plan.Phase) (api.PlanPhase, error) {
-	resp := api.PlanPhase{
+func FromPlanPhase(p plan.Phase, taxCodes map[string]*taxcode.TaxCode) (apiv1models.PlanPhase, error) {
+	resp := apiv1models.PlanPhase{
 		Description: p.Description,
 		Key:         p.Key,
 		Metadata:    http.FromMetadata(p.Metadata),
@@ -75,9 +79,9 @@ func FromPlanPhase(p plan.Phase) (api.PlanPhase, error) {
 		Duration:    (*string)(p.Duration.ISOStringPtrOrNil()),
 	}
 
-	resp.RateCards = make([]api.RateCard, 0, len(p.RateCards))
+	resp.RateCards = make([]apiv1models.RateCard, 0, len(p.RateCards))
 	for _, rateCard := range p.RateCards {
-		rc, err := http.FromRateCard(rateCard)
+		rc, err := http.FromRateCard(rateCard, taxCodes)
 		if err != nil {
 			return resp, fmt.Errorf("failed to cast RateCard: %w", err)
 		}
@@ -88,7 +92,7 @@ func FromPlanPhase(p plan.Phase) (api.PlanPhase, error) {
 	return resp, nil
 }
 
-func AsCreatePlanRequest(a api.PlanCreate, namespace string) (CreatePlanRequest, error) {
+func AsCreatePlanRequest(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver, a apiv1models.PlanCreate, namespace string) (CreatePlanRequest, error) {
 	var err error
 
 	req := CreatePlanRequest{
@@ -112,6 +116,7 @@ func AsCreatePlanRequest(a api.PlanCreate, namespace string) (CreatePlanRequest,
 	if err = currencyCode.Validate(); err != nil {
 		return req, fmt.Errorf("invalid CurrencyCode: %w", err)
 	}
+
 	req.Currency = currencies.NewCurrencyReference(currencyx.Code(currencyCode))
 
 	req.PlanMeta.BillingCadence, err = datetime.ISODurationString(a.BillingCadence).Parse()
@@ -123,7 +128,7 @@ func AsCreatePlanRequest(a api.PlanCreate, namespace string) (CreatePlanRequest,
 		req.Phases = make([]productcatalog.Phase, 0, len(a.Phases))
 
 		for _, phase := range a.Phases {
-			planPhase, err := AsPlanPhase(phase)
+			planPhase, err := AsPlanPhase(ctx, resolver, namespace, phase)
 			if err != nil {
 				return req, fmt.Errorf("failed to cast PlanPhase: %w", err)
 			}
@@ -136,15 +141,15 @@ func AsCreatePlanRequest(a api.PlanCreate, namespace string) (CreatePlanRequest,
 }
 
 // fromProRatingConfig converts domain ProRatingConfig to API ProRatingConfig
-func fromProRatingConfig(p productcatalog.ProRatingConfig) *api.ProRatingConfig {
-	return &api.ProRatingConfig{
+func fromProRatingConfig(p productcatalog.ProRatingConfig) *apiv1models.ProRatingConfig {
+	return &apiv1models.ProRatingConfig{
 		Enabled: p.Enabled,
-		Mode:    api.ProRatingMode(p.Mode),
+		Mode:    apiv1models.ProRatingMode(p.Mode),
 	}
 }
 
 // asProRatingConfig converts API ProRatingConfig to domain ProRatingConfig
-func asProRatingConfig(p *api.ProRatingConfig) productcatalog.ProRatingConfig {
+func asProRatingConfig(p *apiv1models.ProRatingConfig) productcatalog.ProRatingConfig {
 	if p == nil {
 		// Return default configuration when not provided
 		return productcatalog.ProRatingConfig{
@@ -159,7 +164,7 @@ func asProRatingConfig(p *api.ProRatingConfig) productcatalog.ProRatingConfig {
 	}
 }
 
-func AsPlanPhase(a api.PlanPhase) (productcatalog.Phase, error) {
+func AsPlanPhase(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver, namespace string, a apiv1models.PlanPhase) (productcatalog.Phase, error) {
 	var err error
 
 	phase := productcatalog.Phase{
@@ -176,7 +181,7 @@ func AsPlanPhase(a api.PlanPhase) (productcatalog.Phase, error) {
 		return phase, models.NewGenericValidationError(fmt.Errorf("invalid duration: failed to cast to period: %w", err))
 	}
 
-	phase.RateCards, err = http.AsRateCards(a.RateCards)
+	phase.RateCards, err = http.AsRateCards(ctx, resolver, namespace, a.RateCards)
 	if err != nil {
 		return phase, err
 	}
@@ -184,7 +189,7 @@ func AsPlanPhase(a api.PlanPhase) (productcatalog.Phase, error) {
 	return phase, nil
 }
 
-func AsUpdatePlanRequest(a api.PlanReplaceUpdate, namespace string, planID string) (UpdatePlanRequest, error) {
+func AsUpdatePlanRequest(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver, a apiv1models.PlanReplaceUpdate, namespace string, planID string) (UpdatePlanRequest, error) {
 	req := UpdatePlanRequest{
 		NamespacedID: models.NamespacedID{
 			Namespace: namespace,
@@ -211,13 +216,14 @@ func AsUpdatePlanRequest(a api.PlanReplaceUpdate, namespace string, planID strin
 
 	phases := make([]productcatalog.Phase, 0, len(a.Phases))
 	for _, phase := range a.Phases {
-		planPhase, err := AsPlanPhase(phase)
+		planPhase, err := AsPlanPhase(ctx, resolver, namespace, phase)
 		if err != nil {
 			return req, fmt.Errorf("failed to cast Plan Phase from HTTP update request: %w", err)
 		}
 
 		phases = append(phases, planPhase)
 	}
+
 	req.Phases = &phases
 
 	return req, nil

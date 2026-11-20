@@ -14,7 +14,9 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	"github.com/openmeterio/openmeter/openmeter/notification"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	"github.com/openmeterio/openmeter/openmeter/streaming"
 	"github.com/openmeterio/openmeter/openmeter/watermill/driver/kafka"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
@@ -236,9 +238,45 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		cleanup()
 		return Application{}, nil, err
 	}
+	taxcodeRepository, err := common.NewTaxCodeAdapter(logger, client)
+	if err != nil {
+		cleanup8()
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return Application{}, nil, err
+	}
+	taxcodeService, err := common.NewTaxCodeService(logger, taxcodeRepository)
+	if err != nil {
+		cleanup8()
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return Application{}, nil, err
+	}
+	taxCodeResolver, err := taxcoderesolver.New(taxcodeService)
+	if err != nil {
+		cleanup8()
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return Application{}, nil, err
+	}
 	health := common.NewHealthChecker(logger)
 	telemetryHandler := common.NewTelemetryHandler(metricsTelemetryConfig, health, logger)
-	v5, cleanup9 := common.NewTelemetryServer(telemetryConfig, telemetryHandler)
+	telemetryServer, cleanup9 := common.NewTelemetryServer(telemetryConfig, telemetryHandler)
 	application := Application{
 		GlobalInitializer:       globalInitializer,
 		Migrator:                migrator,
@@ -255,7 +293,8 @@ func initializeApplication(ctx context.Context, conf config.Configuration) (Appl
 		Notification:            notificationService,
 		RuntimeMetricsCollector: runtimeMetricsCollector,
 		StreamingConnector:      connector,
-		TelemetryServer:         v5,
+		TaxCodeResolver:         taxCodeResolver,
+		TelemetryServer:         telemetryServer,
 	}
 	return application, func() {
 		cleanup9()
@@ -289,6 +328,7 @@ type Application struct {
 	Notification            notification.Service
 	RuntimeMetricsCollector common.RuntimeMetricsCollector
 	StreamingConnector      streaming.Connector
+	TaxCodeResolver         productcatalog.TaxCodeResolver
 	TelemetryServer         common.TelemetryServer
 }
 

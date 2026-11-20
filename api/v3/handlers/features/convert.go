@@ -8,9 +8,9 @@ import (
 	"github.com/oapi-codegen/nullable"
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/labels"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/api/v3/request"
 	"github.com/openmeterio/openmeter/openmeter/llmcost"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
@@ -36,8 +36,8 @@ func FromAPIFeatureSortField(ctx context.Context, field string) (feature.Feature
 
 // ConvertFeatureToAPI maps a domain feature to its API representation. It is
 // exported for handler packages that embed full features behind an expand.
-func ConvertFeatureToAPI(f feature.Feature) (api.Feature, error) {
-	resp := api.Feature{
+func ConvertFeatureToAPI(f feature.Feature) (apiv3models.Feature, error) {
+	resp := apiv3models.Feature{
 		Id:          f.ID,
 		Key:         f.Key,
 		Name:        f.Name,
@@ -49,7 +49,7 @@ func ConvertFeatureToAPI(f feature.Feature) (api.Feature, error) {
 	}
 
 	if f.MeterID != nil {
-		resp.Meter = &api.FeatureMeterReference{
+		resp.Meter = &apiv3models.FeatureMeterReference{
 			Id: *f.MeterID,
 		}
 
@@ -62,15 +62,16 @@ func ConvertFeatureToAPI(f feature.Feature) (api.Feature, error) {
 	if f.UnitCost != nil {
 		apiUnitCost, err := convertUnitCostToAPI(f.UnitCost)
 		if err != nil {
-			return api.Feature{}, fmt.Errorf("failed to convert unit cost: %w", err)
+			return apiv3models.Feature{}, fmt.Errorf("failed to convert unit cost: %w", err)
 		}
+
 		resp.UnitCost = &apiUnitCost
 	}
 
 	return resp, nil
 }
 
-func convertCreateRequestToDomain(ns string, body api.CreateFeatureRequest, meterID *string) (feature.CreateFeatureInputs, error) {
+func convertCreateRequestToDomain(ns string, body apiv3models.CreateFeatureRequest, meterID *string) (feature.CreateFeatureInputs, error) {
 	metadata, err := labels.ToMetadata(body.Labels)
 	if err != nil {
 		return feature.CreateFeatureInputs{}, fmt.Errorf("failed to convert labels: %w", err)
@@ -96,13 +97,14 @@ func convertCreateRequestToDomain(ns string, body api.CreateFeatureRequest, mete
 		if err != nil {
 			return feature.CreateFeatureInputs{}, fmt.Errorf("invalid unit cost: %w", err)
 		}
+
 		inputs.UnitCost = unitCost
 	}
 
 	return inputs, nil
 }
 
-func convertUpdateRequestToDomain(ns string, featureID string, body api.UpdateFeatureRequest) (feature.UpdateFeatureInputs, error) {
+func convertUpdateRequestToDomain(ns string, featureID string, body apiv3models.UpdateFeatureRequest) (feature.UpdateFeatureInputs, error) {
 	input := feature.UpdateFeatureInputs{
 		Namespace: ns,
 		ID:        featureID,
@@ -115,46 +117,54 @@ func convertUpdateRequestToDomain(ns string, featureID string, body api.UpdateFe
 		if err != nil {
 			return feature.UpdateFeatureInputs{}, fmt.Errorf("invalid unit cost: %w", err)
 		}
+
 		unitCost, err := convertUnitCostFromAPI(&v)
 		if err != nil {
 			return feature.UpdateFeatureInputs{}, fmt.Errorf("invalid unit cost: %w", err)
 		}
+
 		input.UnitCost = nullable.NewNullableWithValue(*unitCost)
 	}
 
 	return input, nil
 }
 
-func convertUnitCostToAPI(u *feature.UnitCost) (api.BillingFeatureUnitCost, error) {
-	var out api.BillingFeatureUnitCost
+func convertUnitCostToAPI(u *feature.UnitCost) (apiv3models.BillingFeatureUnitCost, error) {
+	var out apiv3models.BillingFeatureUnitCost
 
 	switch u.Type {
 	case feature.UnitCostTypeManual:
-		if err := out.FromBillingFeatureManualUnitCost(api.BillingFeatureManualUnitCost{
+		if err := out.FromBillingFeatureManualUnitCost(apiv3models.BillingFeatureManualUnitCost{
 			Amount: u.Manual.Amount.String(),
 		}); err != nil {
 			return out, fmt.Errorf("failed to convert manual unit cost: %w", err)
 		}
 	case feature.UnitCostTypeLLM:
-		llmCost := api.BillingFeatureLLMUnitCost{}
+		llmCost := apiv3models.BillingFeatureLLMUnitCost{}
 		if u.LLM.ProviderProperty != "" {
 			llmCost.ProviderProperty = lo.ToPtr(u.LLM.ProviderProperty)
 		}
+
 		if u.LLM.Provider != "" {
 			llmCost.Provider = lo.ToPtr(u.LLM.Provider)
 		}
+
 		if u.LLM.ModelProperty != "" {
 			llmCost.ModelProperty = lo.ToPtr(u.LLM.ModelProperty)
 		}
+
 		if u.LLM.Model != "" {
 			llmCost.Model = lo.ToPtr(u.LLM.Model)
 		}
+
 		if u.LLM.TokenTypeProperty != "" {
 			llmCost.TokenTypeProperty = lo.ToPtr(u.LLM.TokenTypeProperty)
 		}
+
 		if u.LLM.TokenType != "" {
-			llmCost.TokenType = lo.ToPtr(api.BillingFeatureLLMTokenType(u.LLM.TokenType))
+			llmCost.TokenType = lo.ToPtr(apiv3models.BillingFeatureLLMTokenType(u.LLM.TokenType))
 		}
+
 		if err := out.FromBillingFeatureLLMUnitCost(llmCost); err != nil {
 			return out, fmt.Errorf("failed to convert LLM unit cost: %w", err)
 		}
@@ -165,7 +175,7 @@ func convertUnitCostToAPI(u *feature.UnitCost) (api.BillingFeatureUnitCost, erro
 	return out, nil
 }
 
-func convertUnitCostFromAPI(u *api.BillingFeatureUnitCost) (*feature.UnitCost, error) {
+func convertUnitCostFromAPI(u *apiv3models.BillingFeatureUnitCost) (*feature.UnitCost, error) {
 	discriminator, err := u.Discriminator()
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine unit cost type: %w", err)
@@ -211,7 +221,7 @@ func convertUnitCostFromAPI(u *api.BillingFeatureUnitCost) (*feature.UnitCost, e
 	}
 }
 
-func enrichFeatureResponseWithPricing(resp *api.Feature, pricing *llmcost.ModelPricing) {
+func enrichFeatureResponseWithPricing(resp *apiv3models.Feature, pricing *llmcost.ModelPricing) {
 	if resp.UnitCost == nil || pricing == nil {
 		return
 	}
@@ -226,7 +236,7 @@ func enrichFeatureResponseWithPricing(resp *api.Feature, pricing *llmcost.ModelP
 		return
 	}
 
-	apiPricing := api.BillingFeatureLLMUnitCostPricing{
+	apiPricing := apiv3models.BillingFeatureLLMUnitCostPricing{
 		InputPerToken:  pricing.InputPerToken.String(),
 		OutputPerToken: pricing.OutputPerToken.String(),
 	}
@@ -262,6 +272,7 @@ func resolveLLMPricing(ctx context.Context, svc llmcost.Service, feat *feature.F
 	if provider == "" {
 		provider = extractEqFilterValue(feat.MeterGroupByFilters, llmConf.ProviderProperty)
 	}
+
 	if provider == "" {
 		return nil
 	}
@@ -270,6 +281,7 @@ func resolveLLMPricing(ctx context.Context, svc llmcost.Service, feat *feature.F
 	if model == "" {
 		model = extractEqFilterValue(feat.MeterGroupByFilters, llmConf.ModelProperty)
 	}
+
 	if model == "" {
 		return nil
 	}
@@ -299,24 +311,26 @@ func extractEqFilterValue(filters feature.MeterGroupByFilters, key string) strin
 	return *f.Eq
 }
 
-func convertFiltersFromAPI(apiFilters map[string]api.QueryFilterStringMapItem) feature.MeterGroupByFilters {
+func convertFiltersFromAPI(apiFilters map[string]apiv3models.QueryFilterStringMapItem) feature.MeterGroupByFilters {
 	result := make(feature.MeterGroupByFilters, len(apiFilters))
 	for k, v := range apiFilters {
 		result[k] = request.ConvertQueryFilterStringMapItem(v)
 	}
+
 	return result
 }
 
-func convertFiltersToAPI(filters feature.MeterGroupByFilters) map[string]api.QueryFilterStringMapItem {
-	result := make(map[string]api.QueryFilterStringMapItem, len(filters))
+func convertFiltersToAPI(filters feature.MeterGroupByFilters) map[string]apiv3models.QueryFilterStringMapItem {
+	result := make(map[string]apiv3models.QueryFilterStringMapItem, len(filters))
 	for k, v := range filters {
 		result[k] = convertFilterStringToAPIMapItem(v)
 	}
+
 	return result
 }
 
-func convertFilterStringToAPIMapItem(f filter.FilterString) api.QueryFilterStringMapItem {
-	return api.QueryFilterStringMapItem{
+func convertFilterStringToAPIMapItem(f filter.FilterString) apiv3models.QueryFilterStringMapItem {
+	return apiv3models.QueryFilterStringMapItem{
 		Exists:    f.Exists,
 		Eq:        f.Eq,
 		Neq:       f.Ne,
@@ -329,19 +343,21 @@ func convertFilterStringToAPIMapItem(f filter.FilterString) api.QueryFilterStrin
 	}
 }
 
-func convertFilterStringListToAPI(filters *[]filter.FilterString) *[]api.QueryFilterString {
+func convertFilterStringListToAPI(filters *[]filter.FilterString) *[]apiv3models.QueryFilterString {
 	if filters == nil {
 		return nil
 	}
-	result := make([]api.QueryFilterString, len(*filters))
+
+	result := make([]apiv3models.QueryFilterString, len(*filters))
 	for i, f := range *filters {
 		result[i] = convertFilterStringToAPIQueryFilter(f)
 	}
+
 	return &result
 }
 
-func convertFilterStringToAPIQueryFilter(f filter.FilterString) api.QueryFilterString {
-	return api.QueryFilterString{
+func convertFilterStringToAPIQueryFilter(f filter.FilterString) apiv3models.QueryFilterString {
+	return apiv3models.QueryFilterString{
 		Eq:        f.Eq,
 		Neq:       f.Ne,
 		In:        f.In,

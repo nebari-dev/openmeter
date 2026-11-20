@@ -21,6 +21,10 @@ type exampleEntryInput struct {
 	amount  alpacadecimal.Decimal
 }
 
+func (exampleEntryInput) AssignedID() string {
+	return ""
+}
+
 func (e exampleEntryInput) PostingAddress() ledger.PostingAddress {
 	return e.account
 }
@@ -109,6 +113,7 @@ func TestMultiAccountTransaction(t *testing.T) {
 			}
 		}
 	}
+
 	require.True(t, found, "expected validation issue not found, got %v", err)
 }
 

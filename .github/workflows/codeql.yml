@@ -35,18 +35,28 @@ on:
     - cron: "32 3 * * 0"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  security-events: write
-  packages: read
+permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR runs must not cancel each other in GitHub's unordered concurrency queue.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  cancel-older-runs:
+    # Fork and Dependabot tokens cannot cancel runs in this repository.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+      actions: write # Required by the cancellation job; other jobs retain their own permissions.
+    uses: $/.github/workflows/cancel-stale-pr-runs.yaml
+
   analyze:
     name: Analyze (${{ matrix.language }})
+    permissions:
+      contents: read
+      security-events: write # Required to upload CodeQL results.
+      packages: read # Required for private CodeQL packs.
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
@@ -57,7 +67,7 @@ jobs:
         language: [actions, javascript-typescript, python]
 
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           use-policy-store: ${{ secrets.STEP_SECURITY_API_KEY != '' }}
@@ -69,12 +79,12 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: ${{ matrix.language }}
           build-mode: none
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           category: "/language:${{ matrix.language }}"

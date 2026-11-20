@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/credit"
 	"github.com/openmeterio/openmeter/openmeter/credit/grant"
 	"github.com/openmeterio/openmeter/openmeter/customer"
@@ -59,9 +59,9 @@ type (
 	ListGrantsHandlerRequest struct {
 		params grant.ListParams
 	}
-	ListGrantsHandlerResponse = commonhttp.Union[[]api.EntitlementGrant, pagination.Result[api.EntitlementGrant]]
+	ListGrantsHandlerResponse = commonhttp.Union[[]apiv1models.EntitlementGrant, pagination.Result[apiv1models.EntitlementGrant]]
 	ListGrantsHandlerParams   struct {
-		Params api.ListGrantsParams
+		Params apiv1models.ListGrantsParams
 	}
 )
 type ListGrantsHandler httptransport.HandlerWithArgs[ListGrantsHandlerRequest, ListGrantsHandlerResponse, ListGrantsHandlerParams]
@@ -81,7 +81,7 @@ func (h *grantHandler) ListGrants() ListGrantsHandler {
 				}
 			}
 
-			return ListGrantsHandlerRequest{
+			req := ListGrantsHandlerRequest{
 				params: grant.ListParams{
 					Namespace:      ns,
 					IncludeDeleted: defaultx.WithDefault(params.Params.IncludeDeleted, false),
@@ -94,29 +94,40 @@ func (h *grantHandler) ListGrants() ListGrantsHandler {
 					OrderBy: grant.OrderBy(
 						strcase.CamelToSnake(defaultx.WithDefault((*string)(params.Params.OrderBy), string(grant.OrderByEffectiveAt))),
 					),
-					Order:            commonhttp.GetSortOrder(api.SortOrderASC, params.Params.Order),
+					Order:            commonhttp.GetSortOrder(apiv1models.SortOrderASC, params.Params.Order),
 					SubjectKeys:      convert.DerefHeaderPtr[string](params.Params.Subject),
 					FeatureIdsOrKeys: convert.DerefHeaderPtr[string](params.Params.Feature),
 				},
-			}, nil
+			}
+
+			// Without either page parameter, the response stays a plain array. With only
+			// one of them, default the other one: a page number of 0 would give the
+			// database a negative offset.
+			if !req.params.Page.IsZero() {
+				req.params.Page.PageNumber = defaultx.IfZero(req.params.Page.PageNumber, commonhttp.DefaultPage)
+				req.params.Page.PageSize = defaultx.IfZero(req.params.Page.PageSize, commonhttp.DefaultPageSize)
+			}
+
+			return req, nil
 		},
 		func(ctx context.Context, request ListGrantsHandlerRequest) (ListGrantsHandlerResponse, error) {
 			// due to backward compatibility, if pagination is not provided we return a simple array
 			response := ListGrantsHandlerResponse{
-				Option1: &[]api.EntitlementGrant{},
-				Option2: &pagination.Result[api.EntitlementGrant]{},
+				Option1: &[]apiv1models.EntitlementGrant{},
+				Option2: &pagination.Result[apiv1models.EntitlementGrant]{},
 			}
 			grants, err := h.grantRepo.ListGrants(ctx, request.params)
 			if err != nil {
 				return response, err
 			}
 
-			apiGrants := make([]api.EntitlementGrant, 0, len(grants.Items))
+			apiGrants := make([]apiv1models.EntitlementGrant, 0, len(grants.Items))
 			for _, grant := range grants.Items {
 				entitlementGrant, err := meteredentitlement.GrantFromCreditGrant(grant, clock.Now())
 				if err != nil {
 					return response, err
 				}
+
 				// FIXME: not elegant but good for now, entitlement grants are all we have...
 				apiGrant := entitlement_httpdriver.MapEntitlementGrantToAPI(entitlementGrant)
 
@@ -127,7 +138,7 @@ func (h *grantHandler) ListGrants() ListGrantsHandler {
 				response.Option1 = &apiGrants
 			} else {
 				response.Option1 = nil
-				response.Option2 = &pagination.Result[api.EntitlementGrant]{
+				response.Option2 = &pagination.Result[apiv1models.EntitlementGrant]{
 					Items:      apiGrants,
 					TotalCount: grants.TotalCount,
 					Page:       grants.Page,
@@ -145,8 +156,10 @@ func (h *grantHandler) ListGrants() ListGrantsHandler {
 						http.StatusBadRequest,
 						err,
 					).EncodeError(ctx, w)
+
 					return true
 				}
+
 				return commonhttp.HandleErrorIfTypeMatches[*pagination.InvalidError](ctx, http.StatusBadRequest, err, w)
 			}),
 		)...,
@@ -161,7 +174,7 @@ type (
 	VoidGrantHandlerResponse = interface{}
 	VoidGrantHandlerParams   struct {
 		ID     string
-		Params api.VoidGrantParams
+		Params apiv1models.VoidGrantParams
 	}
 )
 type VoidGrantHandler httptransport.HandlerWithArgs[VoidGrantHandlerRequest, VoidGrantHandlerResponse, VoidGrantHandlerParams]
@@ -199,15 +212,19 @@ func (h *grantHandler) VoidGrant() VoidGrantHandler {
 						http.StatusBadRequest,
 						err,
 					).EncodeError(ctx, w)
+
 					return true
 				}
+
 				if _, ok := err.(*credit.GrantNotFoundError); ok {
 					commonhttp.NewHTTPError(
 						http.StatusNotFound,
 						err,
 					).EncodeError(ctx, w)
+
 					return true
 				}
+
 				return false
 			}),
 		)...,
@@ -228,9 +245,9 @@ type (
 	ListGrantsV2HandlerRequest struct {
 		params grant.ListParams
 	}
-	ListGrantsV2HandlerResponse = api.GrantV2PaginatedResponse
+	ListGrantsV2HandlerResponse = apiv1models.GrantV2PaginatedResponse
 	ListGrantsV2HandlerParams   struct {
-		Params api.ListGrantsV2Params
+		Params apiv1models.ListGrantsV2Params
 	}
 )
 type ListGrantsV2Handler httptransport.HandlerWithArgs[ListGrantsV2HandlerRequest, ListGrantsV2HandlerResponse, ListGrantsV2HandlerParams]
@@ -269,7 +286,7 @@ func (h *grantHandler) ListGrantsV2() ListGrantsV2Handler {
 			req := grant.ListParams{
 				Namespace:        ns,
 				IncludeDeleted:   defaultx.WithDefault(p.Params.IncludeDeleted, false),
-				Order:            commonhttp.GetSortOrder(api.SortOrderASC, p.Params.Order),
+				Order:            commonhttp.GetSortOrder(apiv1models.SortOrderASC, p.Params.Order),
 				OrderBy:          grant.OrderBy(strcase.CamelToSnake(defaultx.WithDefault((*string)(p.Params.OrderBy), string(grant.OrderByEffectiveAt)))),
 				FeatureIdsOrKeys: convert.DerefHeaderPtr[string](p.Params.Feature),
 				CustomerIDs:      customerIDs,
@@ -292,17 +309,18 @@ func (h *grantHandler) ListGrantsV2() ListGrantsV2Handler {
 				return ListGrantsV2HandlerResponse{}, err
 			}
 
-			apiGrants := make([]api.EntitlementGrantV2, 0, len(grants.Items))
+			apiGrants := make([]apiv1models.EntitlementGrantV2, 0, len(grants.Items))
 			for _, g := range grants.Items {
 				entitlementGrant, err := meteredentitlement.GrantFromCreditGrant(g, clock.Now())
 				if err != nil {
 					return ListGrantsV2HandlerResponse{}, err
 				}
+
 				a := entitlement_httpdriverv2.MapEntitlementGrantToAPIV2(entitlementGrant)
 				apiGrants = append(apiGrants, a)
 			}
 
-			return api.GrantV2PaginatedResponse{
+			return apiv1models.GrantV2PaginatedResponse{
 				Items:      apiGrants,
 				TotalCount: grants.TotalCount,
 				Page:       grants.Page.PageNumber,
@@ -318,8 +336,10 @@ func (h *grantHandler) ListGrantsV2() ListGrantsV2Handler {
 						http.StatusBadRequest,
 						err,
 					).EncodeError(ctx, w)
+
 					return true
 				}
+
 				return commonhttp.HandleErrorIfTypeMatches[*pagination.InvalidError](ctx, http.StatusBadRequest, err, w)
 			}),
 		)...,

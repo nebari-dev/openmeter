@@ -27,6 +27,7 @@ import (
 	entitlementservice "github.com/openmeterio/openmeter/openmeter/entitlement/service"
 	staticentitlement "github.com/openmeterio/openmeter/openmeter/entitlement/static"
 	meteradapter "github.com/openmeterio/openmeter/openmeter/meter/mockadapter"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	addonrepo "github.com/openmeterio/openmeter/openmeter/productcatalog/addon/adapter"
 	addonservice "github.com/openmeterio/openmeter/openmeter/productcatalog/addon/service"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/feature"
@@ -34,9 +35,11 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/plan"
 	planadapter "github.com/openmeterio/openmeter/openmeter/productcatalog/plan/adapter"
 	planservice "github.com/openmeterio/openmeter/openmeter/productcatalog/plan/service"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon"
 	planaddonrepo "github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon/adapter"
 	planaddonservice "github.com/openmeterio/openmeter/openmeter/productcatalog/planaddon/service"
 	subscriptiontestutils "github.com/openmeterio/openmeter/openmeter/productcatalog/subscription/testutils"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog/taxcoderesolver"
 	streamingtestutils "github.com/openmeterio/openmeter/openmeter/streaming/testutils"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	subscriptionaddon "github.com/openmeterio/openmeter/openmeter/subscription/addon"
@@ -47,16 +50,18 @@ import (
 	subscriptionservice "github.com/openmeterio/openmeter/openmeter/subscription/service"
 	subscriptionworkflow "github.com/openmeterio/openmeter/openmeter/subscription/workflow"
 	subscriptionworkflowservice "github.com/openmeterio/openmeter/openmeter/subscription/workflow/service"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
-	taxcodeservice "github.com/openmeterio/openmeter/openmeter/taxcode/service"
+	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/openmeter/watermill/eventbus"
 	"github.com/openmeterio/openmeter/pkg/datetime"
+	"github.com/openmeterio/openmeter/pkg/featuregate"
 	"github.com/openmeterio/openmeter/pkg/ffx"
 	"github.com/openmeterio/openmeter/pkg/framework/lockr"
 )
 
 type SubscriptionMixin struct {
 	PlanService                 plan.Service
+	AddonService                addon.Service
+	PlanAddonService            planaddon.Service
 	SubscriptionService         subscription.Service
 	SubscriptionAddonService    subscriptionaddon.Service
 	SubscriptionPlanAdapter     subscriptiontestutils.PlanSubscriptionAdapter
@@ -70,6 +75,7 @@ type SubscriptionMixInDependencies struct {
 	FeatureRepo     feature.FeatureRepo
 	FeatureService  feature.FeatureConnector
 	CustomerService customer.Service
+	TaxCodeService  taxcode.Service
 
 	MeterAdapter           *meteradapter.TestAdapter
 	MockStreamingConnector *streamingtestutils.MockStreamingConnector
@@ -90,6 +96,10 @@ func (d SubscriptionMixInDependencies) Validate() error {
 
 	if d.CustomerService == nil {
 		return errors.New("CustomerService is required")
+	}
+
+	if d.TaxCodeService == nil {
+		return errors.New("TaxCodeService is required")
 	}
 
 	if d.MeterAdapter == nil {
@@ -117,18 +127,6 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 	})
 	require.NoError(t, err)
 
-	taxCodeAdapter, err := taxcodeadapter.New(taxcodeadapter.Config{
-		Client: deps.DBClient,
-		Logger: slog.Default(),
-	})
-	require.NoError(t, err)
-
-	taxCodeService, err := taxcodeservice.New(taxcodeservice.Config{
-		Adapter: taxCodeAdapter,
-		Logger:  slog.Default(),
-	})
-	require.NoError(t, err)
-
 	featureResolver, err := featureresolver.New(deps.FeatureService)
 	require.NoErrorf(t, err, "failed to create feature resolver: %v", err)
 
@@ -141,11 +139,14 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 	currencyResolver, err := currenciescurrencyresolver.New(currencyService)
 	require.NoError(t, err)
 
+	taxCodeResolver, err := taxcoderesolver.New(deps.TaxCodeService)
+	require.NoError(t, err)
+
 	planService, err := planservice.New(planservice.Config{
 		FeatureResolver:  featureResolver,
 		CurrencyResolver: currencyResolver,
 		Adapter:          planAdapter,
-		TaxCode:          taxCodeService,
+		TaxCodeResolver:  taxCodeResolver,
 		Logger:           slog.Default(),
 		Publisher:        publisher,
 	})
@@ -160,6 +161,7 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 
 	ffService := ffx.NewStaticService(ffx.AccessConfig{
 		subscription.MultiSubscriptionEnabledFF: true,
+		subscription.BillingStartsAtEnabledFF:   true,
 	})
 	s.SubscriptionService, err = subscriptionservice.New(subscriptionservice.ServiceConfig{
 		SubscriptionRepo:      subsRepo,
@@ -180,6 +182,14 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 		Lockr:              lockr,
 		FeatureFlags:       ffService,
 		CostBasisService:   currencyService,
+		// Credits are enabled for every namespace, like in the sync services the suites build.
+		ChargesConfig: subscription.ChargesConfig{
+			Enabled:                 true,
+			EnableCreditThenInvoice: true,
+			FeatureGate: featuregate.NewFeatureGateChecker(featuregate.NewNoop(), featuregate.Flags{
+				featuregate.CtxKeyCredits: string(featuregate.CtxKeyCredits),
+			}, map[featuregate.FeatureFlag]bool{featuregate.CtxKeyCredits: true}),
+		},
 		// events
 		Publisher: publisher,
 	})
@@ -197,9 +207,11 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 		Publisher:        publisher,
 		FeatureResolver:  featureResolver,
 		CurrencyResolver: currencyResolver,
-		TaxCode:          taxCodeService,
+		TaxCodeResolver:  taxCodeResolver,
 	})
 	require.NoError(t, err)
+
+	s.AddonService = addonService
 
 	planAddonRepo, err := planaddonrepo.New(planaddonrepo.Config{
 		Client: deps.DBClient,
@@ -215,6 +227,8 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 		Publisher: publisher,
 	})
 	require.NoError(t, err)
+
+	s.PlanAddonService = planAddonService
 
 	subAddRepo := subscriptionaddonrepo.NewSubscriptionAddonRepo(deps.DBClient)
 	subAddQtyRepo := subscriptionaddonrepo.NewSubscriptionAddonQuantityRepo(deps.DBClient)
@@ -247,6 +261,7 @@ func (s *SubscriptionMixin) SetupSuite(t *testing.T, deps SubscriptionMixInDepen
 		Logger:             slog.Default(),
 		Lockr:              lockr,
 		FeatureFlags:       ffService,
+		TaxCodeResolver:    taxCodeResolver,
 	})
 	require.NoError(t, err)
 }

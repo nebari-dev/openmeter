@@ -11,7 +11,7 @@ import (
 	"github.com/openmeterio/openmeter/pkg/framework/entutils"
 )
 
-var _ billing.CustomerOverrideAdapter = (*adapter)(nil)
+var _ billing.CustomerSynchronizationAdapter = (*adapter)(nil)
 
 func (a *adapter) UpsertCustomerLock(ctx context.Context, input billing.UpsertCustomerLockAdapterInput) error {
 	err := a.db.BillingCustomerLock.Create().
@@ -27,6 +27,7 @@ func (a *adapter) UpsertCustomerLock(ctx context.Context, input billing.UpsertCu
 			return nil
 		}
 	}
+
 	return nil
 }
 
@@ -43,19 +44,6 @@ func (a *adapter) LockCustomerForUpdate(ctx context.Context, input billing.LockC
 			First(ctx)
 		if err != nil {
 			return err
-		}
-
-		// Temp: until the migrations are complete
-		migrationStatus, err := tx.shouldInvoicesBeMigrated(ctx, input)
-		if err != nil {
-			return err
-		}
-
-		if migrationStatus.shouldMigrate {
-			err := tx.migrateCustomerInvoices(ctx, input, migrationStatus.minSchemaLevel)
-			if err != nil {
-				return err
-			}
 		}
 
 		return nil

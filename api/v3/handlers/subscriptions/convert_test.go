@@ -3,10 +3,11 @@ package subscriptions
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
-	api "github.com/openmeterio/openmeter/api/v3"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
@@ -50,8 +51,8 @@ func TestToAPIBillingSubscriptionCurrencySemantics(t *testing.T) {
 func TestFromAPIBillingSubscriptionCreateCostBasisMode(t *testing.T) {
 	// given:
 	// - a v3 create request explicitly selecting pinned cost bases
-	mode := api.BillingSubscriptionCostBasisMode("pinned")
-	request := api.BillingSubscriptionCreate{CostBasisMode: &mode}
+	mode := apiv3models.BillingSubscriptionCostBasisMode("pinned")
+	request := apiv3models.BillingSubscriptionCreate{CostBasisMode: &mode}
 
 	// when:
 	// - the request is mapped to the subscription workflow input
@@ -68,6 +69,27 @@ func TestFromAPIBillingSubscriptionCreateCostBasisMode(t *testing.T) {
 	require.Equal(t, subscription.CostBasisModePinned, result.CostBasisMode)
 }
 
+func TestFromAPIBillingSubscriptionCreateBillingStartsAt(t *testing.T) {
+	// given:
+	// - a v3 create request for a subscription whose billing starts later than the subscription
+	billingStartsAt := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	request := apiv3models.BillingSubscriptionCreate{BillingStartsAt: &billingStartsAt}
+
+	// when:
+	// - the request is mapped to the subscription workflow input
+	result, err := FromAPIBillingSubscriptionCreate(
+		"default",
+		customer.CustomerID{ID: "customer_1", Namespace: "default"},
+		"Subscription",
+		request,
+	)
+
+	// then:
+	// - the billing start survives the API boundary
+	require.NoError(t, err)
+	require.Equal(t, &billingStartsAt, result.BillingStartsAt)
+}
+
 // TestFromAPIBillingSubscriptionCreateTiming verifies the create request's optional
 // timing maps to the domain scheduling timing: omitted defaults to immediate, the
 // enum values pass through, and a custom timestamp becomes a scheduled start. The
@@ -76,15 +98,16 @@ func TestFromAPIBillingSubscriptionCreateCostBasisMode(t *testing.T) {
 func TestFromAPIBillingSubscriptionCreateTiming(t *testing.T) {
 	customerID := customer.CustomerID{ID: "customer_1", Namespace: "default"}
 
-	mapTiming := func(t *testing.T, timing *api.BillingSubscriptionCreateTiming) subscription.Timing {
+	mapTiming := func(t *testing.T, timing *apiv3models.BillingSubscriptionCreateTiming) subscription.Timing {
 		t.Helper()
 		result, err := FromAPIBillingSubscriptionCreate(
 			"default",
 			customerID,
 			"Subscription",
-			api.BillingSubscriptionCreate{Timing: timing},
+			apiv3models.BillingSubscriptionCreate{Timing: timing},
 		)
 		require.NoError(t, err)
+
 		return result.Timing
 	}
 
@@ -96,8 +119,8 @@ func TestFromAPIBillingSubscriptionCreateTiming(t *testing.T) {
 	})
 
 	t.Run("maps the immediate enum", func(t *testing.T) {
-		var timing api.BillingSubscriptionCreateTiming
-		require.NoError(t, timing.FromBillingSubscriptionCreateTimingEnum(api.BillingSubscriptionCreateTimingEnumImmediate))
+		var timing apiv3models.BillingSubscriptionCreateTiming
+		require.NoError(t, timing.FromBillingSubscriptionCreateTimingEnum(apiv3models.BillingSubscriptionCreateTimingEnumImmediate))
 
 		got := mapTiming(t, &timing)
 		require.NotNil(t, got.Enum)
@@ -107,7 +130,7 @@ func TestFromAPIBillingSubscriptionCreateTiming(t *testing.T) {
 
 	t.Run("maps a custom timestamp to a scheduled start", func(t *testing.T) {
 		at := testutils.GetRFC3339Time(t, "2026-01-01T00:00:00Z")
-		var timing api.BillingSubscriptionCreateTiming
+		var timing apiv3models.BillingSubscriptionCreateTiming
 		require.NoError(t, timing.FromDateTime(at))
 
 		got := mapTiming(t, &timing)
@@ -136,13 +159,16 @@ func TestToAPIBillingSubscriptionViewRoundtrip(t *testing.T) {
 	// given: a subscription created from the example plan, which has phases and rate cards
 	cust := deps.CustomerAdapter.CreateExampleCustomer(t)
 	_ = deps.FeatureConnector.CreateExampleFeatures(t, deps.ExampleMeterID)
-	plan := deps.PlanHelper.CreatePlan(t, subscriptiontestutils.GetExamplePlanInput(t))
+	taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+	plan := deps.PlanHelper.CreatePlan(t, subscriptiontestutils.GetExamplePlanInput(t, taxConfig))
 
 	spec, err := subscription.NewSpecFromPlan(plan, subscription.CreateSubscriptionCustomerInput{
 		CustomerId:      cust.ID,
 		InvoiceCurrency: "USD",
 		ActiveFrom:      currentTime,
 		BillingAnchor:   currentTime,
+		BillingStartsAt: &currentTime,
 		Name:            "Test Subscription",
 		Annotations:     models.Annotations{},
 	})
@@ -162,6 +188,7 @@ func TestToAPIBillingSubscriptionViewRoundtrip(t *testing.T) {
 	require.Equal(t, sub.ID, result.Id)
 	require.Equal(t, cust.ID, result.CustomerId)
 	require.Equal(t, "USD", result.InvoiceCurrency)
+	require.Equal(t, &currentTime, result.BillingStartsAt)
 
 	// then: the phases roundtrip, each carrying resolved items with rate cards
 	require.NotEmpty(t, result.Phases, "expected phases on the expanded subscription")
@@ -177,6 +204,7 @@ func TestToAPIBillingSubscriptionViewRoundtrip(t *testing.T) {
 			foundItem = true
 		}
 	}
+
 	require.True(t, foundItem, "expected at least one resolved item across phases")
 
 	// then: the current aligned billing period is populated for the active subscription

@@ -37,6 +37,7 @@ func newPlanSubscriptionService(t *testing.T, deps subscriptiontestutils.Subscri
 		FeatureResolver:     featureResolver,
 		CurrencyResolver:    deps.CurrencyResolver,
 		CustomerService:     deps.CustomerService,
+		TaxCodeResolver:     deps.TaxCodeResolver,
 	})
 	require.NoError(t, err)
 
@@ -79,7 +80,9 @@ func TestCreateInlineCustomPlanRejectsMissingFeature(t *testing.T) {
 	deps.FeatureConnector.CreateExampleFeatures(t, deps.ExampleMeterID)
 
 	const missingFeatureKey = "missing-feature"
-	planInput := subscriptiontestutils.GetExamplePlanInput(t)
+	taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+	planInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 	planInput.Plan.Key = ""
 	planInput.Plan.Version = 0
 	require.NoError(t, planInput.Plan.Phases[0].RateCards[0].ChangeMeta(func(meta productcatalog.RateCardMeta) (productcatalog.RateCardMeta, error) {
@@ -151,8 +154,10 @@ func TestCreateSettlementModeOverride(t *testing.T) {
 			cust := deps.subDeps.CustomerAdapter.CreateExampleCustomer(t)
 			deps.subDeps.FeatureConnector.CreateExampleFeatures(t, deps.subDeps.ExampleMeterID)
 
+			taxCode := deps.subDeps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+			taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
 			// Build a custom plan input; clear Key/Version so PlanFromPlanInput accepts it.
-			planInput := subscriptiontestutils.GetExamplePlanInput(t)
+			planInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 			require.Equal(t, productcatalog.CreditThenInvoiceSettlementMode, planInput.Plan.SettlementMode, "precondition: plan default must be CreditThenInvoice")
 			planInput.Plan.Key = ""
 			planInput.Plan.Version = 0
@@ -198,7 +203,9 @@ func TestCreateSettlementModeOverride(t *testing.T) {
 			cust := deps.subDeps.CustomerAdapter.CreateExampleCustomer(t)
 			deps.subDeps.FeatureConnector.CreateExampleFeatures(t, deps.subDeps.ExampleMeterID)
 
-			examplePlanInput := subscriptiontestutils.GetExamplePlanInput(t)
+			taxCode := deps.subDeps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+			taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+			examplePlanInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 			require.Equal(t, productcatalog.CreditThenInvoiceSettlementMode, examplePlanInput.Plan.SettlementMode, "precondition: plan default must be CreditThenInvoice")
 
 			plan1 := deps.subDeps.PlanHelper.CreatePlan(t, examplePlanInput)
@@ -255,7 +262,9 @@ func TestCreateInlineCustomCurrencyMaterializesManagedIdentity(t *testing.T) {
 	))
 	require.NoError(t, err)
 
-	planInput := subscriptiontestutils.GetExamplePlanInput(t)
+	taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+	planInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 	planInput.Plan.Key = ""
 	planInput.Plan.Version = 0
 	planInput.Plan.Currency = managedCurrency.Reference()
@@ -297,6 +306,7 @@ func TestCreateInlineCustomCurrencyMaterializesManagedIdentity(t *testing.T) {
 			}
 		}
 	}
+
 	require.Positive(t, pricedItems)
 }
 
@@ -321,7 +331,9 @@ func TestCreateInlineCustomCurrencyGatedByCredits(t *testing.T) {
 	customer := deps.CustomerAdapter.CreateExampleCustomer(t)
 	deps.FeatureConnector.CreateExampleFeatures(t, deps.ExampleMeterID)
 
-	planInput := subscriptiontestutils.GetExamplePlanInput(t)
+	taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+	planInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 	planInput.Plan.Key = ""
 	planInput.Plan.Version = 0
 	planInput.Plan.Currency = currencies.NewCurrencyReference("CREDITS")
@@ -376,7 +388,9 @@ func TestCreateInlineEntitlementRateCardResolvesFeatureByID(t *testing.T) {
 		featureIDByKey[f.Key] = f.ID
 	}
 
-	planInput := subscriptiontestutils.GetExamplePlanInput(t)
+	taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+	planInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 	planInput.Plan.Key = ""
 	planInput.Plan.Version = 0
 
@@ -429,7 +443,9 @@ func TestCreateInlineCreditOnlyPlanSkipsCurrencyCostBasis(t *testing.T) {
 	))
 	require.NoError(t, err)
 
-	planInput := subscriptiontestutils.GetExamplePlanInput(t)
+	taxCode := deps.TaxCodeEnv.CreateTaxCode(t, subscriptiontestutils.ExampleNamespace, subscriptiontestutils.GetExampleTaxCodeInput())
+	taxConfig := subscriptiontestutils.ExampleTaxConfig(taxCode)
+	planInput := subscriptiontestutils.GetExamplePlanInput(t, taxConfig)
 	planInput.Plan.Key = ""
 	planInput.Plan.Version = 0
 	planInput.Plan.SettlementMode = productcatalog.CreditOnlySettlementMode

@@ -19,6 +19,7 @@ import (
 	chargesmeta "github.com/openmeterio/openmeter/openmeter/billing/charges/meta"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/costbasis"
 	"github.com/openmeterio/openmeter/openmeter/billing/charges/models/payment"
+	"github.com/openmeterio/openmeter/openmeter/billing/worker/subscriptionsync"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	currenciestestutils "github.com/openmeterio/openmeter/openmeter/currencies/testutils"
 	"github.com/openmeterio/openmeter/openmeter/ledger"
@@ -49,8 +50,8 @@ func setupCustomCurrencyFlatFeeSubscription(t *testing.T) customCurrencyFlatFeeF
 	const ns = "test-namespace"
 	deps := setup(t, setupConfig{enableCharges: true})
 	t.Cleanup(func() { deps.cleanup(t) })
-	provisionSubscriptionDefaultTaxCodes(t, deps, ns)
-	_, err := deps.billingService.CreateProfile(t.Context(), minimalCreateProfileInputTemplate(deps.sandboxApp.GetID()))
+	deps.TaxCodeEnv.ProvisionDefaultTaxCodes(t, ns)
+	_, err := deps.billingService.CreateProfile(t.Context(), MinimalCreateProfileInputTemplate(deps.sandboxApp.GetID()))
 	require.NoError(t, err)
 	credits, err := deps.CurrencyService.CreateCurrency(t.Context(), currenciestestutils.NewCreateCurrencyInput(ns, "CREDITS", "Credits", "CR"))
 	require.NoError(t, err)
@@ -83,6 +84,7 @@ func setupCustomCurrencyFlatFeeSubscription(t *testing.T) customCurrencyFlatFeeF
 		_, err = deps.chargesService.HandleCreditPurchaseExternalPaymentStateTransition(t.Context(), charges.HandleCreditPurchaseExternalPaymentStateTransitionInput{ChargeID: grantID, TargetPaymentState: status})
 		require.NoError(t, err)
 	}
+
 	month := datetime.MustParseDuration(t, "P1M")
 	createdPlan, err := deps.PlanService.CreatePlan(t.Context(), plan.CreatePlanInput{
 		NamespacedModel: models.NamespacedModel{Namespace: ns},
@@ -100,6 +102,7 @@ func setupCustomCurrencyFlatFeeSubscription(t *testing.T) customCurrencyFlatFeeF
 	require.NoError(t, err)
 	view, err := deps.subscriptionService.GetView(t.Context(), created.NamespacedID)
 	require.NoError(t, err)
+
 	return customCurrencyFlatFeeFixture{testDeps: deps, currency: credits, view: view, accounts: accounts, business: business}
 }
 
@@ -116,7 +119,7 @@ func TestSubscriptionCustomCurrencyRealizedCancellation(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &staleView))
 
 	horizon := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, f.view, horizon))
+	require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, f.view.Subscription.NamespacedID, horizon))
 
 	ids := listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID)
 	require.GreaterOrEqual(t, len(ids), 2)
@@ -187,7 +190,7 @@ func TestSubscriptionCustomCurrencyRealizedCancellation(t *testing.T) {
 	beforeEntries, err := f.DBDeps.DBClient.LedgerEntry.Query().Count(ctx)
 	require.NoError(t, err)
 	require.NoError(t, f.subscriptionSyncService.HandleCancelledEvent(ctx, &event))
-	require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, staleView, horizon))
+	require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, staleView.Subscription.NamespacedID, horizon))
 	require.Equal(t, remaining, listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID))
 
 	afterEntries, err := f.DBDeps.DBClient.LedgerEntry.Query().Count(ctx)
@@ -219,6 +222,7 @@ type cancellationSnapshotHook struct {
 func (h *cancellationSnapshotHook) AfterCancel(ctx context.Context, view subscription.SubscriptionView) error {
 	h.event = lo.ToPtr(subscription.NewCancelledEvent(ctx, view))
 	clock.FreezeTime(clock.Now().Add(time.Second))
+
 	return nil
 }
 
@@ -228,9 +232,9 @@ func TestSubscriptionCustomCurrencyPlanChangeReconcilesCancellation(t *testing.T
 	defer clock.UnFreeze()
 	f := setupCustomCurrencyFlatFeeSubscription(t)
 	ctx := t.Context()
-	require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, f.view, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
+	require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, f.view.Subscription.NamespacedID, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
 	ids := listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID)
-	require.Len(t, ids, 2)
+	require.Len(t, ids, 3)
 	clock.FreezeTime(f.view.Subscription.ActiveFrom)
 	_, err := f.chargesService.AdvanceCharges(ctx, charges.AdvanceChargesInput{Customer: f.view.Customer.GetID()})
 	require.NoError(t, err)
@@ -292,7 +296,8 @@ func TestSubscriptionCustomCurrencyStaleCancellation(t *testing.T) {
 		cancelMonth     time.Month
 		expectedCharges int
 	}{
-		{name: "continued", expectedCharges: 4},
+		// The sync at the start of May also provisions June's fee.
+		{name: "continued", expectedCharges: 5},
 		{name: "canceled again later", cancelMonth: time.April, expectedCharges: 3},
 		{name: "canceled again for the same date", cancelMonth: time.February, expectedCharges: 1},
 	} {
@@ -316,14 +321,16 @@ func TestSubscriptionCustomCurrencyStaleCancellation(t *testing.T) {
 				_, err = f.subscriptionService.Cancel(ctx, f.view.Subscription.NamespacedID, subscription.Timing{Enum: lo.ToPtr(subscription.TimingNextBillingCycle)})
 				require.NoError(t, err)
 			}
+
 			current, err := f.subscriptionService.GetView(ctx, f.view.Subscription.NamespacedID)
 			require.NoError(t, err)
 			require.True(t, current.Subscription.UpdatedAt.After(event.Subscription.UpdatedAt))
 			if tc.cancelMonth == time.February {
 				require.Equal(t, event.Spec.ActiveTo, current.Spec.ActiveTo)
 			}
+
 			horizon := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
-			require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, current, horizon))
+			require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, current.Subscription.NamespacedID, horizon))
 			ids := listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID)
 			require.Len(t, ids, tc.expectedCharges)
 			states, err := f.subscriptionSyncService.GetSyncStates(ctx, []models.NamespacedID{f.view.Subscription.NamespacedID})
@@ -347,10 +354,10 @@ func TestSubscriptionCustomCurrencyStaleCancellation(t *testing.T) {
 				if current.Spec.ActiveTo == nil {
 					require.Equal(t, states, afterStates)
 				} else {
-					require.Equal(t, states[0].HasBillables, afterStates[0].HasBillables)
-					require.Equal(t, clock.Now().UTC(), afterStates[0].SyncedAt)
-					require.NotNil(t, afterStates[0].NextSyncAfter)
-					require.False(t, afterStates[0].NextSyncAfter.Before(*current.Spec.ActiveTo))
+					require.Equal(t, states[0].LastSuccessState, afterStates[0].LastSuccessState)
+					require.Equal(t, lo.ToPtr(clock.Now().UTC()), afterStates[0].LastSuccessAt)
+					require.NotNil(t, afterStates[0].NextReconciliationAt)
+					require.False(t, afterStates[0].NextReconciliationAt.Before(*current.Spec.ActiveTo))
 				}
 			}
 		})
@@ -364,7 +371,7 @@ func TestSubscriptionCustomCurrencyScheduledDeletion(t *testing.T) {
 	f := setupCustomCurrencyFlatFeeSubscription(t)
 	ctx := t.Context()
 	horizon := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, f.view, horizon))
+	require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, f.view.Subscription.NamespacedID, horizon))
 	ids := listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID)
 	require.NotEmpty(t, ids)
 	// when: deletion and its event are processed twice, then an older view arrives.
@@ -374,13 +381,15 @@ func TestSubscriptionCustomCurrencyScheduledDeletion(t *testing.T) {
 	beforeEntries, err := f.DBDeps.DBClient.LedgerEntry.Query().Count(ctx)
 	require.NoError(t, err)
 	require.NoError(t, f.subscriptionSyncService.HandleDeletedEvent(ctx, &event))
-	require.NoError(t, f.subscriptionSyncService.SyncByView(ctx, f.view, horizon))
-	// then: no future charges are resurrected and no accounting effects are duplicated.
+	require.NoError(t, f.subscriptionSyncService.SyncByID(ctx, f.view.Subscription.
+		// then: no future charges are resurrected and no accounting effects are duplicated.
+		NamespacedID, horizon))
+
 	require.Empty(t, listSubscriptionChargeIDs(t, f.testDeps, f.view.Subscription.ID))
 	states, err := f.subscriptionSyncService.GetSyncStates(ctx, []models.NamespacedID{f.view.Subscription.NamespacedID})
 	require.NoError(t, err)
 	require.Len(t, states, 1)
-	require.False(t, states[0].HasBillables)
+	require.Equal(t, subscriptionsync.SyncStateStateSubscriptionDeleted, states[0].LastSuccessState)
 	for _, id := range ids {
 		result, err := f.chargesService.GetByID(ctx, charges.GetByIDInput{ChargeID: chargesmeta.ChargeID{Namespace: f.view.Subscription.Namespace, ID: id}})
 		require.NoError(t, err)
@@ -388,6 +397,7 @@ func TestSubscriptionCustomCurrencyScheduledDeletion(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, flatfee.StatusDeleted, charge.Status)
 	}
+
 	afterEntries, err := f.DBDeps.DBClient.LedgerEntry.Query().Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, beforeEntries, afterEntries)

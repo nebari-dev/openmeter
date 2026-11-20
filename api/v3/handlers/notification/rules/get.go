@@ -1,0 +1,50 @@
+package rules
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/openmeterio/openmeter/api/v3/apierrors"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
+	"github.com/openmeterio/openmeter/openmeter/notification"
+	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
+	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
+)
+
+type (
+	GetNotificationRuleRequest  = notification.GetRuleInput
+	GetNotificationRuleResponse = apiv3models.BillingNotificationRule
+	GetNotificationRuleParams   = string
+	GetNotificationRuleHandler  = httptransport.HandlerWithArgs[GetNotificationRuleRequest, GetNotificationRuleResponse, GetNotificationRuleParams]
+)
+
+func (h *handler) GetNotificationRule() GetNotificationRuleHandler {
+	return httptransport.NewHandlerWithArgs(
+		func(ctx context.Context, r *http.Request, ruleID GetNotificationRuleParams) (GetNotificationRuleRequest, error) {
+			ns, err := h.resolveNamespace(ctx)
+			if err != nil {
+				return GetNotificationRuleRequest{}, err
+			}
+
+			return GetNotificationRuleRequest{
+				Namespace: ns,
+				ID:        ruleID,
+			}, nil
+		},
+		func(ctx context.Context, req GetNotificationRuleRequest) (GetNotificationRuleResponse, error) {
+			rule, err := h.service.GetRuleView(ctx, req)
+			if err != nil {
+				return GetNotificationRuleResponse{}, err
+			}
+
+			return ToAPIBillingNotificationRule(rule)
+		},
+		commonhttp.JSONResponseEncoderWithStatus[GetNotificationRuleResponse](http.StatusOK),
+		httptransport.AppendOptions(
+			h.options,
+			httptransport.WithOperationName("get-billing-notification-rule"),
+			httptransport.WithErrorEncoder(apierrors.GenericErrorEncoder()),
+			httptransport.WithErrorEncoder(errorEncoder()),
+		)...,
+	)
+}

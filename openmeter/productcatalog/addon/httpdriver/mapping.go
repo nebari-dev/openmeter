@@ -1,28 +1,32 @@
 package httpdriver
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/samber/lo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/currencies"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/addon"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog/http"
+	"github.com/openmeterio/openmeter/openmeter/taxcode"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/models"
 )
 
-func FromAddon(a addon.Addon) (api.Addon, error) {
+// FromAddon maps an add-on to its v1 shape. taxCodes must hold every Tax Code the add-on's
+// rate cards reference: a missing entry is an error.
+func FromAddon(a addon.Addon, taxCodes map[string]*taxcode.TaxCode) (apiv1models.Addon, error) {
 	validationIssues, _ := a.AsProductCatalogAddon().ValidationErrors()
 
-	resp := api.Addon{
+	resp := apiv1models.Addon{
 		CreatedAt:        a.CreatedAt,
 		Currency:         a.Currency.GetCode().String(),
 		DeletedAt:        a.DeletedAt,
 		Description:      a.Description,
-		InstanceType:     api.AddonInstanceType(a.InstanceType),
+		InstanceType:     apiv1models.AddonInstanceType(a.InstanceType),
 		EffectiveFrom:    a.EffectiveFrom,
 		EffectiveTo:      a.EffectiveTo,
 		Id:               a.ID,
@@ -35,9 +39,9 @@ func FromAddon(a addon.Addon) (api.Addon, error) {
 		ValidationErrors: http.FromValidationErrors(validationIssues),
 	}
 
-	resp.RateCards = make([]api.RateCard, 0, len(a.RateCards))
+	resp.RateCards = make([]apiv1models.RateCard, 0, len(a.RateCards))
 	for _, rateCard := range a.RateCards.AsProductCatalogRateCards() {
-		rc, err := http.FromRateCard(rateCard)
+		rc, err := http.FromRateCard(rateCard, taxCodes)
 		if err != nil {
 			return resp, fmt.Errorf("failed to cast ratecard: %w", err)
 		}
@@ -47,11 +51,11 @@ func FromAddon(a addon.Addon) (api.Addon, error) {
 
 	switch a.Status() {
 	case productcatalog.AddonStatusDraft:
-		resp.Status = api.AddonStatusDraft
+		resp.Status = apiv1models.AddonStatusDraft
 	case productcatalog.AddonStatusActive:
-		resp.Status = api.AddonStatusActive
+		resp.Status = apiv1models.AddonStatusActive
 	case productcatalog.AddonStatusArchived:
-		resp.Status = api.AddonStatusArchived
+		resp.Status = apiv1models.AddonStatusArchived
 	default:
 		return resp, fmt.Errorf("invalid add-on status: %s", a.Status())
 	}
@@ -59,7 +63,7 @@ func FromAddon(a addon.Addon) (api.Addon, error) {
 	return resp, nil
 }
 
-func AsCreateAddonRequest(a api.AddonCreate, namespace string) (CreateAddonRequest, error) {
+func AsCreateAddonRequest(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver, a apiv1models.AddonCreate, namespace string) (CreateAddonRequest, error) {
 	var err error
 
 	req := CreateAddonRequest{
@@ -82,9 +86,10 @@ func AsCreateAddonRequest(a api.AddonCreate, namespace string) (CreateAddonReque
 	if err = currencyCode.Validate(); err != nil {
 		return req, fmt.Errorf("invalid CurrencyCode: %w", err)
 	}
+
 	req.Currency = currencies.NewCurrencyReference(currencyx.Code(currencyCode))
 
-	req.RateCards, err = http.AsRateCards(a.RateCards)
+	req.RateCards, err = http.AsRateCards(ctx, resolver, namespace, a.RateCards)
 	if err != nil {
 		return req, err
 	}
@@ -92,7 +97,7 @@ func AsCreateAddonRequest(a api.AddonCreate, namespace string) (CreateAddonReque
 	return req, nil
 }
 
-func AsUpdateAddonRequest(a api.AddonReplaceUpdate, namespace string, addonID string) (UpdateAddonRequest, error) {
+func AsUpdateAddonRequest(ctx context.Context, resolver productcatalog.TaxCodeBackfillResolver, a apiv1models.AddonReplaceUpdate, namespace string, addonID string) (UpdateAddonRequest, error) {
 	req := UpdateAddonRequest{
 		NamespacedID: models.NamespacedID{
 			Namespace: namespace,
@@ -104,7 +109,7 @@ func AsUpdateAddonRequest(a api.AddonReplaceUpdate, namespace string, addonID st
 		Metadata:     (*models.Metadata)(a.Metadata),
 	}
 
-	rateCards, err := http.AsRateCards(a.RateCards)
+	rateCards, err := http.AsRateCards(ctx, resolver, namespace, a.RateCards)
 	if err != nil {
 		return req, err
 	}

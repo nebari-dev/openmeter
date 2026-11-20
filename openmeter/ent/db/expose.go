@@ -105,6 +105,8 @@ func NewTxClientFromRawConfig(ctx context.Context, cfg entutils.RawEntConfig) *T
 
 		AppStripeCustomer: NewAppStripeCustomerClient(config),
 
+		AppStripeInvoiceGeneration: NewAppStripeInvoiceGenerationClient(config),
+
 		BalanceSnapshot: NewBalanceSnapshotClient(config),
 
 		BillingCustomerLock: NewBillingCustomerLockClient(config),
@@ -115,11 +117,7 @@ func NewTxClientFromRawConfig(ctx context.Context, cfg entutils.RawEntConfig) *T
 
 		BillingInvoice: NewBillingInvoiceClient(config),
 
-		BillingInvoiceFlatFeeLineConfig: NewBillingInvoiceFlatFeeLineConfigClient(config),
-
 		BillingInvoiceLine: NewBillingInvoiceLineClient(config),
-
-		BillingInvoiceLineDiscount: NewBillingInvoiceLineDiscountClient(config),
 
 		BillingInvoiceLineUsageDiscount: NewBillingInvoiceLineUsageDiscountClient(config),
 
@@ -259,13 +257,13 @@ func NewTxClientFromRawConfig(ctx context.Context, cfg entutils.RawEntConfig) *T
 
 		SubscriptionAddonQuantity: NewSubscriptionAddonQuantityClient(config),
 
-		SubscriptionBillingSyncState: NewSubscriptionBillingSyncStateClient(config),
-
 		SubscriptionCostBasisPin: NewSubscriptionCostBasisPinClient(config),
 
 		SubscriptionItem: NewSubscriptionItemClient(config),
 
 		SubscriptionPhase: NewSubscriptionPhaseClient(config),
+
+		SubscriptionSyncState: NewSubscriptionSyncStateClient(config),
 
 		TaxCode: NewTaxCodeClient(config),
 

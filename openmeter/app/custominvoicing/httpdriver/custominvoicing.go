@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	appcustominvoicing "github.com/openmeterio/openmeter/openmeter/app/custominvoicing"
 	"github.com/openmeterio/openmeter/openmeter/billing"
-	billinghttpdriver "github.com/openmeterio/openmeter/openmeter/billing/httpdriver"
 	"github.com/openmeterio/openmeter/pkg/framework/commonhttp"
 	"github.com/openmeterio/openmeter/pkg/framework/transport/httptransport"
 )
 
 type (
 	DraftSyncronizedRequest  = appcustominvoicing.SyncDraftInvoiceInput
-	DraftSyncronizedResponse = api.Invoice
+	DraftSyncronizedResponse = apiv1models.Invoice
 	DraftSyncronizedParams   = struct {
 		InvoiceID string `json:"invoiceId"`
 	}
@@ -30,7 +29,7 @@ func (h *handler) DraftSyncronized() DraftSyncronizedHandler {
 				return DraftSyncronizedRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			var body api.CustomInvoicingDraftSynchronizedRequest
+			var body apiv1models.CustomInvoicingDraftSynchronizedRequest
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return DraftSyncronizedRequest{}, fmt.Errorf("failed to decode draft synchronized request: %w", err)
 			}
@@ -53,7 +52,7 @@ func (h *handler) DraftSyncronized() DraftSyncronizedHandler {
 				return DraftSyncronizedResponse{}, err
 			}
 
-			return billinghttpdriver.MapStandardInvoiceToAPI(invoice)
+			return h.toAPIInvoice(ctx, invoice)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[DraftSyncronizedResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -66,7 +65,7 @@ func (h *handler) DraftSyncronized() DraftSyncronizedHandler {
 
 type (
 	IssuingSyncronizedRequest  = appcustominvoicing.SyncIssuingInvoiceInput
-	IssuingSyncronizedResponse = api.Invoice
+	IssuingSyncronizedResponse = apiv1models.Invoice
 	IssuingSyncronizedParams   = struct {
 		InvoiceID string `json:"invoiceId"`
 	}
@@ -81,7 +80,7 @@ func (h *handler) IssuingSyncronized() IssuingSyncronizedHandler {
 				return IssuingSyncronizedRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			var body api.CustomInvoicingFinalizedRequest
+			var body apiv1models.CustomInvoicingFinalizedRequest
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return IssuingSyncronizedRequest{}, fmt.Errorf("failed to decode issuing synchronized request: %w", err)
 			}
@@ -104,7 +103,7 @@ func (h *handler) IssuingSyncronized() IssuingSyncronizedHandler {
 				return IssuingSyncronizedResponse{}, err
 			}
 
-			return billinghttpdriver.MapStandardInvoiceToAPI(invoice)
+			return h.toAPIInvoice(ctx, invoice)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[IssuingSyncronizedResponse](http.StatusOK),
 		httptransport.AppendOptions(
@@ -117,7 +116,7 @@ func (h *handler) IssuingSyncronized() IssuingSyncronizedHandler {
 
 type (
 	UpdatePaymentStatusRequest  = appcustominvoicing.HandlePaymentTriggerInput
-	UpdatePaymentStatusResponse = api.Invoice
+	UpdatePaymentStatusResponse = apiv1models.Invoice
 	UpdatePaymentStatusParams   = struct {
 		InvoiceID string `json:"invoiceId"`
 	}
@@ -132,7 +131,7 @@ func (h *handler) UpdatePaymentStatus() UpdatePaymentStatusHandler {
 				return UpdatePaymentStatusRequest{}, fmt.Errorf("failed to resolve namespace: %w", err)
 			}
 
-			var body api.CustomInvoicingUpdatePaymentStatusRequest
+			var body apiv1models.CustomInvoicingUpdatePaymentStatusRequest
 			if err := commonhttp.JSONRequestBodyDecoder(r, &body); err != nil {
 				return UpdatePaymentStatusRequest{}, fmt.Errorf("failed to decode handle payment trigger request: %w", err)
 			}
@@ -160,7 +159,7 @@ func (h *handler) UpdatePaymentStatus() UpdatePaymentStatusHandler {
 				return UpdatePaymentStatusResponse{}, err
 			}
 
-			return billinghttpdriver.MapStandardInvoiceToAPI(invoice)
+			return h.toAPIInvoice(ctx, invoice)
 		},
 		commonhttp.JSONResponseEncoderWithStatus[UpdatePaymentStatusResponse](http.StatusOK),
 		httptransport.AppendOptions(

@@ -30,6 +30,8 @@ type Tx struct {
 	AppStripe *AppStripeClient
 	// AppStripeCustomer is the client for interacting with the AppStripeCustomer builders.
 	AppStripeCustomer *AppStripeCustomerClient
+	// AppStripeInvoiceGeneration is the client for interacting with the AppStripeInvoiceGeneration builders.
+	AppStripeInvoiceGeneration *AppStripeInvoiceGenerationClient
 	// BalanceSnapshot is the client for interacting with the BalanceSnapshot builders.
 	BalanceSnapshot *BalanceSnapshotClient
 	// BillingCustomerLock is the client for interacting with the BillingCustomerLock builders.
@@ -40,12 +42,8 @@ type Tx struct {
 	BillingGatheringInvoiceLine *BillingGatheringInvoiceLineClient
 	// BillingInvoice is the client for interacting with the BillingInvoice builders.
 	BillingInvoice *BillingInvoiceClient
-	// BillingInvoiceFlatFeeLineConfig is the client for interacting with the BillingInvoiceFlatFeeLineConfig builders.
-	BillingInvoiceFlatFeeLineConfig *BillingInvoiceFlatFeeLineConfigClient
 	// BillingInvoiceLine is the client for interacting with the BillingInvoiceLine builders.
 	BillingInvoiceLine *BillingInvoiceLineClient
-	// BillingInvoiceLineDiscount is the client for interacting with the BillingInvoiceLineDiscount builders.
-	BillingInvoiceLineDiscount *BillingInvoiceLineDiscountClient
 	// BillingInvoiceLineUsageDiscount is the client for interacting with the BillingInvoiceLineUsageDiscount builders.
 	BillingInvoiceLineUsageDiscount *BillingInvoiceLineUsageDiscountClient
 	// BillingInvoiceSplitLineGroup is the client for interacting with the BillingInvoiceSplitLineGroup builders.
@@ -184,14 +182,14 @@ type Tx struct {
 	SubscriptionAddon *SubscriptionAddonClient
 	// SubscriptionAddonQuantity is the client for interacting with the SubscriptionAddonQuantity builders.
 	SubscriptionAddonQuantity *SubscriptionAddonQuantityClient
-	// SubscriptionBillingSyncState is the client for interacting with the SubscriptionBillingSyncState builders.
-	SubscriptionBillingSyncState *SubscriptionBillingSyncStateClient
 	// SubscriptionCostBasisPin is the client for interacting with the SubscriptionCostBasisPin builders.
 	SubscriptionCostBasisPin *SubscriptionCostBasisPinClient
 	// SubscriptionItem is the client for interacting with the SubscriptionItem builders.
 	SubscriptionItem *SubscriptionItemClient
 	// SubscriptionPhase is the client for interacting with the SubscriptionPhase builders.
 	SubscriptionPhase *SubscriptionPhaseClient
+	// SubscriptionSyncState is the client for interacting with the SubscriptionSyncState builders.
+	SubscriptionSyncState *SubscriptionSyncStateClient
 	// TaxCode is the client for interacting with the TaxCode builders.
 	TaxCode *TaxCodeClient
 	// UsageReset is the client for interacting with the UsageReset builders.
@@ -335,14 +333,13 @@ func (tx *Tx) init() {
 	tx.AppCustomer = NewAppCustomerClient(tx.config)
 	tx.AppStripe = NewAppStripeClient(tx.config)
 	tx.AppStripeCustomer = NewAppStripeCustomerClient(tx.config)
+	tx.AppStripeInvoiceGeneration = NewAppStripeInvoiceGenerationClient(tx.config)
 	tx.BalanceSnapshot = NewBalanceSnapshotClient(tx.config)
 	tx.BillingCustomerLock = NewBillingCustomerLockClient(tx.config)
 	tx.BillingCustomerOverride = NewBillingCustomerOverrideClient(tx.config)
 	tx.BillingGatheringInvoiceLine = NewBillingGatheringInvoiceLineClient(tx.config)
 	tx.BillingInvoice = NewBillingInvoiceClient(tx.config)
-	tx.BillingInvoiceFlatFeeLineConfig = NewBillingInvoiceFlatFeeLineConfigClient(tx.config)
 	tx.BillingInvoiceLine = NewBillingInvoiceLineClient(tx.config)
-	tx.BillingInvoiceLineDiscount = NewBillingInvoiceLineDiscountClient(tx.config)
 	tx.BillingInvoiceLineUsageDiscount = NewBillingInvoiceLineUsageDiscountClient(tx.config)
 	tx.BillingInvoiceSplitLineGroup = NewBillingInvoiceSplitLineGroupClient(tx.config)
 	tx.BillingInvoiceUsageBasedLineConfig = NewBillingInvoiceUsageBasedLineConfigClient(tx.config)
@@ -412,10 +409,10 @@ func (tx *Tx) init() {
 	tx.Subscription = NewSubscriptionClient(tx.config)
 	tx.SubscriptionAddon = NewSubscriptionAddonClient(tx.config)
 	tx.SubscriptionAddonQuantity = NewSubscriptionAddonQuantityClient(tx.config)
-	tx.SubscriptionBillingSyncState = NewSubscriptionBillingSyncStateClient(tx.config)
 	tx.SubscriptionCostBasisPin = NewSubscriptionCostBasisPinClient(tx.config)
 	tx.SubscriptionItem = NewSubscriptionItemClient(tx.config)
 	tx.SubscriptionPhase = NewSubscriptionPhaseClient(tx.config)
+	tx.SubscriptionSyncState = NewSubscriptionSyncStateClient(tx.config)
 	tx.TaxCode = NewTaxCodeClient(tx.config)
 	tx.UsageReset = NewUsageResetClient(tx.config)
 }

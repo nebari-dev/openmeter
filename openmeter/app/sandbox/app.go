@@ -35,7 +35,9 @@ var (
 		Prefix:         "OM-SANDBOX",
 		SuffixTemplate: "{{.CustomerPrefix}}-{{.NextSequenceNumber}}",
 		Scope:          "invoices/app/sandbox",
-		CommitMode:     sequence.CommitModeWithCaller,
+		// Sandbox permits gaps after rollback, so release the namespace/scope
+		// counter lock independently of the caller's transaction.
+		CommitMode: sequence.CommitModeIndependent,
 	}
 )
 
@@ -103,6 +105,10 @@ func (a appOperations) UpdateAppConfig(ctx context.Context, input app.AppConfigU
 	return nil
 }
 
+func (a appOperations) ExecuteAction(ctx context.Context, input app.ExecuteAppActionInput) error {
+	return app.NewAppActionUnsupportedError(a.appBase.GetID(), input.Type)
+}
+
 func (a appOperations) UpsertStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) (*billing.UpsertStandardInvoiceResult, error) {
 	return billing.NewUpsertStandardInvoiceResult(), nil
 }
@@ -128,6 +134,11 @@ func (a appOperations) FinalizeStandardInvoice(ctx context.Context, invoice bill
 
 func (a appOperations) DeleteStandardInvoice(ctx context.Context, invoice billing.StandardInvoice) error {
 	return nil
+}
+
+// WouldStandardInvoiceBeEmpty never omits: the sandbox has no remote invoice to leave out.
+func (a appOperations) WouldStandardInvoiceBeEmpty(billing.StandardInvoice) (bool, error) {
+	return false, nil
 }
 
 func (a appOperations) PostAdvanceStandardInvoiceHook(ctx context.Context, invoice billing.StandardInvoice) (*billing.PostAdvanceHookResult, error) {

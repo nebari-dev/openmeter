@@ -65,10 +65,12 @@ func (s *service) AdvanceCharges(ctx context.Context, input charges.AdvanceCharg
 			if err := mappedResult.requireInvoicePatchesIfAdvanceable(); err != nil {
 				return nil, fmt.Errorf("flat fee charge %s: %w", charge.ID, err)
 			}
+
 			if mappedResult.Charge != nil {
 				advancedChargesByID[charge.ID] = *mappedResult.Charge
 				advancedChargeIDs = append(advancedChargeIDs, charge.ID)
 			}
+
 			invoicePatches = append(invoicePatches, mappedResult.InvoicePatches...)
 
 			if mappedResult.CanAdvance {
@@ -81,9 +83,9 @@ func (s *service) AdvanceCharges(ctx context.Context, input charges.AdvanceCharg
 
 		// Advance usage-based charges
 		if len(chargesByType.usageBased) > 0 {
-			customerOverride, err := s.billingService.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+			customerOverride, err := s.billingService.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 				Customer: input.Customer,
-				Expand: billing.CustomerOverrideExpand{
+				Expand: billing.CustomerBillingProfileExpand{
 					Customer: true,
 				},
 			})
@@ -95,9 +97,9 @@ func (s *service) AdvanceCharges(ctx context.Context, input charges.AdvanceCharg
 
 			for _, charge := range chargesByType.usageBased {
 				result, err := s.usageBasedService.AdvanceCharge(ctx, usagebased.AdvanceChargeInput{
-					ChargeID:         charge.GetChargeID(),
-					CustomerOverride: mo.Some(customerOverride),
-					FeatureMeters:    mo.Some(featureMeters),
+					ChargeID:               charge.GetChargeID(),
+					CustomerBillingProfile: mo.Some(customerOverride),
+					FeatureMeters:          mo.Some(featureMeters),
 				})
 				if err != nil {
 					if isPersistedProductCatalogValidationError(err, charge.ValidationIssues) {
@@ -111,10 +113,12 @@ func (s *service) AdvanceCharges(ctx context.Context, input charges.AdvanceCharg
 				if err := mappedResult.requireInvoicePatchesIfAdvanceable(); err != nil {
 					return nil, fmt.Errorf("usage based charge %s: %w", charge.ID, err)
 				}
+
 				if mappedResult.Charge != nil {
 					advancedChargesByID[charge.ID] = *mappedResult.Charge
 					advancedChargeIDs = append(advancedChargeIDs, charge.ID)
 				}
+
 				invoicePatches = append(invoicePatches, mappedResult.InvoicePatches...)
 
 				if mappedResult.CanAdvance {
@@ -132,6 +136,7 @@ func (s *service) AdvanceCharges(ctx context.Context, input charges.AdvanceCharg
 		if err != nil {
 			return nil, err
 		}
+
 		for chargeID, result := range continuedResults {
 			if result.Charge != nil {
 				advancedChargesByID[chargeID] = *result.Charge

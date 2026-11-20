@@ -9,7 +9,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/samber/mo"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	billingfeaturemeter "github.com/openmeterio/openmeter/openmeter/billing/featuremeter"
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
@@ -205,6 +205,7 @@ func (g *GatheringInvoice) SetLines(lines []GenericInvoiceLine) error {
 	}
 
 	g.Lines = NewGatheringInvoiceLines(mappedLines)
+
 	return nil
 }
 
@@ -215,10 +216,9 @@ func (g *GatheringInvoice) UnsetLines() {
 type GatheringInvoiceExpand string
 
 const (
-	GatheringInvoiceExpandLines              GatheringInvoiceExpand = "lines"
-	GatheringInvoiceExpandDeletedLines       GatheringInvoiceExpand = "deletedLines"
-	GatheringInvoiceExpandAvailableActions   GatheringInvoiceExpand = "availableActions"
-	GatheringInvoiceExpandSplitLineHierarchy GatheringInvoiceExpand = "splitLineHierarchy"
+	GatheringInvoiceExpandLines            GatheringInvoiceExpand = "lines"
+	GatheringInvoiceExpandDeletedLines     GatheringInvoiceExpand = "deletedLines"
+	GatheringInvoiceExpandAvailableActions GatheringInvoiceExpand = "availableActions"
 )
 
 func (e GatheringInvoiceExpand) Values() []GatheringInvoiceExpand {
@@ -226,7 +226,6 @@ func (e GatheringInvoiceExpand) Values() []GatheringInvoiceExpand {
 		GatheringInvoiceExpandLines,
 		GatheringInvoiceExpandDeletedLines,
 		GatheringInvoiceExpandAvailableActions,
-		GatheringInvoiceExpandSplitLineHierarchy,
 	}
 }
 
@@ -279,6 +278,7 @@ func (l GatheringLines) Validate() error {
 			if err != nil {
 				return fmt.Errorf("line[%s]: %w", l.ID, err)
 			}
+
 			return nil
 		})...,
 	)
@@ -703,8 +703,6 @@ func (i gatheringInvoiceLineGenericWrapper) CloneWithoutChildren() (GenericInvoi
 
 // WithTargetState keeps the persisted gathering-line identity and invoice
 // membership from the receiver and applies the target's business state.
-// SplitLineHierarchy is intentionally not merged: charge target-state patches
-// do not currently own split/progressive hierarchy semantics.
 func (i gatheringInvoiceLineGenericWrapper) WithTargetState(target GenericInvoiceLine) (GenericInvoiceLine, error) {
 	if target == nil {
 		return nil, errors.New("target line is required")
@@ -739,8 +737,7 @@ func (i gatheringInvoiceLineGenericWrapper) AsGenericInvoiceLine() GenericInvoic
 type GatheringLine struct {
 	GatheringLineBase `json:",inline"`
 
-	DBState            *GatheringLine      `json:"-"`
-	SplitLineHierarchy *SplitLineHierarchy `json:"splitLineHierarchy,omitempty"`
+	DBState *GatheringLine `json:"-"`
 }
 
 func (g GatheringLine) Clone() (GatheringLine, error) {
@@ -782,6 +779,7 @@ func (g GatheringLine) WithoutDBState() (GatheringLine, error) {
 	}
 
 	clone.DBState = nil
+
 	return clone, nil
 }
 
@@ -817,10 +815,6 @@ func (g GatheringLine) RemoveMetaForCompare() (GatheringLine, error) {
 	return g.WithoutDBState()
 }
 
-func (g *GatheringLine) SetSplitLineHierarchy(hierarchy *SplitLineHierarchy) {
-	g.SplitLineHierarchy = hierarchy
-}
-
 func (g GatheringLine) AsNewStandardLine(invoiceID string) (*StandardLine, error) {
 	if invoiceID == "" {
 		return nil, errors.New("invoice ID is required")
@@ -839,16 +833,6 @@ func (g GatheringLine) AsNewStandardLine(invoiceID string) (*StandardLine, error
 	var subscription *SubscriptionReference
 	if g.Subscription != nil {
 		subscription = g.Subscription.Clone()
-	}
-
-	var splitLineHierarchy *SplitLineHierarchy
-	if g.SplitLineHierarchy != nil {
-		clonedSHierarchy, err := g.SplitLineHierarchy.Clone()
-		if err != nil {
-			return nil, fmt.Errorf("cloning split line hierarchy: %w", err)
-		}
-
-		splitLineHierarchy = lo.ToPtr(clonedSHierarchy)
 	}
 
 	// Carry the gathering line's unit_config snapshot onto the standard line so the legacy
@@ -884,8 +868,6 @@ func (g GatheringLine) AsNewStandardLine(invoiceID string) (*StandardLine, error
 			FeatureKey: g.FeatureKey,
 			UnitConfig: unitConfig,
 		},
-
-		SplitLineHierarchy: splitLineHierarchy,
 
 		DBState: nil, // We don't want to reuse the state from the gathering line (so let's make it explicit)
 	}
@@ -969,8 +951,8 @@ type CreateGatheringInvoiceAdapterInput struct {
 	NextCollectionAt *time.Time
 
 	// TODO[later]: This should be just a CustomerID once we have split the invoices table
-	Customer      customer.Customer
-	MergedProfile Profile
+	Customer         customer.Customer
+	EffectiveProfile Profile
 }
 
 func (c CreateGatheringInvoiceAdapterInput) Validate() error {
@@ -992,8 +974,8 @@ func (c CreateGatheringInvoiceAdapterInput) Validate() error {
 		errs = append(errs, fmt.Errorf("customer: %w", err))
 	}
 
-	if err := c.MergedProfile.Validate(); err != nil {
-		errs = append(errs, fmt.Errorf("merged profile: %w", err))
+	if err := c.EffectiveProfile.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("effective profile: %w", err))
 	}
 
 	return errors.Join(errs...)
@@ -1010,7 +992,7 @@ type ListGatheringInvoicesInput struct {
 	IDs            []string
 	Customers      []string
 	Currencies     []currencyx.FiatCode
-	OrderBy        api.InvoiceOrderBy
+	OrderBy        apiv1models.InvoiceOrderBy
 	Order          sortx.Order
 	IncludeDeleted bool
 	Expand         GatheringInvoiceExpands

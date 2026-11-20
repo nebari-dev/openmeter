@@ -13,7 +13,7 @@ import (
 	"github.com/stripe/stripe-go/v80"
 	"github.com/stripe/stripe-go/v80/webhook"
 
-	"github.com/openmeterio/openmeter/api"
+	apiv1models "github.com/openmeterio/openmeter/api/models"
 	"github.com/openmeterio/openmeter/openmeter/app"
 	appstripe "github.com/openmeterio/openmeter/openmeter/app/stripe"
 	stripeclient "github.com/openmeterio/openmeter/openmeter/app/stripe/client"
@@ -35,7 +35,7 @@ type AppStripeWebhookRequest struct {
 }
 
 type (
-	AppStripeWebhookResponse = api.StripeWebhookResponse
+	AppStripeWebhookResponse = apiv1models.StripeWebhookResponse
 	AppStripeWebhookHandler  httptransport.HandlerWithArgs[AppStripeWebhookRequest, AppStripeWebhookResponse, AppStripeWebhookParams]
 )
 
@@ -46,7 +46,6 @@ func (h *handler) AppStripeWebhook() AppStripeWebhookHandler {
 			// Note that the webhook handler has no namespace resolver
 			// We only know the namespace from the app id. Which we trust because
 			// we validate the payload signature with the app's webhook secret.
-
 			payload, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, appStripeWebhookMaxBodyBytes))
 			if err != nil {
 				err = fmt.Errorf("cannot read payload: %w", err)
@@ -477,5 +476,6 @@ func unmarshalInvoiceEvent(data []byte) (stripe.Invoice, error) {
 			fmt.Errorf("failed to unmarshal invoice: %w", err),
 		)
 	}
+
 	return invoice, nil
 }

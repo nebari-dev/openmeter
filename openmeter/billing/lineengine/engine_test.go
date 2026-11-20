@@ -2,6 +2,7 @@ package lineengine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/openmeterio/openmeter/openmeter/billing"
 	featuremeterservice "github.com/openmeterio/openmeter/openmeter/billing/featuremeter/service"
+	"github.com/openmeterio/openmeter/openmeter/billing/invoicing/legacy/splitlinegroup"
 	"github.com/openmeterio/openmeter/openmeter/billing/rating"
 	"github.com/openmeterio/openmeter/openmeter/meter"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
@@ -28,11 +30,42 @@ func TestConfigValidateReturnsAllErrors(t *testing.T) {
 	err := (Config{}).Validate()
 
 	require.True(t, models.IsGenericValidationError(err))
-	require.ErrorContains(t, err, "split line group adapter is required")
+	require.ErrorContains(t, err, "split line group service is required")
 	require.ErrorContains(t, err, "rating service is required")
 	require.ErrorContains(t, err, "feature meter resolver is required")
 	require.ErrorContains(t, err, "streaming connector is required")
 	require.ErrorContains(t, err, "max parallel quantity snapshots must be greater than 0")
+}
+
+func TestSnapshotLineQuantityRejectsNonLegacyLinesBeforeSnapshotting(t *testing.T) {
+	for _, engineType := range []billing.LineEngineType{
+		billing.LineEngineTypeChargeFlatFee,
+		billing.LineEngineTypeChargeUsageBased,
+		billing.LineEngineTypeChargeCreditPurchase,
+	} {
+		t.Run(string(engineType), func(t *testing.T) {
+			// Given a charge-owned line and no legacy snapshot dependencies.
+			line := standardLineForLineEngineOverrideTest(t, lineEngineOverrideTestPeriod())
+			line.Engine = engineType
+			invoice := quantitySnapshotTestInvoice()
+			before, err := json.Marshal(line)
+			require.NoError(t, err)
+
+			// When the legacy engine is asked to snapshot that line.
+			result, err := (&Engine{}).SnapshotLineQuantity(t.Context(), SnapshotLineQuantityInput{
+				Invoice: &invoice,
+				Line:    line,
+			})
+
+			// Then ownership validation rejects it before any snapshot or mutation.
+			require.ErrorAs(t, err, &billing.ValidationError{})
+			require.ErrorContains(t, err, "line must be owned by the legacy invoice engine")
+			require.Nil(t, result)
+			after, err := json.Marshal(line)
+			require.NoError(t, err)
+			require.JSONEq(t, string(before), string(after))
+		})
+	}
 }
 
 type quantitySnapshotFeatureServiceStub struct {
@@ -100,7 +133,9 @@ func TestSnapshotLineQuantitiesContinuesWithPartialFeatureMeters(t *testing.T) {
 	lines := billing.StandardLines{validLine, meterlessLine, missingFlatLine, featurelessLine}
 
 	// When their quantities are snapshotted from a partial feature-meter result.
-	err := engine.SnapshotLineQuantities(t.Context(), quantitySnapshotTestInvoice(), lines)
+	err := engine.snapshotLineQuantities(t.Context(), quantitySnapshotTestInvoice(), lo.Map(lines, func(line *billing.StandardLine, _ int) lineWithHierarchy {
+		return lineWithHierarchy{StandardLine: line}
+	}))
 
 	// Then metered lines retain feature validation, while flat lines snapshot without resolving their feature.
 	issues, systemErr := billing.ToValidationIssues(err)
@@ -132,13 +167,60 @@ func TestSnapshotLineQuantitiesRejectsResolverSystemErrors(t *testing.T) {
 
 	// Given a feature service that cannot resolve any requested features.
 	// When quantity snapshotting attempts to resolve the line's feature meter.
-	err := engine.SnapshotLineQuantities(t.Context(), quantitySnapshotTestInvoice(), billing.StandardLines{line})
+	err := engine.snapshotLineQuantities(t.Context(), quantitySnapshotTestInvoice(), linesWithHierarchy{{StandardLine: line}})
 
 	// Then the operational failure aborts snapshotting instead of becoming a validation issue.
 	issues, systemErr := billing.ToValidationIssues(err)
 	require.Nil(t, issues)
 	require.ErrorIs(t, systemErr, resolverErr)
 	require.Nil(t, line.UsageBased.Quantity)
+}
+
+func TestSnapshotLineQuantitiesUsesExplicitHierarchy(t *testing.T) {
+	for _, aggregation := range []meter.MeterAggregation{meter.MeterAggregationSum, meter.MeterAggregationMin, meter.MeterAggregationAvg} {
+		t.Run(string(aggregation), func(t *testing.T) {
+			// Given usage before and during a split, with no embedded hierarchy.
+			fullPeriod := lineEngineOverrideTestPeriod()
+			boundary := fullPeriod.From.Add(fullPeriod.Duration() / 2)
+			meterID := "meter-id"
+			testMeter := meter.Meter{Key: "meter", Aggregation: aggregation}
+			testMeter.ID = meterID
+			engine, connector := newQuantitySnapshotTestEngine(t,
+				[]feature.Feature{{Namespace: "namespace", ID: "feature-id", Key: "feature", MeterID: &meterID}},
+				[]meter.Meter{testMeter}, nil,
+			)
+			connector.AddRow(testMeter.Key, meter.MeterQueryRow{WindowStart: boundary, WindowEnd: fullPeriod.To, Value: 20})
+			connector.AddRow(testMeter.Key, meter.MeterQueryRow{WindowStart: fullPeriod.From, WindowEnd: boundary, Value: 40})
+			connector.AddRow(testMeter.Key, meter.MeterQueryRow{WindowStart: fullPeriod.From, WindowEnd: fullPeriod.To, Value: 60})
+			line := quantitySnapshotTestLine("line", "feature", productcatalog.NewPriceFrom(productcatalog.UnitPrice{
+				Amount: alpacadecimal.NewFromInt(1),
+			}))
+			line.Period.From = boundary
+			line.SplitLineGroupID = lo.ToPtr("group")
+			lines := linesWithHierarchy{{StandardLine: line}}
+
+			// When context is explicitly absent, the existing ordinary-period fallback remains.
+			err := engine.snapshotLineQuantities(t.Context(), quantitySnapshotTestInvoice(), lines)
+			require.NoError(t, err)
+			require.Equal(t, 20.0, line.UsageBased.MeteredQuantity.InexactFloat64())
+			require.Zero(t, line.UsageBased.MeteredPreLinePeriodQuantity.InexactFloat64())
+
+			lines[0].hierarchy = &splitlinegroup.SplitLineHierarchy{
+				Group: splitlinegroup.SplitLineGroup{SplitLineGroupMutableFields: splitlinegroup.SplitLineGroupMutableFields{ServicePeriod: fullPeriod}},
+			}
+			err = engine.snapshotLineQuantities(t.Context(), quantitySnapshotTestInvoice(), lines)
+
+			// Then explicit context queries cumulative SUM usage and retains the min/avg restriction.
+			if aggregation != meter.MeterAggregationSum {
+				require.ErrorContains(t, err, "is not supported for split lines")
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, 20.0, line.UsageBased.MeteredQuantity.InexactFloat64())
+			require.Equal(t, 40.0, line.UsageBased.MeteredPreLinePeriodQuantity.InexactFloat64())
+		})
+	}
 }
 
 func TestAreLinesBillableAsOfLocalizesFeatureMeterValidationIssues(t *testing.T) {
@@ -479,4 +561,8 @@ func usageDiscountForLineEngineOverrideTest(quantity string) billing.Discounts {
 			},
 		},
 	}
+}
+
+func (s *lineEngineBillabilityRatingService) GenerateLegacyProgressiveBilledLines(in rating.LegacyProgressivelyBillableLineAccessor, opts ...rating.GenerateDetailedLinesOption) (rating.GenerateDetailedLinesResult, error) {
+	return rating.GenerateDetailedLinesResult{}, nil
 }

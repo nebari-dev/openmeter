@@ -52,7 +52,7 @@ func (s *CustomCurrencyCreditsSuite) TestPaidBackfillRecognitionLeavesPromotiona
 			t := s.T()
 			ctx := t.Context()
 			ns := s.GetUniqueNamespace("paid-backfill-recognition")
-			defaults := s.ProvisionDefaultTaxCodes(ctx, ns)
+			defaults := s.TaxCodeEnv.ProvisionDefaultTaxCodes(s.T(), ns)
 			customer := s.CreateLedgerBackedCustomer(ns, "test-subject")
 			sandbox := s.InstallSandboxApp(t, ns)
 			s.ProvisionBillingProfile(ctx, ns, sandbox.GetID(),
@@ -267,6 +267,7 @@ func (s *CustomCurrencyCreditsSuite) TestPaidBackfillRecognitionLeavesPromotiona
 						s.Equal(recognitionByBacking[backing], lo.FromPtr(segment.BackingTransactionGroupID))
 						seen[backing] = segment.Amount.InexactFloat64()
 					}
+
 					s.Equal(amountByBacking, seen)
 				default:
 					t.Fatalf("unexpected lineage origin %q", root.OriginKind)

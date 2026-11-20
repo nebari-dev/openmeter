@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -16,16 +19,22 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/customer"
 	"github.com/openmeterio/openmeter/openmeter/subscription"
 	"github.com/openmeterio/openmeter/pkg/clock"
-	"github.com/openmeterio/openmeter/pkg/convert"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/framework/tracex"
 	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/pagination"
+	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
 
 const (
 	SubscriptionSyncComponentName billing.ComponentName = "subscription-sync"
+	oldSubscriptionSyncThreshold                        = 30 * 24 * time.Hour
+
+	// Subscription sync schedules its next reconciliation at a random point between
+	// these percentages of the whole next billing period, measured from its start.
+	nextReconciliationMinPercentage = 80
+	nextReconciliationMaxPercentage = 95
 )
 
 func (s *Service) invoicePendingLines(ctx context.Context, customer customer.CustomerID) error {
@@ -44,7 +53,7 @@ func (s *Service) invoicePendingLines(ctx context.Context, customer customer.Cus
 			billing.WithMaxLinesPerInvoice(s.featureFlags.MaxLinesPerCollectedInvoice),
 		)
 		if err != nil {
-			if errors.Is(err, billing.ErrInvoiceCreateNoLines) {
+			if errors.Is(err, billing.ErrInvoiceCreateNoLines) || errors.Is(err, billing.ErrInvoiceCreateAllLinesGated) {
 				return nil
 			}
 
@@ -60,27 +69,33 @@ func (s *Service) HandleSubscriptionSyncEvent(ctx context.Context, event *subscr
 		return nil
 	}
 
-	return s.synchronizeSubscriptionAndInvoiceCustomer(
-		ctx,
-		newSubscriptionReferenceOrView(event.Subscription),
-		time.Now(),
-	)
+	opts := []subscriptionsync.SynchronizeSubscriptionOption{subscriptionsync.WithInvoicePendingLines()}
+	if event.SkipIfSyncedSince != nil {
+		opts = append(opts, subscriptionsync.WithSkipIfSyncedSince(*event.SkipIfSyncedSince))
+	}
+
+	return s.SyncByID(ctx, event.Subscription.NamespacedID, time.Now(), opts...)
 }
 
-func (s *Service) synchronizeSubscriptionAndInvoiceCustomer(ctx context.Context, refOrView subscriptionReferenceOrView, asOf time.Time, opts ...subscriptionsync.SynchronizeSubscriptionOption) error {
-	res, err := s.synchronizeSubscription(ctx, refOrView, asOf, opts...)
+func (s *Service) SyncByID(ctx context.Context, subscriptionID models.NamespacedID, asOf time.Time, opts ...subscriptionsync.SynchronizeSubscriptionOption) error {
+	options := subscriptionsync.SynchronizeSubscriptionOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	res, err := s.synchronizeSubscription(ctx, synchronizeSubscriptionInput{
+		SubscriptionID: subscriptionID,
+		AsOf:           asOf,
+		Options:        options,
+	})
 	if err != nil {
 		return fmt.Errorf("synchronize subscription: %w", err)
 	}
 
-	if res != nil && res.View != nil {
-		customerID := customer.CustomerID{
-			Namespace: res.View.Subscription.Namespace,
-			ID:        res.View.Subscription.CustomerId,
-		}
-		// Invoice any pending lines invoicable now, so that any in advance fees are invoiced immediately.
-		if err := s.invoicePendingLines(ctx, customerID); err != nil {
-			return fmt.Errorf("invoice pending lines (post): %w [customer_id=%s]", err, customerID.ID)
+	if options.InvoicePendingLines && !options.DryRun && res.ShouldInvoicePendingLines {
+		// Collect after reconciliation so newly generated advance fees can be invoiced.
+		if err := s.invoicePendingLines(ctx, res.CustomerID); err != nil {
+			return fmt.Errorf("invoice pending lines (post): %w [customer_id=%s]", err, res.CustomerID.ID)
 		}
 	}
 
@@ -88,78 +103,140 @@ func (s *Service) synchronizeSubscriptionAndInvoiceCustomer(ctx context.Context,
 }
 
 type synchronizeSubscriptionResult struct {
-	View    *subscription.SubscriptionView
-	Deleted bool
+	CustomerID                customer.CustomerID
+	ShouldInvoicePendingLines bool
 }
 
-func (s *Service) synchronizeSubscription(ctx context.Context, refOrView subscriptionReferenceOrView, asOf time.Time, opts ...subscriptionsync.SynchronizeSubscriptionOption) (*synchronizeSubscriptionResult, error) {
-	subscriptionID := refOrView.GetID()
+type synchronizeSubscriptionInput struct {
+	SubscriptionID models.NamespacedID
+	AsOf           time.Time
+	Options        subscriptionsync.SynchronizeSubscriptionOptions
+}
 
+func (i synchronizeSubscriptionInput) Validate() error {
+	var errs []error
+	if err := i.SubscriptionID.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("subscription ID: %w", err))
+	}
+
+	if i.AsOf.IsZero() {
+		errs = append(errs, errors.New("as of is required"))
+	}
+
+	return models.NewNillableGenericValidationError(errors.Join(errs...))
+}
+
+type nextReconciliationAtInput struct {
+	// BillingPeriod is the billing period that follows what the sync just generated.
+	BillingPeriod  timeutil.ClosedPeriod
+	BillingEndsAt  *time.Time
+	RandomFraction float64
+}
+
+func (i nextReconciliationAtInput) Validate() error {
+	var errs []error
+	if err := i.BillingPeriod.ValidateAsRequired(); err != nil {
+		errs = append(errs, fmt.Errorf("billing period: %w", err))
+	}
+
+	if i.BillingEndsAt != nil && i.BillingEndsAt.IsZero() {
+		errs = append(errs, errors.New("billing ends at must not be zero when set"))
+	}
+
+	if math.IsNaN(i.RandomFraction) || i.RandomFraction < 0 || i.RandomFraction > 1 {
+		errs = append(errs, errors.New("random fraction must be between 0 and 1"))
+	}
+
+	return models.NewNillableGenericValidationError(errors.Join(errs...))
+}
+
+// nextReconciliationAt picks when an active subscription must be synced again.
+// A deadline in the past is fine: it keeps the subscription due until a sync
+// with a current AsOf catches up.
+func nextReconciliationAt(in nextReconciliationAtInput) (time.Time, error) {
+	if err := in.Validate(); err != nil {
+		return time.Time{}, err
+	}
+
+	// The period that ends billing gets an exact final sync instead of a jittered
+	// one, so completion is recorded as soon as billing ends.
+	if in.BillingEndsAt != nil && !in.BillingPeriod.To.Before(*in.BillingEndsAt) {
+		return *in.BillingEndsAt, nil
+	}
+
+	percentage := nextReconciliationMinPercentage + (nextReconciliationMaxPercentage-nextReconciliationMinPercentage)*in.RandomFraction
+
+	return in.BillingPeriod.From.Add(time.Duration(float64(in.BillingPeriod.Duration()) * percentage / 100)), nil
+}
+
+func (s *Service) synchronizeSubscription(ctx context.Context, in synchronizeSubscriptionInput) (*synchronizeSubscriptionResult, error) {
+	if err := in.Validate(); err != nil {
+		return nil, err
+	}
+
+	subscriptionID := in.SubscriptionID
+	asOf := in.AsOf
+	options := in.Options
 	span := tracex.Start[*synchronizeSubscriptionResult](ctx, s.tracer, "billing.worker.subscription.sync.SynchronizeSubscription", trace.WithAttributes(
 		attribute.String("subscription_id", subscriptionID.ID),
 		attribute.String("as_of", asOf.Format(time.RFC3339)),
 	))
 
-	options := subscriptionsync.SynchronizeSubscriptionOptions{}
-	for _, opt := range opts {
-		opt(&options)
-	}
-
 	return span.Wrap(func(ctx context.Context) (*synchronizeSubscriptionResult, error) {
-		subs, err := s.getSubscription(ctx, subscriptionID)
+		subscriptionForCustomer, err := s.getSubscription(ctx, subscriptionID)
 		if err != nil {
 			return nil, err
 		}
 
-		var subsView *subscription.SubscriptionView
-		if subs.IsDeleted() {
-			subsView = nil
-		} else if refOrView.Type() == SubscriptionReferenceTypeView {
-			view, err := refOrView.AsSubscriptionView()
-			if err != nil {
-				return nil, err
-			}
-
-			subsView = &view
-			currentView, err := s.subscriptionService.GetView(ctx, subscriptionID)
-			if err != nil {
-				return nil, err
-			}
-
-			// Currency definitions are runtime-only snapshots and are deliberately not
-			// serialized into subscription events. Reload custom-priced views before
-			// planning so billing has authoritative identity and precision, and so a
-			// delayed event cannot reconcile obsolete custom-currency state.
-			if view.Spec.HasCustomCurrencyBillables() || currentView.Spec.HasCustomCurrencyBillables() {
-				subsView = &currentView
-			}
-		} else {
-			view, err := s.subscriptionService.GetView(ctx, subscriptionID)
-			if err != nil {
-				return nil, err
-			}
-
-			subsView = &view
-		}
-
-		res := &synchronizeSubscriptionResult{
-			View:    subsView,
-			Deleted: subs.IsDeleted(),
-		}
-
 		customerID := customer.CustomerID{
-			Namespace: subs.Namespace,
-			ID:        subs.CustomerId,
+			Namespace: subscriptionForCustomer.Namespace,
+			ID:        subscriptionForCustomer.CustomerId,
 		}
 
-		var customerDeletedAt *time.Time
-		var subscriptionEndProrationMode billing.SubscriptionEndProrationMode
-		if subsView != nil && subsView.Spec.HasBillables() {
-			// TODO[later]: Right now we are getting the billing profile as a validation step, but later if we allow more collection
-			// alignment settings, we should use the collection settings from here to determine the generation end (overriding asof).
-			customerOverride, err := s.billingService.GetCustomerOverride(ctx, billing.GetCustomerOverrideInput{
+		return withBillingLock(ctx, s, customerID, func(ctx context.Context) (*synchronizeSubscriptionResult, error) {
+			syncStates, err := s.subscriptionSyncAdapter.GetSyncStates(ctx, subscriptionsync.GetSyncStatesInput{subscriptionID})
+			if err != nil {
+				return nil, fmt.Errorf("getting subscription sync state: %w", err)
+			}
+
+			// Capture the revision before reading billing intent. A change committed
+			// during sync must remain different from the revision acknowledged below.
+			var subsRevision string
+			if len(syncStates) == 0 {
+				subsRevision = ulid.Make().String()
+			} else {
+				subsRevision = syncStates[0].CurrentSubsRevision
+			}
+
+			// Checked under the billing lock, so a sync that was holding it is seen
+			// here. Only a strictly later success counts: one recorded at the selection
+			// instant may be the very state that made the subscription due.
+			//
+			// LastSuccessAt is taken when a sync starts, so a sync that was already
+			// running at selection, or a worker with a slower clock, is not caught and
+			// both syncs run. That window is accepted: nothing is billed wrongly, the
+			// later periods are provisioned again as their deadlines come.
+			if options.SkipIfSyncedSince != nil && len(syncStates) > 0 {
+				state := syncStates[0]
+				if state.LastSuccessAt != nil && state.LastSuccessAt.After(*options.SkipIfSyncedSince) &&
+					state.CurrentSubsRevision == state.LastSyncedSubsRevision {
+					s.logger.InfoContext(ctx, "skipping subscription sync because it was synced after it was selected",
+						"subscription_id", subscriptionID.ID, "last_success_at", *state.LastSuccessAt)
+
+					return &synchronizeSubscriptionResult{CustomerID: customerID}, nil
+				}
+			}
+
+			// A sync waiting for the billing lock must observe any deletion cleanup
+			// that completed first, rather than recreate lines from an older view.
+			subs, err := s.getSubscription(ctx, subscriptionID)
+			if err != nil {
+				return nil, err
+			}
+
+			customerProfile, err := s.billingService.GetCustomerBillingProfile(ctx, billing.GetCustomerBillingProfileInput{
 				Customer: customerID,
-				Expand: billing.CustomerOverrideExpand{
+				Expand: billing.CustomerBillingProfileExpand{
 					Customer: true,
 				},
 			})
@@ -167,100 +244,156 @@ func (s *Service) synchronizeSubscription(ctx context.Context, refOrView subscri
 				return nil, fmt.Errorf("getting billing profile: %w", err)
 			}
 
-			if customerOverride.Customer != nil {
-				customerDeletedAt = convert.SafeToUTC(customerOverride.Customer.GetDeletedAt())
+			if customerProfile.Customer == nil {
+				return nil, errors.New("customer not found in billing profile")
 			}
-			subscriptionEndProrationMode = customerOverride.MergedProfile.WorkflowConfig.Invoicing.SubscriptionEndProrationMode
 
-			if customerOverride.Customer != nil && customerOverride.Customer.DeletedAt != nil && !customerOverride.Customer.DeletedAt.After(subsView.Spec.ActiveFrom) {
-				if options.DryRun {
-					return res, nil
+			customer := customerProfile.Customer
+
+			var cleanupState subscriptionsync.SyncStateState
+			switch {
+			case subs.DeletedAt != nil:
+				// Intentionally differs from IsDeleted(); see "Race between billing collection and subscription deletion cleanup" in ../README.md.
+				cleanupState = subscriptionsync.SyncStateStateSubscriptionDeleted
+			case customer.DeletedAt != nil && !subs.ActiveFrom.Before(*customer.DeletedAt):
+				// This subscription cannot provide service to the deleted customer. Remove
+				// any lines generated before deletion so billing collection cannot invoice them.
+				cleanupState = subscriptionsync.SyncStateStateCustomerDeletedBefore
+			}
+
+			now := clock.Now().UTC()
+			res := &synchronizeSubscriptionResult{CustomerID: customerID}
+			// Avoid loading billing artifacts for subscriptions that ended more than 30 days ago.
+			// Forced resyncs and deletion cleanup bypass this cutoff.
+			if cleanupState == "" && !options.ForceResyncOldSubscriptions && subs.ActiveTo != nil && subs.ActiveTo.Before(now.Add(-oldSubscriptionSyncThreshold)) {
+				s.logger.InfoContext(ctx, "skipping subscription sync because it ended more than 30 days ago", "subscription_id", subscriptionID.ID, "active_to", *subs.ActiveTo)
+				if !options.DryRun {
+					if err := s.subscriptionSyncAdapter.RecordSyncResult(ctx, subscriptionsync.RecordSyncResultInput{
+						SubscriptionID:         subscriptionID,
+						LastSuccessState:       subscriptionsync.SyncStateStateTooOld,
+						LastSuccessAt:          clock.Now().UTC(),
+						LastSyncedSubsRevision: subsRevision,
+					}); err != nil {
+						return nil, fmt.Errorf("recording skipped subscription sync: %w", err)
+					}
 				}
 
-				if err := s.updateSyncState(ctx, updateSyncStateInput{
-					SubscriptionID: subscriptionID,
-					// Prevent deleted customers from continuing to be scheduled for sync.
-					PreventFurtherSyncs: true,
-				}); err != nil {
-					return nil, fmt.Errorf("updating sync state: %w", err)
-				}
-
-				s.logger.WarnContext(ctx, "customer deleted before subscription start, skipping sync", "subscription_id", subscriptionID.ID, "customer_id", customerID.ID)
 				return res, nil
 			}
-		}
 
-		cur, err := currencyx.NewCurrencyBuilder(currencyx.CurrencyTypeFiat).
-			WithCode(subs.InvoiceCurrency).
-			Build()
-		if err != nil {
-			return nil, fmt.Errorf("getting currency calculator: %w", err)
-		}
+			var subsView *subscription.SubscriptionView
+			if cleanupState == "" {
+				view, err := s.subscriptionService.GetView(ctx, subscriptionID)
+				if err != nil {
+					return nil, fmt.Errorf("getting subscription view: %w", err)
+				}
 
-		return withBillingLock(ctx, s, customer.CustomerID{
-			Namespace: subs.Namespace,
-			ID:        subs.CustomerId,
-		}, func(ctx context.Context) (*synchronizeSubscriptionResult, error) {
+				subsView = &view
+			}
+
+			res.ShouldInvoicePendingLines = cleanupState == ""
+
+			cur, err := currencyx.NewCurrencyBuilder(currencyx.CurrencyTypeFiat).
+				WithCode(subs.InvoiceCurrency).
+				Build()
+			if err != nil {
+				return nil, fmt.Errorf("getting currency calculator: %w", err)
+			}
+
 			// Calculate per line patches
 			linesDiff, err := s.buildSyncPlan(ctx, buildSyncPlanInput{
 				Subscription:                 subs,
 				SubscriptionView:             subsView,
 				AsOf:                         asOf,
-				CustomerDeletedAt:            customerDeletedAt,
-				SubscriptionEndProrationMode: subscriptionEndProrationMode,
+				CustomerDeletedAt:            customer.DeletedAt,
+				SubscriptionEndProrationMode: customerProfile.EffectiveProfile.WorkflowConfig.Invoicing.SubscriptionEndProrationMode,
 				Currency:                     cur,
 			})
 			if err != nil {
 				return nil, err
 			}
 
-			// If we have a view, we can use it to determine if the subscription has billables, if the
-			// subscription is deleted (no view), let's set hasBillables to false, so that we prevent further syncs.
-			hasBillables := false
-			if subsView != nil {
-				hasBillables = subsView.Spec.HasBillables()
+			if linesDiff == nil {
+				return nil, errors.New("building subscription sync plan returned nil without an error")
 			}
 
-			if linesDiff == nil || linesDiff.IsEmpty() {
-				if options.DryRun {
-					return res, nil
-				}
-
-				generationLimit := time.Time{}
-				if linesDiff != nil {
-					generationLimit = linesDiff.SubscriptionMaxGenerationTimeLimit
-				}
-
-				if err := s.updateSyncState(ctx, updateSyncStateInput{
-					SubscriptionID:         subscriptionID,
-					MaxGenerationTimeLimit: generationLimit,
-					HasBillables:           hasBillables,
+			if !linesDiff.IsEmpty() {
+				if err := s.reconciler.Apply(ctx, reconciler.ApplyInput{
+					DryRun:   options.DryRun,
+					Customer: customerID,
+					Currency: cur,
+					Plan:     linesDiff,
 				}); err != nil {
-					return nil, fmt.Errorf("updating sync state: %w", err)
+					return nil, err
 				}
-
-				return res, nil
-			}
-
-			if err := s.reconciler.Apply(ctx, reconciler.ApplyInput{
-				DryRun:   options.DryRun,
-				Customer: customerID,
-				Currency: cur,
-				Plan:     linesDiff,
-			}); err != nil {
-				return nil, err
 			}
 
 			if options.DryRun {
 				return res, nil
 			}
 
-			if err := s.updateSyncState(ctx, updateSyncStateInput{
+			result := subscriptionsync.RecordSyncResultInput{
 				SubscriptionID:         subscriptionID,
-				MaxGenerationTimeLimit: linesDiff.SubscriptionMaxGenerationTimeLimit,
-				HasBillables:           hasBillables,
-			}); err != nil {
-				return nil, fmt.Errorf("updating sync state: %w", err)
+				LastSuccessState:       cleanupState,
+				LastSuccessAt:          clock.Now().UTC(),
+				LastSyncedSubsRevision: subsRevision,
+			}
+
+			if subsView != nil {
+				billingEndsAt := linesDiff.BillingEndsAt
+
+				switch {
+				// Customer deletion can end billing before the subscription's own ActiveTo.
+				// Record completion only once both the worker clock and AsOf cover that end.
+				case billingEndsAt != nil && !billingEndsAt.After(now) && !billingEndsAt.After(asOf):
+					result.LastSuccessState = subscriptionsync.SyncStateStateEnded
+				case !subsView.Spec.HasBillables():
+					result.LastSuccessState = subscriptionsync.SyncStateStateNoBillables
+				default:
+					generatedUntil := linesDiff.SubscriptionMaxGenerationTimeLimit
+					if generatedUntil.IsZero() {
+						// If no phase produced a generation limit, use the requested sync horizon.
+						generatedUntil = asOf
+					}
+
+					if generatedUntil.Before(subsView.Spec.ActiveFrom) {
+						generatedUntil = subsView.Spec.ActiveFrom
+					}
+
+					result.LastSuccessState = subscriptionsync.SyncStateStateActive
+
+					if billingEndsAt != nil && !generatedUntil.Before(*billingEndsAt) {
+						// Generation already covers the rest of billing, for example when the sync
+						// horizon is past a future cancellation. There is no billing period left to
+						// schedule in, and a lookup after the end returns an inverted period, so the
+						// final sync waits for the end itself.
+						result.NextReconciliationAt = billingEndsAt
+					} else {
+						// The limit is normally the end of the billing period containing AsOf, so this
+						// returns the period after it: the last one provisioned. Do not advance by
+						// another cadence.
+						nextBillingPeriod, err := subsView.Spec.GetAlignedBillingPeriodAt(generatedUntil)
+						if err != nil {
+							return nil, fmt.Errorf("getting next billing period: %w", err)
+						}
+
+						next, err := nextReconciliationAt(nextReconciliationAtInput{
+							BillingPeriod:  nextBillingPeriod,
+							BillingEndsAt:  billingEndsAt,
+							RandomFraction: rand.Float64(),
+						})
+						if err != nil {
+							return nil, fmt.Errorf("calculating next reconciliation at: %w", err)
+						}
+
+						result.NextReconciliationAt = &next
+					}
+				}
+			}
+
+			// Record success even for an empty plan, together with billing changes.
+			if err := s.subscriptionSyncAdapter.RecordSyncResult(ctx, result); err != nil {
+				return nil, fmt.Errorf("recording subscription sync result: %w", err)
 			}
 
 			return res, nil
@@ -273,6 +406,7 @@ func withBillingLock[T any](ctx context.Context, s *Service, customerID customer
 	err := s.billingService.WithLock(ctx, customerID, func(ctx context.Context) error {
 		var err error
 		out, err = fn(ctx)
+
 		return err
 	})
 	if err != nil {
@@ -301,52 +435,4 @@ func (s *Service) getSubscription(ctx context.Context, subscriptionID models.Nam
 	}
 
 	return subs.Items[0], nil
-}
-
-type updateSyncStateInput struct {
-	SubscriptionID         models.NamespacedID
-	MaxGenerationTimeLimit time.Time
-	PreventFurtherSyncs    bool
-	HasBillables           bool
-}
-
-func (s *Service) updateSyncState(ctx context.Context, in updateSyncStateInput) error {
-	span := tracex.StartWithNoValue(ctx, s.tracer, "billing.worker.subscription.sync.updateSyncState", trace.WithAttributes(
-		attribute.String("subscription_id", in.SubscriptionID.ID),
-		attribute.String("max_generation_time_limit", in.MaxGenerationTimeLimit.Format(time.RFC3339)),
-	))
-
-	return span.Wrap(func(ctx context.Context) error {
-		hasBillables := in.HasBillables
-		if in.PreventFurtherSyncs {
-			// We are using the hasBillables flag to prevent further syncs, this is used when the customer is
-			// deleted etc.
-			hasBillables = false
-		}
-
-		if !hasBillables {
-			return s.subscriptionSyncAdapter.UpsertSyncState(ctx, subscriptionsync.UpsertSyncStateInput{
-				SubscriptionID: in.SubscriptionID,
-				HasBillables:   false,
-				SyncedAt:       clock.Now().UTC(),
-			})
-		}
-
-		nextSyncAfter := in.MaxGenerationTimeLimit
-
-		if in.MaxGenerationTimeLimit.IsZero() {
-			// Fallback: we cannot determine the next sync after, so we'll just mandate the sync
-			if nextSyncAfter.IsZero() {
-				s.logger.WarnContext(ctx, "cannot determine the next sync after, syncing immediately", "subscription_id", in.SubscriptionID.ID)
-				nextSyncAfter = clock.Now().UTC()
-			}
-		}
-
-		return s.subscriptionSyncAdapter.UpsertSyncState(ctx, subscriptionsync.UpsertSyncStateInput{
-			SubscriptionID: in.SubscriptionID,
-			HasBillables:   true,
-			NextSyncAfter:  lo.ToPtr(nextSyncAfter),
-			SyncedAt:       clock.Now().UTC(),
-		})
-	})
 }

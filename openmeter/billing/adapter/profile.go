@@ -20,8 +20,6 @@ import (
 	dbcustomer "github.com/openmeterio/openmeter/openmeter/ent/db/customer"
 	taxcodedb "github.com/openmeterio/openmeter/openmeter/ent/db/taxcode"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
-	"github.com/openmeterio/openmeter/openmeter/taxcode"
-	taxcodeadapter "github.com/openmeterio/openmeter/openmeter/taxcode/adapter"
 	"github.com/openmeterio/openmeter/pkg/clock"
 	"github.com/openmeterio/openmeter/pkg/convert"
 	"github.com/openmeterio/openmeter/pkg/filter"
@@ -35,10 +33,9 @@ var _ billing.ProfileAdapter = (*adapter)(nil)
 
 const appUsageReferenceLimit = 10
 
-func workflowConfigWithTaxCode(namespace string) func(*db.BillingWorkflowConfigQuery) {
+func workflowConfigInNamespace(namespace string) func(*db.BillingWorkflowConfigQuery) {
 	return func(q *db.BillingWorkflowConfigQuery) {
-		q.Where(billingworkflowconfig.Namespace(namespace)).
-			WithTaxCode(taxCodeInNamespace(namespace))
+		q.Where(billingworkflowconfig.Namespace(namespace))
 	}
 }
 
@@ -110,7 +107,8 @@ func (a *adapter) createWorkflowConfig(ctx context.Context, ns string, input bil
 		SetInvoiceCollectionMethod(input.Payment.CollectionMethod).
 		SetInvoiceProgressiveBilling(input.Invoicing.ProgressiveBilling).
 		SetSubscriptionEndProrationMode(input.Invoicing.SubscriptionEndProrationMode).
-		SetNillableInvoiceDefaultTaxSettings(input.Invoicing.DefaultTaxConfig).
+		SetEmptyInvoiceMode(input.Invoicing.EmptyInvoiceMode).
+		SetNillableInvoiceDefaultTaxSettings(defaultTaxSettingsJSONCopy(input.Invoicing.DefaultTaxConfig)).
 		SetTaxEnabled(input.Tax.Enabled).
 		SetTaxEnforced(input.Tax.Enforced)
 
@@ -119,31 +117,21 @@ func (a *adapter) createWorkflowConfig(ctx context.Context, ns string, input bil
 	}
 
 	if cfg := input.Invoicing.DefaultTaxConfig; cfg != nil {
-		cmd = cmd.SetNillableTaxCodeID(cfg.TaxCodeID).SetNillableTaxBehavior(cfg.Behavior)
+		cmd = cmd.SetNillableTaxCodeID(lo.EmptyableToPtr(cfg.TaxCodeID)).SetNillableTaxBehavior(cfg.Behavior)
 	}
 
-	saved, err := cmd.Save(ctx)
-	if err != nil {
-		return nil, err
+	return cmd.Save(ctx)
+}
+
+// defaultTaxSettingsJSONCopy is what invoice_default_tax_settings gets while the column is being
+// retired: just the tax code ID and behavior, so the CHECK constraints against the tax_code_id and
+// tax_behavior columns hold and older binaries reading the JSON still see the same default.
+func defaultTaxSettingsJSONCopy(cfg *productcatalog.TaxCodeConfig) *productcatalog.TaxConfig {
+	if cfg == nil {
+		return nil
 	}
 
-	// Save never populates edges; manually fetch the TaxCode entity so that
-	// mapWorkflowConfigFromDB can call BackfillTaxConfig without a full node re-fetch
-	// (which would break pointer aliasing for AnchoredAlignmentDetail).
-	if saved.TaxCodeID != nil {
-		tc, err := a.db.TaxCode.Query().
-			Where(taxcodedb.Namespace(ns), taxcodedb.ID(*saved.TaxCodeID)).
-			Only(ctx)
-		if err != nil {
-			if db.IsNotFound(err) {
-				return nil, taxcode.NewTaxCodeNotFoundError(*saved.TaxCodeID)
-			}
-			return nil, fmt.Errorf("fetching tax code edge after workflow config create: %w", err)
-		}
-		saved.Edges.TaxCode = tc
-	}
-
-	return saved, nil
+	return lo.ToPtr(cfg.ToTaxConfig())
 }
 
 func (a *adapter) GetProfile(ctx context.Context, input billing.GetProfileInput) (*billing.AdapterGetProfileResponse, error) {
@@ -151,81 +139,85 @@ func (a *adapter) GetProfile(ctx context.Context, input billing.GetProfileInput)
 		return nil, err
 	}
 
-	dbProfile, err := a.db.BillingProfile.Query().
-		Where(billingprofile.Namespace(input.Profile.Namespace)).
-		Where(billingprofile.ID(input.Profile.ID)).
-		WithWorkflowConfig(workflowConfigWithTaxCode(input.Profile.Namespace)).First(ctx)
-	if err != nil {
-		if db.IsNotFound(err) {
-			return nil, billing.NotFoundError{
-				Err: fmt.Errorf("%w [id=%s]", billing.ErrProfileNotFound, input.Profile.ID),
+	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, tx *adapter) (*billing.AdapterGetProfileResponse, error) {
+		dbProfile, err := tx.db.BillingProfile.Query().
+			Where(billingprofile.Namespace(input.Profile.Namespace)).
+			Where(billingprofile.ID(input.Profile.ID)).
+			WithWorkflowConfig(workflowConfigInNamespace(input.Profile.Namespace)).First(ctx)
+		if err != nil {
+			if db.IsNotFound(err) {
+				return nil, billing.NotFoundError{
+					Err: fmt.Errorf("%w [id=%s]", billing.ErrProfileNotFound, input.Profile.ID),
+				}
 			}
+
+			return nil, err
 		}
 
-		return nil, err
-	}
-
-	return a.mapProfileFromDB(ctx, dbProfile)
+		return tx.mapProfileFromDB(ctx, dbProfile)
+	})
 }
 
 func (a *adapter) ListProfiles(ctx context.Context, input billing.ListProfilesInput) (pagination.Result[billing.BaseProfile], error) {
-	query := a.db.BillingProfile.Query().
-		Where(billingprofile.Namespace(input.Namespace)).
-		WithWorkflowConfig(workflowConfigWithTaxCode(input.Namespace))
+	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, tx *adapter) (pagination.Result[billing.BaseProfile], error) {
+		query := tx.db.BillingProfile.Query().
+			Where(billingprofile.Namespace(input.Namespace)).
+			WithWorkflowConfig(workflowConfigInNamespace(input.Namespace))
 
-	if !input.IncludeArchived {
-		query = query.Where(billingprofile.DeletedAtIsNil())
-	}
-
-	query = filter.ApplyToQuery(query, input.ID, billingprofile.FieldID)
-	query = filter.ApplyToQuery(query, input.Name, billingprofile.FieldName)
-
-	order := entutils.GetOrdering(sortx.OrderDefault)
-	if !input.Order.IsDefaultValue() {
-		order = entutils.GetOrdering(input.Order)
-	}
-
-	switch input.OrderBy {
-	case billing.ProfileOrderByID:
-		query = query.Order(billingprofile.ByID(order...))
-	case billing.ProfileOrderByUpdatedAt:
-		query = query.Order(billingprofile.ByUpdatedAt(order...), billingprofile.ByID(order...))
-	case billing.ProfileOrderByName:
-		query = query.Order(billingprofile.ByName(order...), billingprofile.ByID(order...))
-	case billing.ProfileOrderByDefault:
-		query = query.Order(billingprofile.ByDefault(order...), billingprofile.ByID(order...))
-	default:
-		query = query.Order(billingprofile.ByCreatedAt(order...), billingprofile.ByID(order...))
-	}
-
-	response := pagination.Result[billing.BaseProfile]{
-		Page: input.Page,
-	}
-
-	paged, err := query.Paginate(ctx, input.Page)
-	if err != nil {
-		return response, err
-	}
-
-	result := make([]billing.BaseProfile, 0, len(paged.Items))
-	for _, item := range paged.Items {
-		if item == nil {
-			a.logger.WarnContext(ctx, "invalid query result: nil billing profile received")
-			continue
+		if !input.IncludeArchived {
+			query = query.Where(billingprofile.DeletedAtIsNil())
 		}
 
-		profile, err := a.mapProfileFromDB(ctx, item)
+		query = filter.ApplyToQuery(query, input.ID, billingprofile.FieldID)
+		query = filter.ApplyToQuery(query, input.Name, billingprofile.FieldName)
+
+		order := entutils.GetOrdering(sortx.OrderDefault)
+		if !input.Order.IsDefaultValue() {
+			order = entutils.GetOrdering(input.Order)
+		}
+
+		switch input.OrderBy {
+		case billing.ProfileOrderByID:
+			query = query.Order(billingprofile.ByID(order...))
+		case billing.ProfileOrderByUpdatedAt:
+			query = query.Order(billingprofile.ByUpdatedAt(order...), billingprofile.ByID(order...))
+		case billing.ProfileOrderByName:
+			query = query.Order(billingprofile.ByName(order...), billingprofile.ByID(order...))
+		case billing.ProfileOrderByDefault:
+			query = query.Order(billingprofile.ByDefault(order...), billingprofile.ByID(order...))
+		default:
+			query = query.Order(billingprofile.ByCreatedAt(order...), billingprofile.ByID(order...))
+		}
+
+		response := pagination.Result[billing.BaseProfile]{
+			Page: input.Page,
+		}
+
+		paged, err := query.Paginate(ctx, input.Page)
 		if err != nil {
-			return response, fmt.Errorf("cannot map profile: %w", err)
+			return response, err
 		}
 
-		result = append(result, profile.BaseProfile)
-	}
+		result := make([]billing.BaseProfile, 0, len(paged.Items))
+		for _, item := range paged.Items {
+			if item == nil {
+				tx.logger.WarnContext(ctx, "invalid query result: nil billing profile received")
+				continue
+			}
 
-	response.TotalCount = paged.TotalCount
-	response.Items = result
+			profile, err := tx.mapProfileFromDB(ctx, item)
+			if err != nil {
+				return response, fmt.Errorf("cannot map profile: %w", err)
+			}
 
-	return response, nil
+			result = append(result, profile.BaseProfile)
+		}
+
+		response.TotalCount = paged.TotalCount
+		response.Items = result
+
+		return response, nil
+	})
 }
 
 func (a *adapter) GetDefaultProfile(ctx context.Context, input billing.GetDefaultProfileInput) (*billing.AdapterGetProfileResponse, error) {
@@ -233,21 +225,23 @@ func (a *adapter) GetDefaultProfile(ctx context.Context, input billing.GetDefaul
 		return nil, err
 	}
 
-	dbProfile, err := a.db.BillingProfile.Query().
-		Where(billingprofile.Namespace(input.Namespace)).
-		Where(billingprofile.Default(true)).
-		Where(billingprofile.DeletedAtIsNil()).
-		WithWorkflowConfig(workflowConfigWithTaxCode(input.Namespace)).
-		Only(ctx)
-	if err != nil {
-		if db.IsNotFound(err) {
-			return nil, nil
+	return entutils.TransactingRepo(ctx, a, func(ctx context.Context, tx *adapter) (*billing.AdapterGetProfileResponse, error) {
+		dbProfile, err := tx.db.BillingProfile.Query().
+			Where(billingprofile.Namespace(input.Namespace)).
+			Where(billingprofile.Default(true)).
+			Where(billingprofile.DeletedAtIsNil()).
+			WithWorkflowConfig(workflowConfigInNamespace(input.Namespace)).
+			Only(ctx)
+		if err != nil {
+			if db.IsNotFound(err) {
+				return nil, nil
+			}
+
+			return nil, err
 		}
 
-		return nil, err
-	}
-
-	return a.mapProfileFromDB(ctx, dbProfile)
+		return tx.mapProfileFromDB(ctx, dbProfile)
+	})
 }
 
 func (a *adapter) DeleteProfile(ctx context.Context, input billing.DeleteProfileInput) error {
@@ -437,37 +431,18 @@ func (a *adapter) updateWorkflowConfig(ctx context.Context, ns string, id string
 		SetInvoiceCollectionMethod(input.Payment.CollectionMethod).
 		SetInvoiceProgressiveBilling(input.Invoicing.ProgressiveBilling).
 		SetSubscriptionEndProrationMode(input.Invoicing.SubscriptionEndProrationMode).
-		SetOrClearInvoiceDefaultTaxSettings(input.Invoicing.DefaultTaxConfig).
+		SetEmptyInvoiceMode(input.Invoicing.EmptyInvoiceMode).
+		SetOrClearInvoiceDefaultTaxSettings(defaultTaxSettingsJSONCopy(input.Invoicing.DefaultTaxConfig)).
 		SetTaxEnabled(input.Tax.Enabled).
 		SetTaxEnforced(input.Tax.Enforced)
 
 	if cfg := input.Invoicing.DefaultTaxConfig; cfg != nil {
-		cmd = cmd.SetOrClearTaxCodeID(cfg.TaxCodeID).SetOrClearTaxBehavior(cfg.Behavior)
+		cmd = cmd.SetOrClearTaxCodeID(lo.EmptyableToPtr(cfg.TaxCodeID)).SetOrClearTaxBehavior(cfg.Behavior)
 	} else {
 		cmd = cmd.ClearTaxCodeID().ClearTaxBehavior()
 	}
 
-	saved, err := cmd.Save(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Save never populates edges; manually fetch the TaxCode entity so that
-	// mapWorkflowConfigFromDB can call BackfillTaxConfig without a full node re-fetch.
-	if saved.TaxCodeID != nil {
-		tc, err := a.db.TaxCode.Query().
-			Where(taxcodedb.Namespace(ns), taxcodedb.ID(*saved.TaxCodeID)).
-			Only(ctx)
-		if err != nil {
-			if db.IsNotFound(err) {
-				return nil, taxcode.NewTaxCodeNotFoundError(*saved.TaxCodeID)
-			}
-			return nil, fmt.Errorf("fetching tax code edge after workflow config update: %w", err)
-		}
-		saved.Edges.TaxCode = tc
-	}
-
-	return saved, nil
+	return cmd.Save(ctx)
 }
 
 func (a *adapter) mapProfileFromDB(ctx context.Context, dbProfile *db.BillingProfile) (*billing.AdapterGetProfileResponse, error) {
@@ -524,17 +499,8 @@ func (a *adapter) mapWorkflowConfigFromDB(ctx context.Context, namespace string,
 		a.logger.ErrorContext(ctx, "billing workflow config namespace isolation violation",
 			"expected_namespace", namespace,
 		)
-		return billing.WorkflowConfig{}, models.NewGenericNotFoundError(fmt.Errorf("billing workflow config not found"))
-	}
 
-	if dbWC.TaxCodeID != nil &&
-		(dbWC.Edges.TaxCode == nil || dbWC.Edges.TaxCode.Namespace != namespace) {
-		a.logger.ErrorContext(ctx, "billing workflow config tax code namespace isolation violation",
-			"workflow_config_id", dbWC.ID,
-			"expected_namespace", namespace,
-			"tax_code_id", *dbWC.TaxCodeID,
-		)
-		return billing.WorkflowConfig{}, taxcode.NewTaxCodeNotFoundError(*dbWC.TaxCodeID)
+		return billing.WorkflowConfig{}, models.NewGenericNotFoundError(fmt.Errorf("billing workflow config not found"))
 	}
 
 	collectionInterval, err := dbWC.LineCollectionPeriod.Parse()
@@ -558,16 +524,8 @@ func (a *adapter) mapWorkflowConfigFromDB(ctx context.Context, namespace string,
 		DueAfter:                     dueAfter,
 		ProgressiveBilling:           dbWC.InvoiceProgressiveBilling,
 		SubscriptionEndProrationMode: dbWC.SubscriptionEndProrationMode,
-		DefaultTaxConfig:             lo.EmptyableToPtr(dbWC.InvoiceDefaultTaxSettings),
-	}
-
-	if taxCodeRow, err := dbWC.Edges.TaxCodeOrErr(); err == nil {
-		tc, err := taxcodeadapter.MapTaxCodeFromEntity(taxCodeRow)
-		if err != nil {
-			return billing.WorkflowConfig{}, fmt.Errorf("mapping tax code for workflow config: %w", err)
-		}
-
-		invoicing.DefaultTaxConfig = productcatalog.BackfillTaxConfig(invoicing.DefaultTaxConfig, dbWC.TaxBehavior, &tc)
+		EmptyInvoiceMode:             dbWC.EmptyInvoiceMode,
+		DefaultTaxConfig:             productcatalog.FromDBTaxColumns(dbWC.TaxCodeID, dbWC.TaxBehavior),
 	}
 
 	return billing.WorkflowConfig{

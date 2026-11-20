@@ -38,6 +38,9 @@ projection. The type-specific detailed status is the lifecycle state.
 - Billing owns invoice aggregates, invoice creation, collection, and invoice
   lifecycle. Charge line engines translate charge state into billing lines and
   feed billing events back into the owning charge state machine.
+- The v3 charge lookup returns the same flat-fee and usage-based charge view
+  as the list. Deleted charges remain readable by ID with their realization
+  history so invoice references can still be followed.
 - Customer charge feature expansion is best-effort. Missing feature references
   retain their ID or key fallback, and a feature remains expandable when only
   its required meter is unavailable; catalog service failures still abort the
@@ -61,6 +64,17 @@ so new charges can use the target version before its pricing takes effect,
 including charges created later for earlier service. Existing charges retain
 their snapshot across overrides, corrections, and later migrations. Charges
 without recorded attribution remain unattributed.
+
+Flat-fee and usage-based creation snapshots tax-code identity in this order:
+an explicitly supplied charge tax-code ID, the effective customer billing profile's
+default tax code, then the organization invoicing default. Profile lookup failures,
+including a missing default profile, abort creation.
+Existing charges retain the selected identity when profile or organization defaults
+change. Explicit tax behavior remains preserved independently of code selection.
+Credit purchases use the organization credit-grant default when no code is supplied.
+Customer charge creation resolves legacy Stripe codes before selecting defaults.
+The API `tax_code.id` reference takes precedence over deprecated `tax_code_id`
+and `stripe.code`.
 
 ## Intent layers
 
@@ -100,6 +114,14 @@ override as appropriate. A state machine rejects a hidden base target while an
 override is active. Service-level sync may update that hidden source state, but
 does not emit invoice patches, rerate, or mutate customer-facing realizations
 for it.
+
+API edits to charge-backed flat-fee invoice lines treat the line price as an
+absolute gross amount and disable proration on the selected mutable layer.
+Discount-, name-, and period-only edits capture the current gross; later period
+edits do not scale it. The subscription-owned base retains its proration
+configuration, and clearing the override restores that source behavior. Direct
+customer charge overrides retain their explicitly supplied proration settings
+until an invoice-line edit captures the displayed gross and disables proration.
 
 Effective deletion and base-intent deletion are therefore different query
 concepts. Subscription reconciliation must be able to find a base intent even
@@ -211,9 +233,33 @@ invoice validation issue.
   written under the lifecycle transaction. Retry safety comes from persisted
   lifecycle facts checked before handlers run, not from the
   [ledger](../../ledger/README.md#transaction-invariants).
+- Billing dispatches standard-invoice lifecycle callbacks only for live lines.
+  Deleted lines remain on the invoice for audit but have no lifecycle effect.
+- Invoice issuance retries acknowledge an immutable flat-fee or usage-based
+  realization for the same invoice and line without booking another ledger
+  transaction. The immutable realization is the durable fact that issuance
+  already completed. Credit purchases have no invoice-issuance effect.
+- Invoice authorization retries for flat-fee, usage-based, and credit-purchase
+  charges acknowledge an existing valid, non-deleted payment only when its
+  namespace, invoice, line, and amount match. Authorized and settled payments
+  retain their original authorization references without another booking.
+  Conflicting or invalid payment facts remain errors.
 - Due `credit_only` flat-fee and usage-based charges are persisted before
   post-create auto-advance, so worker retries do not lose the intent. Credit
   purchases follow their own creation and invoice-event lifecycle.
+
+### No ephemeral state on state machines
+
+Ephemeral state on a charge state machine is forbidden. A state machine holds
+only the charge and its configured dependencies, so it can be rebuilt from the
+persisted charge between any two transitions without losing anything.
+
+A trigger's input is consumed by the transition that receives it. When several
+actions need the same input, run them in sequence in that transition's entry
+action (`statelessx.WithParameters`) instead of storing the input on the machine
+for a later transition; a later `next` trigger after a reload would find it
+missing. Invoice patches are the only exception and follow the ownership
+contract above.
 
 ### Validation issues alongside successful results
 
@@ -286,6 +332,12 @@ facts in order. An invoice-settled credit purchase has one standard invoice
 line; duplicate lines for the same charge are rejected before lifecycle events
 because the transition and its payment realization are bound to that line.
 
+Billing owns the transaction boundary for invoice-issued, payment-authorized,
+and payment-settled line-engine attempts. Charge engines can keep replay
+handling for historical partial state, but a newly failed attempt does not
+leave a subset of charge or ledger writes committed. A direct-paid attempt
+commits authorization and settlement together.
+
 Payment-backed credit purchases also carry a charge-level cost basis. Fiat
 credit uses a fixed scalar intent in the charge currency and materializes its
 deterministic resolved state at charge creation. Custom-currency credit reuses
@@ -327,12 +379,25 @@ booked for each uncovered segment, and lineage persists that same allocation.
 The purchase's lifecycle transaction rolls back if a selected segment changed
 before persistence. Ledger account locks precede lineage locks.
 
+Credit grant feature filters select spendability: a requested feature includes
+grants without feature restrictions. Feature `oeq` matches any requested key
+without duplicating shared grants. Matching precedes pagination. These filters do not require an
+active or funded grant; lifecycle status remains a separate filter.
+
+Credit grant lists default to newest first (`created_at desc`). Sorting happens
+before pagination, with `id` in the same direction breaking ties.
+
 A credit grant, payment authorization, and payment settlement are separate
 durable facts. A later state cannot be inferred from the presence of an earlier
 one.
 
 ## Realization and time semantics
 
+- Usage-based charges with a configured percentage discount or maximum spend
+  are invoiced only at period end, even when progressive billing is enabled.
+  Discount reconciliation between progressively billed runs is currently
+  unsupported.
+  Usage discounts and minimum spend do not impose this restriction.
 - Shrink and extend patches describe the direction of service coverage through
   `ServicePeriod.To`. Full-service, billing-period, and invoice timing reconcile
   to their target values independently; charge-type lifecycles use the service
@@ -349,6 +414,12 @@ one.
   nominal period. Its service period therefore describes the nominal checkpoint
   covered by the run, not strict provenance for every event included in its
   metered quantity.
+- The `real_time_usage` expand queries the meter for active usage-based charges
+  and created usage-based charges whose effective service period contains the
+  read time (inclusive start, exclusive end). Charges with an effective intent
+  deletion marker are skipped. An outstanding realization exposes `usage` only
+  when a live read is available. A value of `"0"` means the read has no unbooked
+  usage.
 - A usage-based run's metered quantity is cumulative from charge start to the run
   boundary and preserves the raw meter snapshot, even when negative. A billing
   standard line retains the signed line-period difference and preceding snapshot
@@ -419,6 +490,7 @@ The usage-based rating algorithms have narrower contracts in
 `currencies.Currency` identity is the fiat code for fiat currencies and the
 namespace plus managed currency ID for custom currencies. A display code is not
 globally sufficient identity: distinct managed currencies may reuse one.
+Credit-grant reads expose that managed ID.
 
 Within the charges domain, custom-currency `credit_then_invoice`:
 

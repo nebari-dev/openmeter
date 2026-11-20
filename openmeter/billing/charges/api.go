@@ -18,9 +18,10 @@ import (
 	"github.com/openmeterio/openmeter/pkg/pagination"
 )
 
-// CustomerChargeAPIService is the API-facing facade for customer-scoped charge operations.
+// CustomerChargeAPIService serves the customer charge representation used by the API.
 type CustomerChargeAPIService interface {
 	CreateCustomerCharge(ctx context.Context, input CreateCustomerChargeInput) (CustomerCharge, error)
+	GetCustomerCharge(ctx context.Context, input GetByIDInput) (CustomerCharge, error)
 	DeleteCustomerCharge(ctx context.Context, input DeleteCustomerChargeInput) error
 	SetCustomerChargeOverride(ctx context.Context, input SetCustomerChargeOverrideInput) (Charge, error)
 	ClearCustomerChargeOverride(ctx context.Context, input ClearCustomerChargeOverrideInput) (Charge, error)
@@ -77,7 +78,7 @@ type CreateCustomerChargeInput struct {
 	CustomerID        string
 	CurrencyCode      currencyx.Code
 	CostBasis         *costbasis.Intent
-	TaxConfig         productcatalog.TaxCodeConfig
+	TaxConfig         productcatalog.TaxConfig
 	UniqueReferenceID *string
 
 	FlatFee    *CreateCustomerChargeFlatFeeInput
@@ -109,6 +110,10 @@ func (i CreateCustomerChargeInput) Validate() error {
 
 	if err := i.CurrencyCode.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("currency code: %w", err))
+	}
+
+	if err := i.TaxConfig.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("tax config: %w", err))
 	}
 
 	if i.CostBasis != nil {

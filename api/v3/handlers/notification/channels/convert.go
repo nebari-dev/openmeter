@@ -6,9 +6,9 @@ import (
 
 	"github.com/samber/lo"
 
-	api "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/api/v3/apierrors"
 	"github.com/openmeterio/openmeter/api/v3/labels"
+	apiv3models "github.com/openmeterio/openmeter/api/v3/models"
 	"github.com/openmeterio/openmeter/openmeter/notification"
 	"github.com/openmeterio/openmeter/pkg/filter"
 	"github.com/openmeterio/openmeter/pkg/models"
@@ -33,16 +33,10 @@ func FromAPIChannelSortField(ctx context.Context, field string) (notification.Or
 	}
 }
 
-// ToDomainChannelType maps the v3 wire-format channel type ("webhook") to the domain
-// ChannelType ("WEBHOOK"). The wire value is lowercase to satisfy the v3 enum casing
-// convention while the domain/DB value stays uppercase for V1 backwards compatibility;
-// an unknown value returns a validation error here rather than passing through, since a
-// silently invalid ChannelType would otherwise either fail deep inside domain
-// validation with a confusing error (create/update) or silently match zero rows
-// (filter[type]).
-func ToDomainChannelType(v api.NotificationChannelType) (notification.ChannelType, error) {
+// ToDomainChannelType validates the V3 type before it reaches service inputs or filters.
+func ToDomainChannelType(v apiv3models.BillingNotificationChannelType) (notification.ChannelType, error) {
 	switch v {
-	case api.NotificationChannelTypeWebhook:
+	case apiv3models.BillingNotificationChannelTypeWebhook:
 		return notification.ChannelTypeWebhook, nil
 	default:
 		return "", models.NewGenericValidationError(fmt.Errorf("invalid notification channel type: %s", v))
@@ -50,23 +44,23 @@ func ToDomainChannelType(v api.NotificationChannelType) (notification.ChannelTyp
 }
 
 // ToAPIChannelType maps the domain ChannelType to the v3 wire-format channel type.
-func ToAPIChannelType(v notification.ChannelType) (api.NotificationChannelType, error) {
+func ToAPIChannelType(v notification.ChannelType) (apiv3models.BillingNotificationChannelType, error) {
 	switch v {
 	case notification.ChannelTypeWebhook:
-		return api.NotificationChannelTypeWebhook, nil
+		return apiv3models.BillingNotificationChannelTypeWebhook, nil
 	default:
 		return "", fmt.Errorf("invalid notification channel type: %s", v)
 	}
 }
 
 // ToAPIChannel maps a domain Channel to its v3 API representation.
-func ToAPIChannel(c notification.Channel) (api.NotificationChannel, error) {
+func ToAPIChannel(c notification.Channel) (apiv3models.BillingNotificationChannel, error) {
 	apiType, err := ToAPIChannelType(c.Type)
 	if err != nil {
-		return api.NotificationChannel{}, err
+		return apiv3models.BillingNotificationChannel{}, err
 	}
 
-	channel := api.NotificationChannel{
+	channel := apiv3models.BillingNotificationChannel{
 		Id:        c.ID,
 		Name:      c.Name,
 		Type:      apiType,
@@ -91,7 +85,7 @@ func ToAPIChannel(c notification.Channel) (api.NotificationChannel, error) {
 }
 
 // FromAPICreateChannelRequest maps a v3 create request body to the domain input.
-func FromAPICreateChannelRequest(ns string, body api.CreateNotificationChannelRequest) (notification.CreateChannelInput, error) {
+func FromAPICreateChannelRequest(ns string, body apiv3models.CreateNotificationChannelRequest) (notification.CreateChannelInput, error) {
 	domainType, err := ToDomainChannelType(body.Type)
 	if err != nil {
 		return notification.CreateChannelInput{}, err
@@ -125,7 +119,7 @@ func FromAPICreateChannelRequest(ns string, body api.CreateNotificationChannelRe
 // the wire, while an omitted disabled/labels/custom_headers resets the field. An
 // omitted signing_secret maps to the empty string, which the service layer treats
 // as "keep the current secret" — the credential is never cleared by omission.
-func FromAPIUpdateChannelRequest(ns string, id string, body api.UpdateNotificationChannelRequest) (notification.UpdateChannelInput, error) {
+func FromAPIUpdateChannelRequest(ns string, id string, body apiv3models.UpdateBillingNotificationChannelRequest) (notification.UpdateChannelInput, error) {
 	ma, err := labels.ToMetadataAnnotations(body.Labels)
 	if err != nil {
 		return notification.UpdateChannelInput{}, err
@@ -159,12 +153,8 @@ func FromAPIUpdateChannelRequest(ns string, id string, body api.UpdateNotificati
 	}, nil
 }
 
-// mapAPIChannelTypeFilter translates a Type filter's wire-format values ("webhook")
-// into the domain/DB value ("WEBHOOK") so filter[type][eq]=webhook actually matches
-// rows in the notification_channels table (the column stores the uppercase domain
-// value, not the wire value). filters.FromAPIFilterStringExact always produces a
-// single flat *filter.FilterString (never And-wrapped), so only Eq/Ne/In need
-// translating here.
+// mapAPIChannelTypeFilter rejects unsupported types rather than silently matching no rows.
+// The HTTP parser supplies flat Eq/Ne/In predicates.
 func mapAPIChannelTypeFilter(f *filter.FilterString) (*filter.FilterString, error) {
 	if f == nil {
 		return nil, nil
@@ -173,30 +163,34 @@ func mapAPIChannelTypeFilter(f *filter.FilterString) (*filter.FilterString, erro
 	mapped := *f
 
 	if f.Eq != nil {
-		v, err := ToDomainChannelType(api.NotificationChannelType(*f.Eq))
+		v, err := ToDomainChannelType(apiv3models.BillingNotificationChannelType(*f.Eq))
 		if err != nil {
 			return nil, err
 		}
+
 		mapped.Eq = lo.ToPtr(string(v))
 	}
 
 	if f.Ne != nil {
-		v, err := ToDomainChannelType(api.NotificationChannelType(*f.Ne))
+		v, err := ToDomainChannelType(apiv3models.BillingNotificationChannelType(*f.Ne))
 		if err != nil {
 			return nil, err
 		}
+
 		mapped.Ne = lo.ToPtr(string(v))
 	}
 
 	if f.In != nil {
 		values := make([]string, 0, len(*f.In))
 		for _, raw := range *f.In {
-			v, err := ToDomainChannelType(api.NotificationChannelType(raw))
+			v, err := ToDomainChannelType(apiv3models.BillingNotificationChannelType(raw))
 			if err != nil {
 				return nil, err
 			}
+
 			values = append(values, string(v))
 		}
+
 		mapped.In = &values
 	}
 

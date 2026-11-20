@@ -21,14 +21,13 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/appcustominvoicingcustomer"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/appstripe"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/appstripecustomer"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/appstripeinvoicegeneration"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/balancesnapshot"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billingcustomerlock"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billingcustomeroverride"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinggatheringinvoiceline"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoice"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceflatfeelineconfig"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceline"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicelinediscount"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicelineusagediscount"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoicesplitlinegroup"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/billinginvoiceusagebasedlineconfig"
@@ -101,10 +100,10 @@ import (
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscription"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionaddon"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionaddonquantity"
-	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionbillingsyncstate"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptioncostbasispin"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionitem"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionphase"
+	"github.com/openmeterio/openmeter/openmeter/ent/db/subscriptionsyncstate"
 
 	dbtaxcode "github.com/openmeterio/openmeter/openmeter/ent/db/taxcode"
 	"github.com/openmeterio/openmeter/openmeter/ent/db/usagereset"
@@ -176,14 +175,13 @@ func checkColumn(t, c string) error {
 			appcustomer.Table:                                      appcustomer.ValidColumn,
 			appstripe.Table:                                        appstripe.ValidColumn,
 			appstripecustomer.Table:                                appstripecustomer.ValidColumn,
+			appstripeinvoicegeneration.Table:                       appstripeinvoicegeneration.ValidColumn,
 			balancesnapshot.Table:                                  balancesnapshot.ValidColumn,
 			billingcustomerlock.Table:                              billingcustomerlock.ValidColumn,
 			billingcustomeroverride.Table:                          billingcustomeroverride.ValidColumn,
 			billinggatheringinvoiceline.Table:                      billinggatheringinvoiceline.ValidColumn,
 			billinginvoice.Table:                                   billinginvoice.ValidColumn,
-			billinginvoiceflatfeelineconfig.Table:                  billinginvoiceflatfeelineconfig.ValidColumn,
 			billinginvoiceline.Table:                               billinginvoiceline.ValidColumn,
-			billinginvoicelinediscount.Table:                       billinginvoicelinediscount.ValidColumn,
 			billinginvoicelineusagediscount.Table:                  billinginvoicelineusagediscount.ValidColumn,
 			billinginvoicesplitlinegroup.Table:                     billinginvoicesplitlinegroup.ValidColumn,
 			billinginvoiceusagebasedlineconfig.Table:               billinginvoiceusagebasedlineconfig.ValidColumn,
@@ -253,10 +251,10 @@ func checkColumn(t, c string) error {
 			subscription.Table:                                     subscription.ValidColumn,
 			subscriptionaddon.Table:                                subscriptionaddon.ValidColumn,
 			subscriptionaddonquantity.Table:                        subscriptionaddonquantity.ValidColumn,
-			subscriptionbillingsyncstate.Table:                     subscriptionbillingsyncstate.ValidColumn,
 			subscriptioncostbasispin.Table:                         subscriptioncostbasispin.ValidColumn,
 			subscriptionitem.Table:                                 subscriptionitem.ValidColumn,
 			subscriptionphase.Table:                                subscriptionphase.ValidColumn,
+			subscriptionsyncstate.Table:                            subscriptionsyncstate.ValidColumn,
 			dbtaxcode.Table:                                        dbtaxcode.ValidColumn,
 			usagereset.Table:                                       usagereset.ValidColumn,
 		})

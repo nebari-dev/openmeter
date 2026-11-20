@@ -61,7 +61,7 @@ func (s *service) PlanLegacyCorrection(ctx context.Context, input advance.Legacy
 		}
 
 		if attribution == nil {
-			return out, fmt.Errorf("backing group %s has no receivable attribution matching the collected source", group.ID().ID)
+			return out, models.NewError(ledger.ErrCodeAdvanceFailed, fmt.Sprintf("backing group %s has no receivable attribution matching the collected source", group.ID().ID), models.WithAttribute("reason", "ledger_advance_receivable_attribution_missing"))
 		}
 
 		out.LegacyCorrections = append(out.LegacyCorrections, transactions.CorrectionInput{
@@ -71,7 +71,7 @@ func (s *service) PlanLegacyCorrection(ctx context.Context, input advance.Legacy
 			OriginalGroup:       group,
 		})
 
-		out.Inputs, out.BreakagePending, err = s.resolveAdvanceBackfillBreakageReopenInputs(ctx, input, group, input.Amount)
+		out.Inputs, err = s.resolveAdvanceBackfillBreakageReopenInputs(ctx, input, group, input.Amount)
 		if err != nil {
 			return out, err
 		}
@@ -140,18 +140,17 @@ func (s *service) reissueBackfilledCredit(ctx context.Context, input advance.Leg
 	return out, nil
 }
 
-func (s *service) resolveAdvanceBackfillBreakageReopenInputs(ctx context.Context, input advance.LegacyCorrectionInput, backingGroup ledger.TransactionGroup, amount alpacadecimal.Decimal) ([]ledger.TransactionInput, []breakage.PendingRecord, error) {
+func (s *service) resolveAdvanceBackfillBreakageReopenInputs(ctx context.Context, input advance.LegacyCorrectionInput, backingGroup ledger.TransactionGroup, amount alpacadecimal.Decimal) ([]ledger.TransactionInput, error) {
 	releases, err := s.breakage.ListReleases(ctx, breakage.ListReleasesInput{
 		CustomerID:               input.CustomerID,
 		SourceTransactionGroupID: []string{backingGroup.ID().ID},
 		ReleaseSourceKind:        []breakage.SourceKind{breakage.SourceKindAdvanceBackfill},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("list advance-backfill breakage releases: %w", err)
+		return nil, fmt.Errorf("list advance-backfill breakage releases: %w", err)
 	}
 
 	inputs := make([]ledger.TransactionInput, 0, len(releases))
-	pending := make([]breakage.PendingRecord, 0, len(releases))
 	releaseFactsByTransactionID := breakageReleaseFactsByTransactionID(backingGroup)
 	remaining := amount
 	for _, release := range releases {
@@ -168,7 +167,9 @@ func (s *service) resolveAdvanceBackfillBreakageReopenInputs(ctx context.Context
 		if releaseFacts.SpendChargeID != nil && *releaseFacts.SpendChargeID != input.ChargeID {
 			continue
 		}
-		reopenInput, reopenRecord, err := s.breakage.ReopenRelease(ctx, breakage.ReopenReleaseInput{
+
+		reopenInput, err := s.breakage.ReopenRelease(ctx, breakage.ReopenReleaseInput{
+			PostingInput:   input.BreakagePosting,
 			Release:        release,
 			Amount:         reopenAmount,
 			SourceKind:     breakage.SourceKindUsageCorrection,
@@ -176,15 +177,14 @@ func (s *service) resolveAdvanceBackfillBreakageReopenInputs(ctx context.Context
 			SpendChargeID:  releaseFacts.SpendChargeID,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("resolve advance-backfill breakage reopen: %w", err)
+			return nil, fmt.Errorf("resolve advance-backfill breakage reopen: %w", err)
 		}
 
 		inputs = append(inputs, reopenInput)
-		pending = append(pending, reopenRecord)
 		remaining = remaining.Sub(reopenAmount)
 	}
 
-	return inputs, pending, nil
+	return inputs, nil
 }
 
 func breakageReleaseFactsByTransactionID(group ledger.TransactionGroup) map[string]ledger.EntryIdentityParts {
@@ -202,6 +202,7 @@ func breakageReleaseFactsByTransactionID(group ledger.TransactionGroup) map[stri
 					SpendChargeID:  entry.Provenance().SpendChargeID,
 				},
 			}
+
 			break
 		}
 	}
@@ -271,5 +272,5 @@ func (s *service) backfilledCreditReissueRoute(group ledger.TransactionGroup) (b
 		}, nil
 	}
 
-	return backfilledCreditReissueRouteResult{}, fmt.Errorf("backing transaction group %s does not contain a known cost basis route", group.ID().ID)
+	return backfilledCreditReissueRouteResult{}, models.NewError(ledger.ErrCodeAdvanceFailed, fmt.Sprintf("backing transaction group %s does not contain a known cost basis route", group.ID().ID), models.WithAttribute("reason", "ledger_advance_cost_basis_route_missing"))
 }

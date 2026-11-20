@@ -418,6 +418,7 @@ func TestV3ListBillingInvoices(t *testing.T) {
 			if err != nil {
 				return false
 			}
+
 			return stdInv.ID == invoiceID
 		})
 		assert.True(t, found, "invoice %s must appear when filtered by customer %s", invoiceID, customerID)
@@ -566,6 +567,7 @@ func TestV3UpdateBillingInvoice(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(false)
 
 			sendInvoice := lo.Must(v3sdk.WorkflowPaymentSettingsFromWorkflowPaymentSendInvoiceSettings(v3sdk.WorkflowPaymentSendInvoiceSettings{
@@ -575,7 +577,7 @@ func TestV3UpdateBillingInvoice(t *testing.T) {
 		})
 
 		_, err := c.Customers.Billing.Update(t.Context(), customerID, v3sdk.UpsertCustomerBillingDataRequest{
-			BillingProfile: &v3sdk.ProfileReference{ID: profile.ID},
+			BillingProfile: v3sdk.NullableValue(v3sdk.ProfileReference{ID: profile.ID}),
 		})
 		c.requireStatus(http.StatusOK, err)
 	})
@@ -866,6 +868,7 @@ func TestV3UpdateBillingInvoice(t *testing.T) {
 				assert.Equal(t, "15", p.Amount)
 			}
 		}
+
 		assert.True(t, found, "expected the newly added line %q to appear in the updated invoice", newLineName)
 	})
 }
@@ -1021,6 +1024,7 @@ func TestV3DeleteBillingInvoice(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(false)
 
 			sendInvoice := lo.Must(v3sdk.WorkflowPaymentSettingsFromWorkflowPaymentSendInvoiceSettings(v3sdk.WorkflowPaymentSendInvoiceSettings{
@@ -1030,7 +1034,7 @@ func TestV3DeleteBillingInvoice(t *testing.T) {
 		})
 
 		_, err := c.Customers.Billing.Update(t.Context(), customerID, v3sdk.UpsertCustomerBillingDataRequest{
-			BillingProfile: &v3sdk.ProfileReference{ID: profile.ID},
+			BillingProfile: v3sdk.NullableValue(v3sdk.ProfileReference{ID: profile.ID}),
 		})
 		c.requireStatus(http.StatusOK, err)
 	})
@@ -1236,6 +1240,7 @@ func TestV3AdvanceBillingInvoice(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(true)
 			profile.Workflow.Invoicing.DraftPeriod = lo.ToPtr("PT5S")
 
@@ -1246,7 +1251,7 @@ func TestV3AdvanceBillingInvoice(t *testing.T) {
 		})
 
 		_, err := c.Customers.Billing.Update(t.Context(), customerID, v3sdk.UpsertCustomerBillingDataRequest{
-			BillingProfile: &v3sdk.ProfileReference{ID: profile.ID},
+			BillingProfile: v3sdk.NullableValue(v3sdk.ProfileReference{ID: profile.ID}),
 		})
 		c.requireStatus(http.StatusOK, err)
 	})
@@ -1325,7 +1330,7 @@ func pinBillingProfileFromDefault(t *testing.T, c *v3Client, customerID, keyPref
 	profile := createNewBillingProfileFromDefault(t, c, keyPrefix, edit)
 
 	_, err := c.Customers.Billing.Update(t.Context(), customerID, v3sdk.UpsertCustomerBillingDataRequest{
-		BillingProfile: &v3sdk.ProfileReference{ID: profile.ID},
+		BillingProfile: v3sdk.NullableValue(v3sdk.ProfileReference{ID: profile.ID}),
 	})
 	c.requireStatus(http.StatusOK, err)
 
@@ -1432,6 +1437,7 @@ func TestV3ApproveBillingInvoice(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(true)
 			profile.Workflow.Invoicing.DraftPeriod = lo.ToPtr("PT5M")
 
@@ -1507,6 +1513,7 @@ func TestV3ApproveBillingInvoice(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(false)
 
 			sendInvoice := lo.Must(v3sdk.WorkflowPaymentSettingsFromWorkflowPaymentSendInvoiceSettings(v3sdk.WorkflowPaymentSendInvoiceSettings{
@@ -1600,6 +1607,7 @@ func TestV3RetryBillingInvoice(t *testing.T) {
 			if profile.Workflow.Invoicing == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Invoicing.AutoAdvance = lo.ToPtr(true)
 			profile.Workflow.Invoicing.DraftPeriod = lo.ToPtr("PT5M")
 
@@ -1701,6 +1709,7 @@ func TestV3SnapshotQuantitiesBillingInvoice(t *testing.T) {
 			if profile.Workflow.Collection == nil {
 				profile.Workflow.Invoicing = &v3sdk.WorkflowInvoicingSettings{}
 			}
+
 			profile.Workflow.Collection.Interval = lo.ToPtr("P1D")
 
 			sendInvoice := lo.Must(v3sdk.WorkflowPaymentSettingsFromWorkflowPaymentSendInvoiceSettings(v3sdk.WorkflowPaymentSendInvoiceSettings{
