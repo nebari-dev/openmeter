@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -104,7 +105,10 @@ func NewTestEnv(t *testing.T, ctx context.Context) (TestEnv, error) {
 	}
 
 	// Secret
-	secretAdapter := secretadapter.New()
+	secretAdapter, err := secretadapter.NewEncrypted(bytes.Repeat([]byte{1}, secretadapter.KeySize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret adapter: %w", err)
+	}
 
 	secretService, err := secretservice.New(secretservice.Config{
 		Adapter: secretAdapter,

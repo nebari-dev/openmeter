@@ -917,7 +917,10 @@ func (s *AppHandlerTestSuite) TestGetWebhookSecret(ctx context.Context, t *testi
 	testApp, err := s.Env.Fixture().setupApp(ctx, s.namespace)
 	require.NoError(t, err, "setup fixture must not return error")
 
-	secretID := secretentity.NewSecretID(testApp.GetID(), "whsec_123", appstripe.WebhookSecretKey)
+	stripeApp, ok := testApp.(appstripe.App)
+	require.True(t, ok)
+
+	secretID := stripeApp.WebhookSecret
 	expected := secretentity.Secret{
 		SecretID: secretID,
 		Value:    "whsec_cached",

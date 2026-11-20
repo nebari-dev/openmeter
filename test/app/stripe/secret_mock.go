@@ -1,6 +1,7 @@
 package appstripe
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -16,7 +17,10 @@ import (
 var _ secret.SecretService = (*MockSecretService)(nil)
 
 func NewMockSecretService() (*MockSecretService, error) {
-	secretAdapter := secretadapter.New()
+	secretAdapter, err := secretadapter.NewEncrypted(bytes.Repeat([]byte{1}, secretadapter.KeySize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret adapter: %w", err)
+	}
 
 	secretService, err := secretservice.New(secretservice.Config{
 		Adapter: secretAdapter,
